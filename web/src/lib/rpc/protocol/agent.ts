@@ -3,6 +3,8 @@
 
 import type { JsonValue } from './common';
 import type { ErrorReason } from './error';
+import type { CreateGroupRequest } from './queue';
+import type { CreateTaskRequest } from './task';
 
 // ── 账号 ──
 
@@ -422,6 +424,20 @@ export interface PendingCaptureDto {
   hasCookies: boolean;
   /** 携带的请求头名（不含值）。 */
   headerNames: string[];
+}
+
+/** 只读捕获预解析；不消费事务，原 URL/method/body/audioUrl 不可被表单覆盖。 */
+export interface CapturePreviewParams {
+  transactionId: string;
+  request: CreateTaskRequest;
+}
+
+/** 最终清单选择建组；成功后消费事务，sourceUrl 恒取捕获原 URL。 */
+export interface CaptureCreateGroupParams {
+  transactionId: string;
+  request: CreateGroupRequest;
+  /** 原表单 HTTP Basic 凭据，非空用户名覆盖浏览器 Authorization。 */
+  context: CreateTaskRequest;
 }
 
 /**

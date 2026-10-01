@@ -829,6 +829,28 @@ pub struct CaptureResolveParams {
     pub request: Option<crate::daemon::CreateTaskRequest>,
 }
 
+/// `agent.capture.preview` 参数。只读预解析，不消费捕获事务。
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct CapturePreviewParams {
+    pub transaction_id: String,
+    /// 表单上下文；捕获原 URL / method / body / audioUrl 不可被覆盖。
+    pub request: crate::daemon::CreateTaskRequest,
+}
+
+/// `agent.capture.createGroup` 参数。成功建组后单次消费捕获事务。
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct CaptureCreateGroupParams {
+    pub transaction_id: String,
+    /// 最终清单选择与组级选项；sourceUrl 恒取捕获原 URL。
+    pub request: crate::daemon::CreateGroupRequest,
+    /// 原表单 HTTP Basic 凭据；非空用户名覆盖浏览器 Authorization。
+    pub context: crate::daemon::CreateTaskRequest,
+}
+
 /// `agent.capture.submitTorrentFile` 参数。
 ///
 /// `silent=true`（系统打开 / 关联启动）全选文件直接建任务；`silent=false`（用户主动选择）

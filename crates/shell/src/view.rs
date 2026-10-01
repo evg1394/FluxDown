@@ -1,12 +1,15 @@
 use std::rc::Rc;
 
-use fluxdown_ui_components::{activity_button as activity_bar_button, nav_icon_color};
+use fluxdown_ui_components::{
+    FluxIcon, SidebarState, activity_button as activity_bar_button, nav_icon_color,
+    toolbar_action_button,
+};
 use fluxdown_ui_i18n::Translator;
 use fluxdown_ui_theme::active_theme;
 use gpui::{
     AnyElement, AnyView, App, Context, Div, Entity, Font, FontWeight, InteractiveElement as _,
     IntoElement, MouseButton, ParentElement, Pixels, Render, SharedString,
-    StatefulInteractiveElement as _, Styled, TextRun, Window, div, img, px,
+    StatefulInteractiveElement as _, Styled, TextRun, Window, div, img, percentage, px,
 };
 use gpui_component::{
     Icon, TITLE_BAR_HEIGHT, TitleBar, h_flex, menu::AppMenuBar, tooltip::Tooltip, v_flex,
@@ -36,6 +39,8 @@ pub struct ShellRoute {
     view: AnyView,
     /// 路由活跃时渲染在统一顶栏中的插槽（靠右内容由插槽自己排布）。
     title_bar: Option<AnyView>,
+    /// 页面独立侧栏状态；由 shell 统一提供顶栏收起 / 展开入口。
+    sidebar: Option<Entity<SidebarState>>,
     /// 可选路由参与活动栏「是否整体渲染」的判定；固定路由（如下载）不参与。
     optional: bool,
     visible: bool,
@@ -59,6 +64,7 @@ impl ShellRoute {
             icon,
             view,
             title_bar: None,
+            sidebar: None,
             optional: false,
             visible: true,
         }
@@ -75,6 +81,12 @@ impl ShellRoute {
     /// 插槽内可交互元素须自行拦截左键 `mouse_down` 冒泡，空白处保持窗口拖拽 / 双击。
     pub fn with_title_bar(mut self, view: impl Into<AnyView>) -> Self {
         self.title_bar = Some(view.into());
+        self
+    }
+
+    /// 为有侧边菜单的路由登记共享侧栏状态；按钮位置与行为由 shell 统一管理。
+    pub fn with_sidebar(mut self, sidebar: Entity<SidebarState>) -> Self {
+        self.sidebar = Some(sidebar);
         self
     }
 }
@@ -351,6 +363,17 @@ impl ShellView {
     ) -> Self {
         let active_route = routes.first().map(|route| route.id);
         cx.observe(&translator, |_, _, cx| cx.notify()).detach();
+        for route in &routes {
+            if let Some(sidebar) = &route.sidebar {
+                let route_id = route.id;
+                cx.observe(sidebar, move |this, _, cx| {
+                    if this.active_route == Some(route_id) {
+                        cx.notify();
+                    }
+                })
+                .detach();
+            }
+        }
         Self {
             translator,
             active_route,
@@ -417,6 +440,12 @@ impl ShellView {
                 }))
         });
         let slot = self.active_title_bar();
+        let sidebar_toggle = self
+            .active_route
+            .and_then(|id| self.routes.iter().find(|route| route.id == id))
+            .and_then(|route| route.sidebar.as_ref())
+            .filter(|sidebar| sidebar.read(cx).is_available())
+            .map(|sidebar| self.render_sidebar_toggle(sidebar, cx));
         let title_bar = TitleBar::new();
         #[cfg(not(target_os = "macos"))]
         let title_bar = title_bar.pl(spacing.sm);
@@ -435,6 +464,7 @@ impl ShellView {
                     .gap(spacing.sm)
                     .pr(if is_macos { spacing.md } else { spacing.sm })
                     .children(leading)
+                    .children(sidebar_toggle)
                     .child(
                         h_flex()
                             .h_full()
@@ -443,6 +473,41 @@ impl ShellView {
                             .items_center()
                             .children(slot),
                     ),
+            )
+    }
+
+    fn render_sidebar_toggle(
+        &self,
+        sidebar: &Entity<SidebarState>,
+        cx: &App,
+    ) -> impl IntoElement + use<> {
+        let key = if sidebar.read(cx).is_collapsed() {
+            "expandSidebar"
+        } else {
+            "collapseSidebar"
+        };
+        let label = SharedString::from(self.translator.read(cx).text(key).to_owned());
+        let state = sidebar.clone();
+        div()
+            .id("shell-sidebar-toggle-tooltip")
+            .flex_none()
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .tooltip({
+                let label = label.clone();
+                move |window, cx| Tooltip::new(label.clone()).build(window, cx)
+            })
+            .child(
+                toolbar_action_button(
+                    "shell-sidebar-toggle",
+                    label,
+                    Icon::new(FluxIcon::PanelRight)
+                        .size(active_theme(cx).extended().icon.md)
+                        .rotate(percentage(0.5)),
+                    false,
+                    false,
+                    cx,
+                )
+                .on_click(move |_, _, cx| state.update(cx, |state, cx| state.toggle(cx))),
             )
     }
 

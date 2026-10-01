@@ -8,7 +8,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::Instant;
 
 use super::{LiveSegment, SegState};
 use crate::auto_proxy::{AutoProxyCtx, RoutePath, route};
@@ -33,10 +33,12 @@ struct Track {
     node_id: usize,
     /// 上个窗口边界时该段的已下字节。
     last_bytes: i64,
+    /// 上个完整窗口边界；初值为租约开始时刻。
+    last_at: Instant,
     /// 已跨越的完整窗口数（1 = 首个完整窗口，慢启动预热）。
     windows: u32,
-    /// 最近一个完整窗口的字节增量。
-    last_delta: i64,
+    /// 本次完整窗口的字节增量；初始窗口尚不足完整时长时为 `None`。
+    last_delta: Option<i64>,
     /// 最近一个完整窗口的稳态速率（预热窗/限速窗为 `None`）。
     last_rate: Option<f64>,
     preempted: bool,
@@ -275,7 +277,7 @@ impl Multipath {
         &mut self,
         nodes: &NodePool,
         segments: &mut BTreeMap<i32, LiveSegment>,
-        window: Duration,
+        now: Instant,
         guards: &TickGuards,
         task_id: &str,
     ) -> TickReport {
@@ -290,27 +292,32 @@ impl Multipath {
                 continue;
             };
             let current = seg.downloaded_bytes;
-            let mut track = match self.tracks.remove(&conn.lease_id) {
-                Some(mut track) => {
-                    let delta = (current - track.last_bytes).max(0);
-                    track.last_bytes = current;
-                    track.last_delta = delta;
-                    track.windows = track.windows.saturating_add(1);
-                    track.last_rate = (guards.sampling && track.windows >= MIN_SAMPLE_WINDOWS)
-                        .then(|| window_rate(delta, window));
-                    track
-                }
-                // 首次见到：窗口起点未知，只建立基线。
-                None => Track {
-                    seg_index: conn.seg_index,
-                    node_id: conn.node_id,
-                    last_bytes: current,
-                    last_delta: 0,
-                    windows: 0,
-                    last_rate: None,
-                    preempted: false,
-                },
-            };
+            let mut track = self.tracks.remove(&conn.lease_id).unwrap_or(Track {
+                seg_index: conn.seg_index,
+                node_id: conn.node_id,
+                last_bytes: conn.start_downloaded,
+                last_at: conn.started_at,
+                last_delta: None,
+                windows: 0,
+                last_rate: None,
+                preempted: false,
+            });
+            // 租约出生时已有准确的字节/时刻基线，不再白等一个 ramp 窗口。
+            // 很晚才出生的连接仍须积满完整预热窗；不能把不足一窗的零增量
+            // 当停滞，也不能把预热字节混入下一个稳态样本。
+            let elapsed = now.saturating_duration_since(track.last_at);
+            if elapsed.as_millis() >= super::RAMP_MIN_EVAL_WINDOW_MS {
+                let delta = (current - track.last_bytes).max(0);
+                track.last_bytes = current;
+                track.last_at = now;
+                track.last_delta = Some(delta);
+                track.windows = track.windows.saturating_add(1);
+                track.last_rate = (guards.sampling && track.windows >= MIN_SAMPLE_WINDOWS)
+                    .then(|| window_rate(delta, elapsed));
+            } else {
+                track.last_delta = None;
+                track.last_rate = None;
+            }
             if let Some(rate) = track.last_rate {
                 samples.push((track.node_id, rate));
                 if seg.state == SegState::Active {
@@ -366,7 +373,7 @@ impl Multipath {
             // 稳态样本，或首个完整窗口即零字节（停滞无需等慢启动）。
             let rate = match track.last_rate {
                 Some(rate) => rate,
-                None if track.windows >= 1 && guards.sampling && track.last_delta == 0 => 0.0,
+                None if track.windows >= 1 && guards.sampling && track.last_delta == Some(0) => 0.0,
                 None => continue,
             };
             let remaining = seg.remaining();
@@ -526,6 +533,7 @@ pub(super) fn in_flight(
 mod tests {
     use super::*;
     use crate::auto_proxy::CandidateSource;
+    use std::time::Duration;
 
     const MANUAL: RoutePath = RoutePath::Proxy(CandidateSource::ManualFields);
 
@@ -652,16 +660,245 @@ mod tests {
             protected_seg: None,
         };
         let mut mp = Multipath::new(None, None, "https://example.com/f", &pool, "t");
+        let started = pool
+            .live_conns()
+            .iter()
+            .map(|conn| conn.started_at)
+            .max()
+            .expect("live leases");
         // 每窗 1s 下 1MB：稳态 1MB/s，远慢于最优 10MB/s 的一半 → 两条都满足抢占判据；
         // 被抢占的租约在测试里一直未归还，模拟 worker 尚未退出的交接窗口。
-        for _ in 0..6 {
+        for tick in 1..=6 {
             for seg in segments.values_mut() {
                 seg.downloaded_bytes += 1_000_000;
             }
-            mp.on_tick(&pool, &mut segments, Duration::from_secs(1), &guards, "t");
+            mp.on_tick(
+                &pool,
+                &mut segments,
+                started + Duration::from_secs(tick),
+                &guards,
+                "t",
+            );
         }
         let cancelled = held[..2].iter().filter(|(_, c)| c.is_cancelled()).count();
         assert_eq!(cancelled, 1, "链路两条慢连接只能交出一条，最后一条保留");
+    }
+
+    struct ProxySamplingFixture {
+        pool: Arc<NodePool>,
+        held: Vec<HeldLease>,
+        segments: BTreeMap<i32, LiveSegment>,
+        started: Instant,
+    }
+
+    fn proxy_sampling_fixture(start_downloaded: i64) -> ProxySamplingFixture {
+        use crate::cdn::node_pool::LeaseRequest;
+        let pool = NodePool::single(reqwest::Client::new());
+        pool.add_paths(
+            RoutePath::Direct,
+            None,
+            vec![(MANUAL, reqwest::Client::new(), None)],
+        );
+        pool.set_explore(true);
+        let mut held = Vec::new();
+        for seg_index in 0..2 {
+            let cancel = tokio_util::sync::CancellationToken::new();
+            let lease = pool.lease_for(LeaseRequest {
+                seg_index,
+                start_downloaded: if seg_index == 1 { start_downloaded } else { 0 },
+                bytes: 32 * 1024 * 1024,
+                allow_alternates: seg_index == 1,
+                cancel: cancel.clone(),
+            });
+            held.push((lease, cancel));
+        }
+        assert_eq!(held[1].0.route(), MANUAL);
+        pool.observe_window(&[(0, 3.0 * 1024.0 * 1024.0)]);
+        let started = pool
+            .live_conns()
+            .into_iter()
+            .find(|conn| conn.seg_index == 1)
+            .expect("proxy lease")
+            .started_at;
+        let segments = [(
+            1,
+            LiveSegment {
+                index: 1,
+                start_byte: 0,
+                end_byte: 32 * 1024 * 1024 - 1,
+                downloaded_bytes: start_downloaded,
+                state: SegState::Active,
+                rate_bps: None,
+            },
+        )]
+        .into();
+        ProxySamplingFixture {
+            pool,
+            held,
+            segments,
+            started,
+        }
+    }
+
+    fn sampling_guards(sampling: bool) -> TickGuards {
+        TickGuards {
+            sampling,
+            may_reroute: true,
+            remaining_total: i64::MAX,
+            protected_seg: None,
+        }
+    }
+
+    fn minimum_sampling_window() -> Duration {
+        Duration::from_millis(
+            u64::try_from(super::super::RAMP_MIN_EVAL_WINDOW_MS).expect("sampling window fits u64"),
+        )
+    }
+
+    #[test]
+    fn lease_origin_preserves_first_warmup_and_actual_sample_duration() {
+        let resumed = 16 * 1024;
+        let mut f = proxy_sampling_fixture(resumed);
+        let mut mp = Multipath::new(None, None, "https://example.com/f", &f.pool, "t");
+        let guards = sampling_guards(true);
+        f.segments.get_mut(&1).unwrap().downloaded_bytes += 2048;
+        mp.on_tick(
+            &f.pool,
+            &mut f.segments,
+            f.started + Duration::from_secs(2),
+            &guards,
+            "t",
+        );
+        assert!(!f.held[1].1.is_cancelled(), "nonzero warmup is not a stall");
+        assert_eq!(
+            f.segments[&1].rate_bps, None,
+            "warmup must not become a rate sample"
+        );
+
+        // A delayed tick must use its actual 3s interval, not the nominal 2s ramp.
+        f.segments.get_mut(&1).unwrap().downloaded_bytes += 3 * 2048;
+        mp.on_tick(
+            &f.pool,
+            &mut f.segments,
+            f.started + Duration::from_secs(5),
+            &guards,
+            "t",
+        );
+        assert_eq!(f.segments[&1].rate_bps, Some(2048.0));
+        assert!(
+            f.held[1].1.is_cancelled(),
+            "first steady window must reclaim the slow lease"
+        );
+        assert!(!f.held[0].1.is_cancelled());
+    }
+
+    #[test]
+    fn short_initial_ticks_accumulate_a_complete_warmup_before_sampling() {
+        let mut f = proxy_sampling_fixture(0);
+        let mut mp = Multipath::new(None, None, "https://example.com/f", &f.pool, "t");
+        let guards = sampling_guards(true);
+        let window = minimum_sampling_window();
+        for elapsed in [window / 5, window * 4 / 5] {
+            mp.on_tick(&f.pool, &mut f.segments, f.started + elapsed, &guards, "t");
+            assert!(
+                !f.held[1].1.is_cancelled(),
+                "short zero-byte window is not a stall"
+            );
+            assert_eq!(f.segments[&1].rate_bps, None);
+        }
+        f.segments.get_mut(&1).unwrap().downloaded_bytes = 1024;
+        mp.on_tick(&f.pool, &mut f.segments, f.started + window, &guards, "t");
+        assert!(
+            !f.held[1].1.is_cancelled(),
+            "first complete window is warmup only"
+        );
+        assert_eq!(f.segments[&1].rate_bps, None);
+
+        // A partial window following warmup cannot trigger early preemption.
+        mp.on_tick(
+            &f.pool,
+            &mut f.segments,
+            f.started + window * 8 / 5,
+            &guards,
+            "t",
+        );
+        assert!(!f.held[1].1.is_cancelled());
+        f.segments.get_mut(&1).unwrap().downloaded_bytes += 1024;
+        mp.on_tick(
+            &f.pool,
+            &mut f.segments,
+            f.started + window * 2,
+            &guards,
+            "t",
+        );
+        assert_eq!(f.segments[&1].rate_bps, Some(1024.0 / window.as_secs_f64()));
+        assert!(
+            f.held[1].1.is_cancelled(),
+            "second complete window must reclaim the slow lease"
+        );
+    }
+
+    #[test]
+    fn limited_windows_are_excluded_from_rates_and_stall_preemption() {
+        let mut f = proxy_sampling_fixture(0);
+        let mut mp = Multipath::new(None, None, "https://example.com/f", &f.pool, "t");
+        let limited = sampling_guards(false);
+        // Even a zero-byte initial window under an active limiter is not path evidence.
+        mp.on_tick(
+            &f.pool,
+            &mut f.segments,
+            f.started + Duration::from_secs(2),
+            &limited,
+            "t",
+        );
+        assert!(!f.held[1].1.is_cancelled());
+        f.segments.get_mut(&1).unwrap().downloaded_bytes += 64 * 1024;
+        mp.on_tick(
+            &f.pool,
+            &mut f.segments,
+            f.started + Duration::from_secs(4),
+            &limited,
+            "t",
+        );
+        assert_eq!(f.segments[&1].rate_bps, None);
+        assert!(!f.held[1].1.is_cancelled());
+
+        f.segments.get_mut(&1).unwrap().downloaded_bytes += 2 * 2048;
+        mp.on_tick(
+            &f.pool,
+            &mut f.segments,
+            f.started + Duration::from_secs(6),
+            &sampling_guards(true),
+            "t",
+        );
+        assert_eq!(
+            f.segments[&1].rate_bps,
+            Some(2048.0),
+            "limited bytes must not contaminate the next sample"
+        );
+        assert!(f.held[1].1.is_cancelled());
+    }
+
+    #[test]
+    fn truly_stalled_lease_is_cancelled_on_its_first_complete_window() {
+        let mut f = proxy_sampling_fixture(0);
+        let mut mp = Multipath::new(None, None, "https://example.com/f", &f.pool, "t");
+        let guards = sampling_guards(true);
+        let window = minimum_sampling_window();
+        mp.on_tick(
+            &f.pool,
+            &mut f.segments,
+            f.started + window * 2 / 5,
+            &guards,
+            "t",
+        );
+        assert!(!f.held[1].1.is_cancelled());
+        mp.on_tick(&f.pool, &mut f.segments, f.started + window, &guards, "t");
+        assert!(
+            f.held[1].1.is_cancelled(),
+            "a full zero-byte window is real stall evidence"
+        );
+        assert!(!f.held[0].1.is_cancelled());
     }
 
     /// CI 复现：极慢代理的探索段被帮手拆到拆分最小片以下（既分不走、
@@ -717,6 +954,12 @@ mod tests {
         };
         let window = Duration::from_secs(2);
         let mut mp = Multipath::new(None, None, "https://example.com/f", &pool, "t");
+        let started = pool
+            .live_conns()
+            .iter()
+            .map(|conn| conn.started_at)
+            .max()
+            .expect("live leases");
         let mut preempted_at = None;
         for tick in 0..4 {
             if let Some(s) = segments.get_mut(&0) {
@@ -725,14 +968,20 @@ mod tests {
             if let Some(s) = segments.get_mut(&1) {
                 s.downloaded_bytes += 2 * 2048;
             }
-            mp.on_tick(&pool, &mut segments, window, &guards, "t");
+            mp.on_tick(
+                &pool,
+                &mut segments,
+                started + window * (tick + 1),
+                &guards,
+                "t",
+            );
             if preempted_at.is_none() && proxy.1.is_cancelled() {
                 preempted_at = Some((tick, segments[&1].remaining()));
             }
         }
         let (tick, remaining) = preempted_at.expect("slow tail fragment must be preempted");
-        // 首个稳态样本（第 3 窗）即抢占；此时剩余已低于 64KiB。
-        assert_eq!(tick, 2);
+        // 租约首窗已完整跨过预热；第 2 窗的首个稳态样本即抢占。
+        assert_eq!(tick, 1);
         assert!(remaining < 64 * 1024, "remaining = {remaining}");
         assert!(!direct.1.is_cancelled(), "最优路径连接不得被抢占");
     }

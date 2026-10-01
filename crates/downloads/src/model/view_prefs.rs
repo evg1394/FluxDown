@@ -191,6 +191,7 @@ pub(crate) struct ViewPrefs {
     pub(crate) detail_open: bool,
     pub(crate) detail_size: f32,
     pub(crate) sidebar_width: f32,
+    pub(crate) sidebar_collapsed: bool,
     pub(crate) collapsed_groups: Vec<String>,
 }
 
@@ -207,6 +208,7 @@ impl Default for ViewPrefs {
             detail_open: false,
             detail_size: 260.,
             sidebar_width: 200.,
+            sidebar_collapsed: false,
             collapsed_groups: Vec::new(),
         }
     }
@@ -235,6 +237,7 @@ impl ViewPrefs {
         read_field(map, "detail_open", &mut prefs.detail_open);
         read_field(map, "detail_size", &mut prefs.detail_size);
         read_field(map, "sidebar_width", &mut prefs.sidebar_width);
+        read_field(map, "sidebar_collapsed", &mut prefs.sidebar_collapsed);
         read_field(map, "collapsed_groups", &mut prefs.collapsed_groups);
         prefs
     }
@@ -502,6 +505,7 @@ mod tests {
             group_by: ViewGroupBy::Site,
             sort_key: ViewSortKey::Size,
             sort_dir: SortDir::Asc,
+            sidebar_collapsed: true,
             ..ViewPrefs::default()
         };
         prefs.collapsed_groups.push("x".to_owned());

@@ -907,6 +907,12 @@ impl DownloadView {
         }
     }
 
+    pub(crate) fn has_visible_sidebar_section(&self) -> bool {
+        SidebarSection::ALL
+            .into_iter()
+            .any(|section| self.section_visible(section))
+    }
+
     /// 侧栏根：与活动栏同为 `chrome` 底色；与内容区之间的分隔线由页面布局负责。
     pub(crate) fn render_sidebar(
         &self,

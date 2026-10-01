@@ -49,7 +49,9 @@ pub fn open(cx: &mut App) -> Option<WindowHandle<Root>> {
             cx.new(|cx| WebhookView::new(translator.clone(), settings_store.clone(), cx));
         let downloads_title_bar = downloads.update(cx, |downloads, cx| downloads.new_title_bar(cx));
 
-        // RSS / Webhook 暂无顶栏插槽：统一顶栏保持空白拖拽区。
+        let downloads_sidebar = downloads.read(cx).sidebar_state();
+        let rss_sidebar = rss.read(cx).sidebar_state();
+        // Webhook 没有侧边菜单，不登记侧栏；RSS 的切换按钮由 shell 提供。
         let mut routes = Vec::new();
         let mut actions = Vec::new();
         for entry in ActivityEntry::ALL {
@@ -66,6 +68,7 @@ pub fn open(cx: &mut App) -> Option<WindowHandle<Root>> {
                         downloads.clone().into(),
                     )
                     .with_title_bar(downloads_title_bar.clone())
+                    .with_sidebar(downloads_sidebar.clone())
                     .optional(optional),
                 ),
                 ActivityEntry::Rss => routes.push(
@@ -77,6 +80,7 @@ pub fn open(cx: &mut App) -> Option<WindowHandle<Root>> {
                         Icon::new(FluxIcon::Rss),
                         rss.clone().into(),
                     )
+                    .with_sidebar(rss_sidebar.clone())
                     .optional(optional),
                 ),
                 ActivityEntry::Webhooks => routes.push(

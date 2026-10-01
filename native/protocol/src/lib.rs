@@ -21,10 +21,11 @@ pub use task_activity::{
 
 pub use agent::{
     AgentLoginResult, AgentPreferencesDto, AgentPreferencesPatchResult, AgentSessionDto,
-    AuthVerificationDto, CUSTOM_CATEGORIES_PREF_KEY, CaptureResolveParams, CloudDevice,
-    CloudEndpointDto, CloudEndpointSetParams, CloudOrder, CloudPlan, CloudPlanCampaign,
-    CloudPlanCampaignStage, CloudProfile, CloudReferralCode, CloudReferralCodesResult,
-    CloudReferralRecord, CloudReferralRecordsResult, CloudReferralRule, CloudReferralSummary,
+    AuthVerificationDto, CUSTOM_CATEGORIES_PREF_KEY, CaptureCreateGroupParams,
+    CapturePreviewParams, CaptureResolveParams, CloudDevice, CloudEndpointDto,
+    CloudEndpointSetParams, CloudOrder, CloudPlan, CloudPlanCampaign, CloudPlanCampaignStage,
+    CloudProfile, CloudReferralCode, CloudReferralCodesResult, CloudReferralRecord,
+    CloudReferralRecordsResult, CloudReferralRule, CloudReferralSummary,
     CloudReferralValidateResult, CloudUser, CloudUserStatus, CustomCategoryDto, DiagnosticCheckDto,
     DiagnosticLevel, DiagnosticRepairParams, DiagnosticsReportDto, Entitlements,
     FILE_ICON_PER_FILE_EXTENSIONS, GatewayPatchParams, GatewayStatusDto, LinkAddressParams,

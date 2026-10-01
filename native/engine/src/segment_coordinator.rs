@@ -3038,7 +3038,7 @@ pub async fn run_coordinated_download(
                 let mp_report = multipath.on_tick(
                     &nodes,
                     &mut segments,
-                    Duration::from_secs_f64(elapsed),
+                    now,
                     &multipath::TickGuards {
                         sampling: !limiter_active,
                         may_reroute: range_ok_now

@@ -4,6 +4,7 @@ import { Icon, Tooltip } from '../../../ui'
 import { pauseAll, resumeAll } from '../model/actions'
 import { formatBytes } from '../model/task'
 import { useDownloads } from '../state'
+import { ProxyControl } from './ProxyControl'
 import { SpeedLimitControl } from './SpeedLimitControl'
 
 const ACTION =
@@ -18,7 +19,7 @@ function IconCell({ icon, text, className }: { icon: typeof ArrowDown; text: str
   )
 }
 
-/** 状态栏：左 = 全局速度 + 全部暂停 / 全部开始；右 = 下行 / 上行限速、剩余空间。 */
+/** 状态栏：左 = 全局速度 + 全部暂停 / 全部开始；右 = 下行 / 上行限速、代理模式、剩余空间。 */
 export function StatusBar() {
   const t = useT()
   const { connected, runtimeStats } = useDownloads()
@@ -46,6 +47,7 @@ export function StatusBar() {
       <div className="flex shrink-0 items-center gap-1">
         <SpeedLimitControl icon={ArrowDown} titleKey="speedLimitTitle" configKey="speed_limit_bytes" disabled={disabled} />
         <SpeedLimitControl icon={ArrowUp} titleKey="uploadLimit" configKey="upload_limit_bytes" disabled={disabled} />
+        <ProxyControl disabled={disabled} />
         {runtimeStats.diskFreeBytes != null && (
           <IconCell icon={HardDrive} className="px-1 narrow:hidden" text={t('diskSpaceFreeLabel', { size: formatBytes(runtimeStats.diskFreeBytes) })} />
         )}

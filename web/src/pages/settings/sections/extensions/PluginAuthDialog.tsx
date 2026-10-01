@@ -3,43 +3,54 @@
 // 其它挑战手动「检查状态」）→ success；已登录可 logout；任何方式关闭都向引擎 cancel 当前会话。
 
 import { CircleCheck, Clock, Copy } from 'lucide-react'
-import { useEffect, useId, useRef, useState } from 'react'
+import { useEffect, useId, useMemo, useRef, useState } from 'react'
 import { useT } from '../../../../i18n'
 import { copyText } from '../../../../lib/copy'
 import { rpc } from '../../../../lib/rpc'
 import type { PluginAuthRequest, PluginAuthResponse, PluginDto } from '../../../../lib/rpc'
 import { Button, Dialog, DialogFooter, FieldError, FormField, Icon, Input, toast } from '../../../../ui'
+import { encodeQrChallengeImage } from './challengeImage'
 import { extensionErrorText } from './errors'
-import { dataImageChallengeSrc, safeHttpUrl, truncateChallengeText } from './logic'
+import { applyPluginAuthResponse, dataImageChallengeSrc, isQrcodeChallenge, safeHttpUrl, truncateChallengeText } from './logic'
+import type { PluginAuthState } from './logic'
 
 const POLL_INTERVAL_MS = 2000
 
 type AuthAction = 'begin' | 'poll' | 'logout' | 'status'
 
-const isQrcode = (challengeType: string | null) => challengeType?.toLowerCase() === 'qrcode'
-
-interface AuthState {
-  status: string
-  sessionId: string
-  authRef: string
-  challenge: string | null
-  challengeType: string | null
-  message: string | null
-}
-
-const INITIAL: AuthState = { status: '', sessionId: '', authRef: '', challenge: null, challengeType: null, message: null }
+const INITIAL: PluginAuthState = { status: '', sessionId: '', authRef: '', challenge: null, challengeType: null, message: null }
 
 function ChallengeView({ value, type }: { value: string; type: string }) {
   const t = useT()
-  // 载荷不可信：图片只接受校验过的 data:image；其余一律截断文本 + 复制，原文始终可取出。
-  const image = dataImageChallengeSrc(value)
-  const link = image ? null : safeHttpUrl(value)
+  // 只使用安全的 data 图片或本地编码的二维码，绝不将挑战 URL 用作图片请求。
+  const dataImage = useMemo(() => dataImageChallengeSrc(value), [value])
+  const qrText = !dataImage && !value.toLowerCase().startsWith('data:') && isQrcodeChallenge(type) ? value : null
+  const [generated, setGenerated] = useState<{ value: string; src: string | null } | null>(null)
+  useEffect(() => {
+    if (qrText === null) return
+    let current = true
+    void encodeQrChallengeImage(qrText).then((src) => {
+      if (current) setGenerated({ value: qrText, src })
+    })
+    return () => {
+      current = false
+    }
+  }, [qrText])
+  // 新挑战首帧便隐藏旧结果，异步编码完成后也只有当前挑战可以更新图片。
+  const image = dataImage ?? (qrText !== null && generated?.value === qrText ? generated.src : null)
+  const link = image || isQrcodeChallenge(type) ? null : safeHttpUrl(value)
   return (
     <div className="flex w-full min-w-0 flex-col gap-2 rounded-md bg-muted p-3">
       {type ? <div className="text-xs text-muted-foreground">{type}</div> : null}
       {image ? (
         <div className="flex w-full justify-center">
-          <img src={image} alt={type} className="size-[200px] max-w-full rounded-sm bg-white object-contain p-2" />
+          <img
+            src={image}
+            alt={type}
+            width={240}
+            height={240}
+            className="size-[240px] max-w-full rounded-sm bg-white object-contain"
+          />
         </div>
       ) : (
         <>
@@ -49,20 +60,20 @@ function ChallengeView({ value, type }: { value: string; type: string }) {
               {link}
             </a>
           ) : null}
-          <div>
-            <Button
-              variant="outline"
-              icon={Copy}
-              onClick={() => {
-                copyText(value)
-                toast.success(t('apiServiceCopied'))
-              }}
-            >
-              {t('apiServiceCopy')}
-            </Button>
-          </div>
         </>
       )}
+      <div>
+        <Button
+          variant="outline"
+          icon={Copy}
+          onClick={() => {
+            copyText(value)
+            toast.success(t('apiServiceCopied'))
+          }}
+        >
+          {t('apiServiceCopy')}
+        </Button>
+      </div>
     </div>
   )
 }
@@ -71,7 +82,7 @@ function AuthBody({ plugin, onClose }: { plugin: PluginDto; onClose: () => void 
   const t = useT()
   const siteId = useId()
   const inputId = useId()
-  const [auth, setAuth] = useState<AuthState>(INITIAL)
+  const [auth, setAuth] = useState<PluginAuthState>(INITIAL)
   const [site, setSite] = useState('')
   const [input, setInput] = useState('')
   const [busy, setBusy] = useState(true)
@@ -97,21 +108,7 @@ function AuthBody({ plugin, onClose }: { plugin: PluginDto; onClose: () => void 
   }
 
   const apply = (response: PluginAuthResponse, options: { notifySuccess: boolean; wasLogout: boolean }) => {
-    setAuth((previous) => {
-      // pending 回包的 challenge 为可选字段：后续 poll 缺失时保留上一帧，避免二维码中途被抹掉。
-      const pending = response.status === 'pending'
-      let next: AuthState = {
-        status: response.status,
-        sessionId: response.sessionId,
-        authRef: response.authRef ?? '',
-        challenge: pending ? (response.challenge ?? previous.challenge) : response.challenge,
-        challengeType: pending ? (response.challengeType ?? previous.challengeType) : response.challengeType,
-        message: response.message ? response.message : null,
-      }
-      // logout 无论成败，引擎都已删除本地档案；客户端同步清空登录态，不依赖插件回包内容。
-      if (options.wasLogout) next = { ...next, authRef: '', sessionId: '', challenge: null, challengeType: null }
-      return next
-    })
+    setAuth((previous) => applyPluginAuthResponse(previous, response, options.wasLogout))
     if (options.notifySuccess && response.status === 'success') toast.success(t('pluginAuthSuccess'))
   }
 
@@ -124,13 +121,17 @@ function AuthBody({ plugin, onClose }: { plugin: PluginDto; onClose: () => void 
       const response = await send(action, options.siteValue ?? latest.current.site)
       if (!alive.current) return
       if (typeof response?.status !== 'string') {
-        setAuth((previous) => ({ ...previous, message: t('pluginAuthInvalidResponse') }))
+        setAuth((previous) => ({ ...previous, status: 'error', message: t('pluginAuthInvalidResponse') }))
       } else {
         apply(response, { notifySuccess: options.notifySuccess ?? false, wasLogout: action === 'logout' })
       }
     } catch (error) {
       if (alive.current) {
-        setAuth((previous) => ({ ...previous, message: t('pluginAuthFailed', { message: extensionErrorText(t, error) }) }))
+        setAuth((previous) => ({
+          ...previous,
+          status: 'error',
+          message: t('pluginAuthFailed', { message: extensionErrorText(t, error) }),
+        }))
       }
     } finally {
       if (alive.current) {
@@ -165,7 +166,7 @@ function AuthBody({ plugin, onClose }: { plugin: PluginDto; onClose: () => void 
     }
   }, [plugin.identity])
 
-  const qrPolling = auth.status === 'pending' && auth.sessionId !== '' && isQrcode(auth.challengeType)
+  const qrPolling = auth.status === 'pending' && auth.sessionId !== '' && isQrcodeChallenge(auth.challengeType)
   useEffect(() => {
     if (!qrPolling) return
     const timer = setInterval(() => void runRef.current('poll', { notifySuccess: true }), POLL_INTERVAL_MS)
@@ -189,7 +190,7 @@ function AuthBody({ plugin, onClose }: { plugin: PluginDto; onClose: () => void 
         {t('pluginAuthLogout')}
       </Button>
     )
-  } else if (sessionPending && !isQrcode(auth.challengeType)) {
+  } else if (sessionPending && !isQrcodeChallenge(auth.challengeType)) {
     // 非二维码挑战没有自动轮询，提供手动「检查状态」。
     primary = (
       <Button variant="primary" loading={busy} onClick={() => void run('poll', { notifySuccess: true })}>
@@ -253,8 +254,14 @@ function AuthBody({ plugin, onClose }: { plugin: PluginDto; onClose: () => void 
             <span className="min-w-0 flex-1">{t('pluginAuthPending')}</span>
           </div>
         ) : null}
-        {auth.challenge ? <ChallengeView value={auth.challenge} type={auth.challengeType ?? ''} /> : null}
-        {auth.message ? <FieldError>{auth.message}</FieldError> : null}
+        {auth.challenge !== null ? <ChallengeView value={auth.challenge} type={auth.challengeType ?? ''} /> : null}
+        {auth.message ? (
+          auth.status === 'error' ? (
+            <FieldError>{auth.message}</FieldError>
+          ) : (
+            <div className="text-sm text-foreground" role="status">{auth.message}</div>
+          )
+        ) : null}
       </div>
     </Dialog>
   )

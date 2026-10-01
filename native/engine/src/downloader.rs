@@ -1029,6 +1029,28 @@ fn build_client_inner(
     ignore_tls_errors: bool,
     route: ClientRoute<'_>,
 ) -> Result<Client, DownloadError> {
+    let mut builder = build_client_builder(proxy_config, user_agent, ignore_tls_errors)?;
+
+    // --- DNS 钉定（多 CDN 节点池）/ 出口绑定（多网卡聚合）---
+    match route {
+        ClientRoute::Default => {}
+        ClientRoute::Pinned { host, ip } => {
+            builder = builder.resolve(host, std::net::SocketAddr::new(ip, 0));
+        }
+        ClientRoute::Link(link) => {
+            builder = crate::multi_nic::bind_to_link(builder, link);
+        }
+    }
+
+    Ok(builder.build()?)
+}
+
+/// 共享 HTTP 客户端装配；调用方可追加自己的超时与重定向守卫后再构建。
+pub(crate) fn build_client_builder(
+    proxy_config: &crate::proxy_config::ProxyConfig,
+    user_agent: &str,
+    ignore_tls_errors: bool,
+) -> Result<reqwest::ClientBuilder, DownloadError> {
     use crate::proxy_config::{ProxyMode, detect_system_proxy};
 
     let ua = if user_agent.is_empty() {
@@ -1116,25 +1138,16 @@ fn build_client_inner(
                         log_info!(
                             "[build_client] system proxy detected (url redacted for security)"
                         );
-                        match reqwest::Proxy::all(&url) {
-                            Ok(mut proxy) => {
-                                if !sys_proxy.username.is_empty() {
-                                    proxy =
-                                        proxy.basic_auth(&sys_proxy.username, &sys_proxy.password);
-                                }
-                                if !sys_proxy.no_proxy_list.is_empty() {
-                                    proxy = proxy.no_proxy(reqwest::NoProxy::from_string(
-                                        &crate::proxy_config::normalize_no_proxy(
-                                            &sys_proxy.no_proxy_list,
-                                        ),
-                                    ));
-                                }
-                                builder = builder.proxy(proxy);
-                            }
-                            Err(e) => {
-                                log_info!("[build_client] failed to parse system proxy URL: {}", e);
-                            }
+                        let mut proxy = reqwest::Proxy::all(&url)?;
+                        if !sys_proxy.username.is_empty() {
+                            proxy = proxy.basic_auth(&sys_proxy.username, &sys_proxy.password);
                         }
+                        if !sys_proxy.no_proxy_list.is_empty() {
+                            proxy = proxy.no_proxy(reqwest::NoProxy::from_string(
+                                &crate::proxy_config::normalize_no_proxy(&sys_proxy.no_proxy_list),
+                            ));
+                        }
+                        builder = builder.proxy(proxy);
                     } else {
                         log_info!("[build_client] system proxy enabled but no URL resolved");
                     }
@@ -1150,25 +1163,16 @@ fn build_client_inner(
         ProxyMode::Manual => {
             if let Some(url) = proxy_config.to_proxy_url() {
                 log_info!("[build_client] manual proxy configured");
-                match reqwest::Proxy::all(&url) {
-                    Ok(mut proxy) => {
-                        if !proxy_config.username.is_empty() {
-                            proxy =
-                                proxy.basic_auth(&proxy_config.username, &proxy_config.password);
-                        }
-                        if !proxy_config.no_proxy_list.is_empty() {
-                            proxy = proxy.no_proxy(reqwest::NoProxy::from_string(
-                                &crate::proxy_config::normalize_no_proxy(
-                                    &proxy_config.no_proxy_list,
-                                ),
-                            ));
-                        }
-                        builder = builder.proxy(proxy);
-                    }
-                    Err(e) => {
-                        log_info!("[build_client] failed to create proxy from URL: {}", e);
-                    }
+                let mut proxy = reqwest::Proxy::all(&url)?;
+                if !proxy_config.username.is_empty() {
+                    proxy = proxy.basic_auth(&proxy_config.username, &proxy_config.password);
                 }
+                if !proxy_config.no_proxy_list.is_empty() {
+                    proxy = proxy.no_proxy(reqwest::NoProxy::from_string(
+                        &crate::proxy_config::normalize_no_proxy(&proxy_config.no_proxy_list),
+                    ));
+                }
+                builder = builder.proxy(proxy);
             } else {
                 log_info!("[build_client] manual proxy: incomplete config, using direct");
                 builder = builder.no_proxy();
@@ -1181,19 +1185,7 @@ fn build_client_inner(
         }
     }
 
-    // --- DNS 钉定（多 CDN 节点池）/ 出口绑定（多网卡聚合）---
-    match route {
-        ClientRoute::Default => {}
-        ClientRoute::Pinned { host, ip } => {
-            builder = builder.resolve(host, std::net::SocketAddr::new(ip, 0));
-        }
-        ClientRoute::Link(link) => {
-            builder = crate::multi_nic::bind_to_link(builder, link);
-        }
-    }
-
-    let client = builder.build()?;
-    Ok(client)
+    Ok(builder)
 }
 
 // ---------------------------------------------------------------------------

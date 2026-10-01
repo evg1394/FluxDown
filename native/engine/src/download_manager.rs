@@ -2356,18 +2356,19 @@ impl DownloadManager {
         self.plugin_manager.clone()
     }
 
-    /// 构造一个市场客户端（读 config `market_index_sources` 作为自定义索引源，
-    /// 空则用内置候选源）。供 hub/server ApiHost 的市场浏览/安装方法调用。
+    /// 构造市场客户端；每次读取市场源，沿用当前已应用的代理配置。
     #[cfg(feature = "plugins")]
-    pub async fn market_client(&self) -> Option<crate::plugin::MarketClient> {
-        let pm = self.plugin_manager.clone()?;
-        let all = self.db.get_all_config().await.unwrap_or_default();
+    pub async fn market_client(
+        &self,
+    ) -> Result<Option<crate::plugin::MarketClient>, crate::plugin::MarketError> {
+        let Some(pm) = self.plugin_manager.clone() else {
+            return Ok(None);
+        };
+        let all = self.db.get_all_config().await.map_err(|error| {
+            crate::plugin::PluginError::Runtime(format!("读取市场配置失败: {error:#}"))
+        })?;
         let sources = crate::plugin::MarketClient::source_config(&all);
-        Some(crate::plugin::MarketClient::new(
-            pm,
-            self.db.clone(),
-            sources,
-        ))
+        crate::plugin::MarketClient::new(pm, self.db.clone(), sources, &self.proxy_config).map(Some)
     }
 
     /// 暴露 plugin_retry_tx 供 bridge 构造（onError 命令式重试意图通道）。

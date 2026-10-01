@@ -1369,11 +1369,14 @@ impl DaemonService {
             .await
             .map_err(|error| internal_error(format!("{error:#}")))?;
         let sources = fluxdown_engine::plugin::MarketClient::source_config(&config);
-        Ok(fluxdown_engine::plugin::MarketClient::new(
+        let proxy = fluxdown_engine::proxy_config::ProxyConfig::from_config_map(&config);
+        fluxdown_engine::plugin::MarketClient::new(
             self.plugin_manager()?.clone(),
             self.db.clone(),
             sources,
-        ))
+            &proxy,
+        )
+        .map_err(|error| market_error(&error))
     }
 
     async fn plugin_missing_components(&self, identity: &str) -> Vec<String> {

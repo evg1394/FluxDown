@@ -7,6 +7,7 @@ import { useT } from '../../i18n'
 import { cn } from '../../lib/cn'
 import { Sheet, toast, useIsMobile } from '../../ui'
 import { TitleBarSlot } from '../../shell'
+import { SETTINGS_ERROR_KEYS, clearSettingsError, useSettingsError } from '../settings/kit/writeStore'
 import { DownloadDialogsHost, openNewDownload } from './dialogs'
 import { DetailPanel } from './detail'
 import { confirmDeleteWithFiles, deleteViews } from './model/actions'
@@ -105,6 +106,10 @@ function DownloadsBody() {
   const mobile = useIsMobile()
   const ctx = useDownloads()
   const { prefs, updatePrefs, sidebarOpen, setSidebarOpen, detailOpen, closeDetail, connected } = ctx
+  const settingsError = useSettingsError()
+  const settingsErrorText = settingsError
+    ? `${t(SETTINGS_ERROR_KEYS[settingsError.kind])}${settingsError.kind === 'invalidArgument' && settingsError.detail ? `: ${settingsError.detail}` : ''}`
+    : null
   const [dragging, setDragging] = useState(false)
   const dragDepth = useRef(0)
   const dragOrigin = useRef(0)
@@ -215,6 +220,14 @@ function DownloadsBody() {
           </>
         )}
         <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+          {settingsErrorText ? (
+            <div role="alert" className="flex shrink-0 items-start gap-2 border-b border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+              <span className="min-w-0 flex-1">{settingsErrorText}</span>
+              <button type="button" className="shrink-0 underline coarse:min-h-touch" onClick={clearSettingsError}>
+                {t('close')}
+              </button>
+            </div>
+          ) : null}
           {connected ? null : (
             <div className="shrink-0 truncate px-3 py-1 text-xs text-destructive">{t('localServiceDisconnected')}</div>
           )}

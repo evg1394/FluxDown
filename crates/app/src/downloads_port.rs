@@ -187,6 +187,70 @@ impl DownloadsPort for AgentDownloadsPort {
                 DownloadsCommand::CaptureResolve(params) => {
                     (method::AGENT_CAPTURE_RESOLVE, serialize(params)?)
                 }
+                DownloadsCommand::ResolvePreview {
+                    request,
+                    transaction_id,
+                } => {
+                    let preview = match transaction_id {
+                        Some(transaction_id) => {
+                            client
+                                .call(
+                                    method::AGENT_CAPTURE_PREVIEW,
+                                    Some(fluxdown_protocol::CapturePreviewParams {
+                                        transaction_id,
+                                        request: *request,
+                                    }),
+                                )
+                                .await?
+                        }
+                        None => {
+                            client
+                                .call(
+                                    method::DAEMON_GROUP_RESOLVE_PREVIEW,
+                                    Some(preview_request(*request)),
+                                )
+                                .await?
+                        }
+                    };
+                    return Ok(DownloadsResult::Preview(preview));
+                }
+                DownloadsCommand::CreateGroup {
+                    mut request,
+                    context,
+                    transaction_id,
+                } => match transaction_id {
+                    Some(transaction_id) => (
+                        method::AGENT_CAPTURE_CREATE_GROUP,
+                        serialize(fluxdown_protocol::CaptureCreateGroupParams {
+                            transaction_id,
+                            request: *request,
+                            context: *context,
+                        })?,
+                    ),
+                    None => {
+                        apply_basic_auth(&mut request.extra_headers, &context);
+                        let value: Value = client
+                            .call(method::DAEMON_GROUP_CREATE, Some(request))
+                            .await?;
+                        if context.save_site_auth && !context.http_user.is_empty() {
+                            let credentials = fluxdown_protocol::SiteAuthSaveRequest {
+                                site: context.url,
+                                user: context.http_user,
+                                pass: context.http_password,
+                            };
+                            if let Err(error) = client
+                                .call::<_, Value>(method::DAEMON_SITE_AUTH_SAVE, Some(credentials))
+                                .await
+                            {
+                                log::warn!(
+                                    "group created but HTTP credentials could not be saved: {:?}",
+                                    error.code
+                                );
+                            }
+                        }
+                        return Ok(DownloadsResult::Value(value));
+                    }
+                },
                 DownloadsCommand::SiteAuthMatch { url } => (
                     method::DAEMON_SITE_AUTH_MATCH,
                     serialize(fluxdown_protocol::SiteAuthMatchParams { url })?,
@@ -244,6 +308,32 @@ fn serialize<T: serde::Serialize>(value: T) -> Result<Value, fluxdown_protocol::
 
 fn internal_error() -> fluxdown_protocol::RpcErrorData {
     fluxdown_protocol::RpcErrorData::new(fluxdown_protocol::ApplicationErrorCode::Internal, false)
+}
+
+fn preview_request(
+    mut request: fluxdown_protocol::CreateTaskRequest,
+) -> fluxdown_protocol::ResolvePreviewRequest {
+    let mut extra_headers = request.headers.take().unwrap_or_default();
+    apply_basic_auth(&mut extra_headers, &request);
+    fluxdown_protocol::ResolvePreviewRequest {
+        url: request.url,
+        cookies: request.cookies,
+        referrer: request.referrer,
+        user_agent: request.user_agent,
+        extra_headers,
+    }
+}
+
+fn apply_basic_auth(
+    headers: &mut std::collections::HashMap<String, String>,
+    request: &fluxdown_protocol::CreateTaskRequest,
+) {
+    if !request.http_user.is_empty() {
+        headers.retain(|name, _| !name.eq_ignore_ascii_case("authorization"));
+        let credentials = base64::engine::general_purpose::STANDARD
+            .encode(format!("{}:{}", request.http_user, request.http_password));
+        headers.insert("Authorization".to_owned(), format!("Basic {credentials}"));
+    }
 }
 
 /// `agent.capture.submitTorrentFile` 参数：`saveDir` / `queueId` / `startPaused` 仅在表单入口

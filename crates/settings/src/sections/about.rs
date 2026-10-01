@@ -2,6 +2,7 @@
 
 use fluxdown_protocol::method;
 use fluxdown_ui_components::{ButtonVariant, FluxIcon, button, loading_button};
+use fluxdown_ui_i18n::system_locale;
 use fluxdown_ui_theme::active_theme;
 use gpui::{App, IntoElement as _, ParentElement, SharedString, Styled, div};
 use gpui_component::{h_flex, v_flex};
@@ -140,6 +141,7 @@ fn check_update_control(ctx: &SectionContext) -> Control {
 
 fn release_notes_item(ctx: &SectionContext) -> SettingsRow {
     let store = ctx.store();
+    let locale = system_locale();
     SettingsRow::custom(move |_, _, _, cx: &mut App| {
         let tokens = active_theme(cx).tokens();
         let Some(result) = store.read(cx).update_check().cloned() else {
@@ -158,10 +160,49 @@ fn release_notes_item(ctx: &SectionContext) -> SettingsRow {
                         "v{} {}",
                         note.version, note.published_at
                     ))))
-                    .child(meta_text(cx).child(SharedString::from(note.body)))
+                    .child(meta_text(cx).child(SharedString::from(
+                        localized_release_body(&note.body, &locale).to_owned(),
+                    )))
             }))
             .into_any_element()
     })
+}
+
+fn localized_release_body<'a>(body: &'a str, locale: &str) -> &'a str {
+    let language = locale
+        .trim()
+        .split(['-', '_', '.', '@'])
+        .next()
+        .unwrap_or("en");
+    let chinese = language.eq_ignore_ascii_case("zh");
+    let mut sections = [None, None];
+    let mut previous = None;
+    let mut cursor = 0;
+    while let Some(offset) = body[cursor..].find("<!--") {
+        let start = cursor + offset;
+        let content_start = start + "<!--".len();
+        let Some(offset) = body[content_start..].find("-->") else {
+            break;
+        };
+        let content_end = content_start + offset;
+        cursor = content_end + "-->".len();
+        let index = match body[content_start..content_end].trim() {
+            "fluxdown:lang:zh" => 0,
+            "fluxdown:lang:en" => 1,
+            _ => continue,
+        };
+        if let Some((index, section_start)) = previous {
+            sections[index] = Some(body[section_start..start].trim());
+        }
+        previous = Some((index, cursor));
+    }
+    if let Some((index, section_start)) = previous {
+        sections[index] = Some(body[section_start..].trim());
+    }
+    sections[usize::from(!chinese)]
+        .or(sections[0])
+        .or(sections[1])
+        .unwrap_or(body)
 }
 
 fn logs_section(ctx: &SectionContext) -> SettingsSection {
@@ -319,4 +360,46 @@ fn link_item(
             .into_any_element()
     })
     .keywords([title_key.to_owned()])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::localized_release_body;
+
+    #[test]
+    fn release_notes_follow_system_language() {
+        let body = "前言\n<!-- fluxdown:lang:zh -->\n## 问题修复\n- 修复下载\n\
+                    <!-- fluxdown:lang:en -->\n## Bug Fixes\n- Fix downloads\n";
+        for locale in ["zh", "zh_CN", "zh-Hans-CN", "zh-Hant-TW", "ZH_hk"] {
+            assert_eq!(
+                localized_release_body(body, locale),
+                "## 问题修复\n- 修复下载"
+            );
+        }
+        for locale in ["en", "en-US", "fr_FR", "ja", ""] {
+            assert_eq!(
+                localized_release_body(body, locale),
+                "## Bug Fixes\n- Fix downloads"
+            );
+        }
+    }
+
+    #[test]
+    fn release_notes_handle_marker_order_and_whitespace() {
+        let body = "<!--fluxdown:lang:en-->\r\nEnglish\r\n\
+                    <!--\tfluxdown:lang:zh\n-->\r\n中文\r\n";
+        assert_eq!(localized_release_body(body, "en"), "English");
+        assert_eq!(localized_release_body(body, "zh"), "中文");
+    }
+
+    #[test]
+    fn release_notes_preserve_legacy_and_use_available_translation() {
+        let legacy = "## 旧版本\nUntranslated notes\n<!-- unrelated -->";
+        assert_eq!(localized_release_body(legacy, "zh"), legacy);
+        assert_eq!(localized_release_body(legacy, "en"), legacy);
+        let chinese = "<!-- fluxdown:lang:zh -->\n中文";
+        assert_eq!(localized_release_body(chinese, "en"), "中文");
+        let english = "<!-- fluxdown:lang:en -->\nEnglish";
+        assert_eq!(localized_release_body(english, "zh"), "English");
+    }
 }

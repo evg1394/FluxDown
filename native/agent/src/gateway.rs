@@ -422,6 +422,13 @@ impl GatewayService {
             method::AGENT_CAPTURE_RESOLVE => {
                 self.capture_resolve(params_or_empty(request.params)).await
             }
+            method::AGENT_CAPTURE_PREVIEW => {
+                self.capture_preview(params_or_empty(request.params)).await
+            }
+            method::AGENT_CAPTURE_CREATE_GROUP => {
+                self.capture_create_group(params_or_empty(request.params))
+                    .await
+            }
             method::AGENT_PLUGIN_INSTALL_FILE => {
                 self.plugin_install_file(params_or_empty(request.params))
                     .await
@@ -794,6 +801,38 @@ impl GatewayService {
         )
     }
 
+    async fn capture_preview(
+        &self,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, RpcErrorData> {
+        let params = serde_json::from_value::<fluxdown_protocol::CapturePreviewParams>(params)
+            .map_err(|error| {
+                tracing::debug!(error = %error, "rejected capture preview params");
+                RpcErrorData::new(ApplicationErrorCode::InvalidArgument, false)
+            })?;
+        capture_value(
+            self.capture
+                .preview(&params.transaction_id, params.request)
+                .await,
+        )
+    }
+
+    async fn capture_create_group(
+        &self,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, RpcErrorData> {
+        let params = serde_json::from_value::<fluxdown_protocol::CaptureCreateGroupParams>(params)
+            .map_err(|error| {
+                tracing::debug!(error = %error, "rejected capture group params");
+                RpcErrorData::new(ApplicationErrorCode::InvalidArgument, false)
+            })?;
+        capture_value(
+            self.capture
+                .create_group(&params.transaction_id, params.request, params.context)
+                .await,
+        )
+    }
+
     /// 读取本机 `.torrent`，上传 daemon blob 后走捕获路径建任务。`silent=false`（用户主动选择）
     /// 不静默：由 daemon 发 BT 文件选择请求；`saveDir` / `queueId` / `startPaused` 缺省维持旧行为。
     async fn capture_submit_torrent_file(
@@ -995,6 +1034,11 @@ fn capture_value<T: serde::Serialize>(
         Err(CaptureError::NotFound) => {
             Err(RpcErrorData::new(ApplicationErrorCode::NotFound, false))
         }
+        Err(CaptureError::Busy) => Err(RpcErrorData::new(ApplicationErrorCode::Conflict, true)),
+        Err(CaptureError::InvalidGroup) => Err(RpcErrorData::new(
+            ApplicationErrorCode::InvalidArgument,
+            false,
+        )),
         Err(CaptureError::Daemon(error)) => Err(error),
         Err(CaptureError::Json(_)) => Err(RpcErrorData::new(
             ApplicationErrorCode::InvalidArgument,
@@ -1556,6 +1600,12 @@ fn lane_for(method_name: &str) -> Lane {
         } else {
             Lane::Daemon
         };
+    }
+    if method_name == method::AGENT_CAPTURE_PREVIEW {
+        return Lane::DaemonSlow;
+    }
+    if method_name == method::AGENT_CAPTURE_CREATE_GROUP {
+        return Lane::Daemon;
     }
     if method_name == fluxdown_protocol::method::AGENT_PLATFORM_FILE_ICON {
         return Lane::Icon;

@@ -25,8 +25,9 @@ Called before protocol dispatch, on **every** start and resume of a matching tas
 | `referrer` | string | Referrer attached to the task. |
 | `userAgent` | string | Effective User-Agent. |
 | `extraHeaders` | object | Extra request headers as string key-values. |
+| `resolverItem` | string | For a selected manifest child, the plugin's original `item.id`, or `<itemId>@<variantId>` when the user explicitly selected one of that item's variants. |
 
-Return `null` or `undefined` to pass through (FluxDown downloads `ctx.url` unchanged). Otherwise return an object; every field except `url` is optional:
+Return `null` or `undefined` to pass through (FluxDown downloads `ctx.url` unchanged). Otherwise return a direct-link result, top-level `variants`, or a multi-file `manifest`:
 
 | Field | Type | Meaning |
 |---|---|---|
@@ -39,10 +40,20 @@ Return `null` or `undefined` to pass through (FluxDown downloads `ctx.url` uncha
 | `rangeSupported` | boolean | `true` = you guarantee the resolved host honours HTTP Range requests (e.g. googlevideo). Combined with `ephemeral`, FluxDown still skips the probe but plans a full multi-segment download right away instead of the conservative single-stream start. Default `false`: without a probe, Range capability is learned from the first response. |
 | `variants` | array | Multiple quality/format choices. When present with more than one entry, FluxDown shows a picker dialog and the user's choice collapses into a single link before download (in a headless server or do-not-disturb download, `defaultVariantIndex` is used silently, exactly like HLS quality selection). Each entry: `{ label, url, audioUrl?, fileName?, totalBytes?, bandwidth?, width?, height?, container? }` — `label` and `url` are required. When `variants` is non-empty the top-level `url` may be empty. Up to 50 entries; each `label` ≤ 200 chars. |
 | `defaultVariantIndex` | number | Which variant is the default (used on 60 s timeout / do-not-disturb / headless). Out-of-range values fall back to `0`. Default `0`. |
+| `manifest` | object | A multi-file result: `{ name?, items: [{ id, name, path?, size?, variants?: [{ id, label, size? }] }] }`. IDs are plugin-owned selection tokens; paths are relative directories. The host does not infer file relationships or quality from names. |
 
 After resolution, FluxDown re-examines the *resolved* URL to pick the protocol engine — a resolver may return an HLS playlist, a magnet link or an FTP URL and the right engine takes over.
 
 Error behavior is fail-closed: an exception, timeout, invalid return value, or an uninstalled/disabled plugin all put the task into the error state. The original URL is never silently downloaded.
+
+#### Interactive multi-file manifests
+
+The GPUI new-download window pre-resolves a single local GET link before creating a task. A non-empty manifest opens file selection in the same window; returning to the form or cancelling the preview creates no task. Confirmation creates a group from the selected files. Group creation errors leave the picker open for retry.
+
+Every manifest item is selected by default. Flat manifests from existing plugins remain flat and keep their original IDs. Per-file quality/format selection appears only when `item.variants` is supplied: leaving **Plugin default** selected passes `item.id`; an explicit choice passes `<itemId>@<variantId>` in `ctx.resolverItem`. The plugin must resolve that token to the chosen resource. These per-file metadata variants are distinct from the top-level direct-link `variants` table above.
+
+Browser capture previews retain the private request context in the agent; only manifest metadata reaches the UI. The capture transaction is consumed only after group creation succeeds. Multi-link submissions, remote dispatch, non-GET/body/audio requests, and unattended downloads keep their existing paths.
+
 
 ### `onStart(ctx)` / `onDone(ctx)` / `onError(ctx)` / `onMetaProbed(ctx)`
 
@@ -84,7 +95,8 @@ Return value (a JSON string):
 | `message` | string | Optional; status text to show the user. |
 | `authRef` | string | Optional; on success this should point at the credential you just saved (the host falls back to the request's `authRef` when omitted). |
 
-When a `poll` reply omits `challenge`/`challengeType`, the host UI keeps whatever challenge it last showed instead of clearing it — only include these fields when there's a new challenge to display.
+While `status` is `pending`, a `poll` reply that omits or returns `null` for `challenge`/`challengeType` keeps the last challenge. A terminal reply clears omitted challenge fields; an explicit empty challenge removes its content.
+For `challengeType: "qrcode"`, GPUI and Web render ordinary text (including login URLs) as a locally generated, opaque white QR image; the URL is never fetched as an image. Supported base64 image data URLs use their supplied image instead. If QR encoding fails, the UI falls back to text and keeps a copy button for the full original value. `pending`/`success` messages are informational; only `error` messages use error styling.
 
 On successful login the plugin calls `flux.auth.save` to persist the credential; `authenticate` itself is not responsible for persistence.
 

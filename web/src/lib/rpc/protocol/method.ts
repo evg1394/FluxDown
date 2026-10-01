@@ -180,6 +180,8 @@ export const METHOD = {
   AGENT_CAPTURE_SUBMIT_TORRENT_FILE: 'agent.capture.submitTorrentFile',
   AGENT_CAPTURE_LIST: 'agent.capture.list',
   AGENT_CAPTURE_RESOLVE: 'agent.capture.resolve',
+  AGENT_CAPTURE_PREVIEW: 'agent.capture.preview',
+  AGENT_CAPTURE_CREATE_GROUP: 'agent.capture.createGroup',
   AGENT_PLUGIN_INSTALL_FILE: 'agent.plugin.installFile',
   AGENT_DIAGNOSTICS_RUN: 'agent.diagnostics.run',
   AGENT_DIAGNOSTICS_REPAIR: 'agent.diagnostics.repair',

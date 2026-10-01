@@ -78,7 +78,7 @@
 - `download_manager.rs`（~7300 行）：任务生命周期、并发、队列（内置 + 命名，启停/每日定时边沿触发/顺序）、任务组、自动重试、协议分发、off-actor 插件解析插桩、速度平滑（EMA α=0.4，1s 采样窗）、WAL checkpoint。
 - `downloader.rs`：共享原语（`DownloadError` 含 Ed2k/Ed2kIntegrity/Cancelled、`RequestSpec`、文件名/编码工具）。
 - `segment_advisor.rs`：按文件大小 + CPU 推荐连接上限（HTTP 是上限，coordinator 逐步爬升）。
-- `segment_coordinator.rs`（~7300 行）：IDM 式动态分段（按需分配、按 ECF 挑选预计完成最晚的在传分段并按持有者/帮手速率比例均衡拆分、连接复用、per-domain 连接策略学习——负面上限 + 正面起步提示双观察面、`fallocate` 预分配）。子模块 `segment_coordinator/multipath.rs`：每 ramp 窗口的连接稳态采样（首窗预热、限速窗不计）→ 路径估计、冷路径探索 worker、完成时间抢占（分段子令牌取消 → `WorkerEvent::Preempted` → 余量回 Pending 立即续派）、Auto 主导链路标签与先验回写。
+- `segment_coordinator.rs`（~7300 行）：IDM 式动态分段（按需分配、按 ECF 挑选预计完成最晚的在传分段并按持有者/帮手速率比例均衡拆分、连接复用、per-domain 连接策略学习——负面上限 + 正面起步提示双观察面、`fallocate` 预分配）。子模块 `segment_coordinator/multipath.rs`：每 ramp 窗口的连接稳态采样（以租约真实开始时刻/字节建立基线；首个完整窗预热，短初窗累计，按实际时长算速率；限速窗不计，只有完整零增量窗判停滞）→ 路径估计、冷路径探索 worker、完成时间抢占（分段子令牌取消 → `WorkerEvent::Preempted` → 余量回 Pending 立即续派）、Auto 主导链路标签与先验回写。
 - `speed_limiter.rs`：全局 token bucket（Arc 可克隆，limit==0=不限）。
 - `meta_prober.rs`：队列任务后台探测文件名/大小（8s；HTTP HEAD / FTP SIZE / magnet dn= / torrent 跳过）。
 - `proxy_config.rs`：无/系统（Windows 注册表）/手动/**自动**（`ProxyMode::Auto`）；HTTP/HTTPS/SOCKS4/5；`test_proxy_connection` 测延迟。
@@ -141,6 +141,8 @@
 **插件工作区**：`bridge::plugin_workspace` 统一生成 `<data_dir>/plugins-work/<encoded_id>/`，供 `flux.fs`、`flux.ytdlp` 的牢笼 / cwd 及卸载清理共用（yt-dlp 可另选牢笼内安全 subdir）。identity 按字节作无碰撞编码：`[A-Za-z0-9-]` 原样保留，其余字节一律写成 `_XX`（两位小写十六进制），包括 `_` → `_5f`、`@` → `_40`、`.` → `_2e`；不能用「特殊字符统一替换成下划线」的有碰撞目录名。
 
 **模块**：`auth`（受控认证档案存储、站点绑定、过期判断和请求注入）、`manifest`（校验器 + subscription/provider 声明 + `permissions`⊆{auth,ffmpeg,ytdlp} + `auth.entry`）、`semver`、`runtime`（**无 rquickjs 类型**——可换 deno_core；含 Spec/Outcome 跨界结构 + `HostContext`）、`quickjs`（v1 唯一 impl，rquickjs 限在此文件；memory_limit + interrupt + timeout 三重兜底 + 连续 3 次熔断）、`bridge`（网络出口 SSRF 守卫 + flux.* 面）、`manager`（`RwLock<Arc<Vec>>` 整表原子替换，含 `authenticate` 登录入口 + 动态订阅路由）、`dependencies`（权限→组件依赖：ffmpeg→[ffmpeg]，ytdlp→[ytdlp,ffmpeg]，**提醒式非阻断**）、`install`（.fxplug zip：zip-slip + 压缩炸弹防护 + 单层剥壳）、`market`（去中心化市场：Git 版本化联邦索引 `zerx-lab/fluxdown-plugin-index`、内容寻址 `contentHash=sha256(zip)`、多源 failover、per-index sequence 防回滚；v1 无作者签名，schema 预留）。
+
+**市场下载诊断与代理（2026-10-01 修复）**：`MarketClient` 复用 `downloader::build_client_builder`，索引与插件包继承应用的 None/System/Manual、代理认证与 `no_proxy` 规则；daemon 每次取最新下载配置，manager 使用当前已应用代理。每个源/镜像失败记录插件 ID、版本、域名/路径和完整根因链，URL 去除 userinfo/query/fragment。哈希不符或超限仍尝试后续镜像，最终保留内容验证错误而非统统折叠为网络失败；包下载的逐跳 HTTPS / 公网字面量 IP 守卫保持启用。官方索引发布规则在 `fluxdown-plugin-index`：分片/包 append-only、镜像固定到 commit、联网完整 GET/hash，历史 sequence 冲突只向高水位以上修复。
 
 **off-actor 惰性 resolve 接线**：`create_task` 命中 `match_resolver` → 落 `tasks.resolver_plugin_id`（仅存 ID）+ 跳过 meta_prober。`do_start/resume_task` 体首守卫：resolver 非空且未解析 → 占位 active_tasks + off-actor spawn → return。worker 经 `resolve_rx` 回流，actor `select!` 分支 `on_resolve_ready`（复查生命周期 → 用解析后 url 重算五路协议分派）。**宿主 actor 必须接线 `resolve_rx` + `plugin_retry_rx`**。
 

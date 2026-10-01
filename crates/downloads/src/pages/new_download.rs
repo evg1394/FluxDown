@@ -6,6 +6,8 @@
 //! 提交时经 `agent.capture.resolve` 确认，Cookie / 请求头 / 请求体等上下文由 agent 合并；
 //! 未确认的捕获在窗口关闭时一并忽略。
 
+mod preview;
+
 use std::{
     collections::{BTreeMap, HashMap},
     rc::Rc,
@@ -210,8 +212,13 @@ struct AuthAutofill {
 /// 提交或取消都会关闭自身所在窗口（「打开种子文件」只提交种子：表单里还有待处理链接时
 /// 窗口保留，链接原样留在表单中）；任务创建失败的提示由宿主展示。视图释放时仍未确认的
 /// 外部捕获由宿主经 [`Self::take_captures`] 取走并忽略。
+// 清单预解析与返回保留本表单实体，取消不会触发建任务。
 pub struct NewDownloadView {
     strings: NewDownloadStrings,
+    translator: Entity<Translator>,
+    preview_gate: crate::model::preview::PreviewGate,
+    preview_request: Option<(fluxdown_protocol::CreateTaskRequest, Option<String>)>,
+    manifest: Option<Entity<crate::pages::manifest::ManifestView>>,
     context: NewDownloadContext,
     port: Arc<dyn DownloadsPort>,
     on_submit: NewDownloadSubmit,
@@ -316,6 +323,10 @@ impl NewDownloadView {
             user_agent: Self::input(strings.user_agent_desc.clone(), window, cx),
             checksum: Self::input(strings.checksum_placeholder.clone(), window, cx),
             strings,
+            translator: translator.clone(),
+            preview_gate: crate::model::preview::PreviewGate::default(),
+            preview_request: None,
+            manifest: None,
             context,
             port,
             on_submit,
@@ -641,7 +652,11 @@ impl NewDownloadView {
     }
 
     fn can_submit(&self, cx: &App) -> bool {
-        if self.picking || self.entries.is_empty() {
+        if self.picking
+            || self.preview_gate.is_active()
+            || self.manifest.is_some()
+            || self.entries.is_empty()
+        {
             return false;
         }
         match self.target_entry() {
@@ -777,9 +792,25 @@ impl NewDownloadView {
             return;
         }
         let options = self.draft_options(later, queue_override, cx);
+        let requests = build_requests(&self.entries, &options);
+        if let [request] = requests.as_slice()
+            && crate::model::preview::previewable(request)
+        {
+            self.start_preview(request.clone(), window, cx);
+            return;
+        }
+        self.submit_requests(requests, window, cx);
+    }
+
+    fn submit_requests(
+        &mut self,
+        requests: Vec<fluxdown_protocol::CreateTaskRequest>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let mut tasks = Vec::new();
         let mut captures = Vec::new();
-        for request in build_requests(&self.entries, &options) {
+        for request in requests {
             match self
                 .captures
                 .iter()
@@ -1783,6 +1814,12 @@ impl NewDownloadView {
 impl Render for NewDownloadView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let tokens = active_theme(cx).tokens().clone();
+        if let Some(manifest) = &self.manifest {
+            return div().size_full().child(manifest.clone()).into_any_element();
+        }
+        if self.preview_gate.is_active() {
+            return self.render_preview(cx).into_any_element();
+        }
         v_flex()
             .size_full()
             // 表单区用 surface（白），与设置窗口内容区一致。
@@ -1795,6 +1832,7 @@ impl Render for NewDownloadView {
                     .child(self.render_form(cx).overflow_y_scrollbar()),
             )
             .child(self.render_footer(cx))
+            .into_any_element()
     }
 }
 

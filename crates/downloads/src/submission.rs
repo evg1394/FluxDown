@@ -68,6 +68,12 @@ pub enum NewDownloadSubmission {
         tasks: Vec<CreateTaskRequest>,
         captures: Vec<CapturedTask>,
     },
+    /// 预解析清单确认后只建一个组；捕获事务由 agent 合并并消费。
+    Group {
+        request: Box<fluxdown_protocol::CreateGroupRequest>,
+        context: Box<CreateTaskRequest>,
+        transaction_id: Option<String>,
+    },
     /// 本机 `.torrent` 文件，交给 agent 读取上传；用户主动打开，走 BT 文件选择，
     /// 并带上表单当前的保存目录 / 队列 / 开始状态。
     TorrentFiles {
@@ -101,6 +107,7 @@ impl NewDownloadSubmission {
                 .iter()
                 .chain(captures.iter().map(|capture| &capture.request))
                 .all(|request| !request.start_paused),
+            Self::Group { request, .. } => !request.start_paused,
             Self::TorrentFiles { options, .. } => !options.start_paused,
             Self::Remote(_) => true,
         }
@@ -109,20 +116,23 @@ impl NewDownloadSubmission {
     fn target(&self) -> DispatchTarget {
         match self {
             Self::Remote(remote) => remote.target.clone(),
-            Self::Tasks { .. } | Self::TorrentFiles { .. } => DispatchTarget::Local,
+            Self::Tasks { .. } | Self::Group { .. } | Self::TorrentFiles { .. } => {
+                DispatchTarget::Local
+            }
         }
     }
 
     /// 「上次保存目录」偏好写入：只记本机目录（远端目录属于目标设备，不能污染本机默认）。
     fn remember_save_dir_command(&self) -> Option<DownloadsCommand> {
-        let Self::Tasks { tasks, captures } = self else {
-            return None;
+        let save_dir = match self {
+            Self::Tasks { tasks, captures } => tasks
+                .first()
+                .or_else(|| captures.first().map(|capture| &capture.request))?
+                .save_dir
+                .clone(),
+            Self::Group { request, .. } => request.save_dir.clone(),
+            _ => return None,
         };
-        let save_dir = tasks
-            .first()
-            .or_else(|| captures.first().map(|capture| &capture.request))?
-            .save_dir
-            .clone();
         Some(DownloadsCommand::SetLocalPreference {
             key: LAST_SAVE_DIR_PREF,
             value: serde_json::Value::String(save_dir),
@@ -158,6 +168,19 @@ impl NewDownloadSubmission {
                         }))
                     }))
                     .collect(),
+                best_effort,
+                remote: None,
+            },
+            Self::Group {
+                request,
+                context,
+                transaction_id,
+            } => SubmissionPlan {
+                commands: vec![DownloadsCommand::CreateGroup {
+                    request,
+                    context,
+                    transaction_id,
+                }],
                 best_effort,
                 remote: None,
             },

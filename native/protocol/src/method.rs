@@ -200,6 +200,10 @@ pub const AGENT_CAPTURE_SUBMIT: &str = "agent.capture.submit";
 pub const AGENT_CAPTURE_SUBMIT_TORRENT_FILE: &str = "agent.capture.submitTorrentFile";
 pub const AGENT_CAPTURE_LIST: &str = "agent.capture.list";
 pub const AGENT_CAPTURE_RESOLVE: &str = "agent.capture.resolve";
+/// 捕获上下文只读清单预解析，返回 `ResolvePreviewResponse`，不消费事务。
+pub const AGENT_CAPTURE_PREVIEW: &str = "agent.capture.preview";
+/// 用捕获上下文与最终清单选择建组，成功后消费事务，返回 `CreateGroupResponse`。
+pub const AGENT_CAPTURE_CREATE_GROUP: &str = "agent.capture.createGroup";
 /// 从本机插件包安装：agent 读文件、上传 daemon blob 后调用 `daemon.plugin.install`。
 pub const AGENT_PLUGIN_INSTALL_FILE: &str = "agent.plugin.installFile";
 pub const AGENT_DIAGNOSTICS_RUN: &str = "agent.diagnostics.run";
@@ -393,6 +397,8 @@ pub const ALL_METHODS: &[&str] = &[
     AGENT_CAPTURE_SUBMIT_TORRENT_FILE,
     AGENT_CAPTURE_LIST,
     AGENT_CAPTURE_RESOLVE,
+    AGENT_CAPTURE_PREVIEW,
+    AGENT_CAPTURE_CREATE_GROUP,
     AGENT_PLUGIN_INSTALL_FILE,
     AGENT_DIAGNOSTICS_RUN,
     AGENT_DIAGNOSTICS_REPAIR,

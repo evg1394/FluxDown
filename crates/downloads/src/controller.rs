@@ -170,6 +170,17 @@ pub enum DownloadsCommand {
     ResolveSelection(fluxdown_protocol::SelectionResolutionDto),
     /// 外部捕获确认 / 忽略；确认时携带表单产出的建任务参数，由 agent 与捕获原请求合并。
     CaptureResolve(Box<fluxdown_protocol::CaptureResolveParams>),
+    /// 只读插件清单预解析；外部捕获上下文仍由 agent 持有。
+    ResolvePreview {
+        request: Box<fluxdown_protocol::CreateTaskRequest>,
+        transaction_id: Option<String>,
+    },
+    /// 用户确认的插件清单建组，不再创建原始链接的普通任务。
+    CreateGroup {
+        request: Box<fluxdown_protocol::CreateGroupRequest>,
+        context: Box<fluxdown_protocol::CreateTaskRequest>,
+        transaction_id: Option<String>,
+    },
     /// 按下载链接匹配已保存的站点 HTTP 凭据（新建下载表单自动回填）。
     SiteAuthMatch {
         url: String,
@@ -232,6 +243,7 @@ pub enum DownloadsResult {
     Unit,
     Value(serde_json::Value),
     TaskActivity(TaskActivityPage),
+    Preview(fluxdown_protocol::ResolvePreviewResponse),
     /// `FileIcon` 的 PNG 字节。
     FileIcon(Vec<u8>),
 }

@@ -19,6 +19,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::db::Db;
+use crate::logger::{log_warn, sanitize_log_str};
+use crate::proxy_config::ProxyConfig;
 
 use super::manager::PluginManager;
 use super::runtime::PluginError;
@@ -139,8 +141,13 @@ pub struct MarketClient {
 }
 
 impl MarketClient {
-    /// 构造。`sources` 为空时用 [`DEFAULT_INDEX_SOURCES`]。
-    pub fn new(manager: std::sync::Arc<PluginManager>, db: Db, sources: Vec<String>) -> Self {
+    /// 构造。空 `sources` 使用内置源；代理与下载客户端共享装配规则，构造失败返回错误。
+    pub fn new(
+        manager: std::sync::Arc<PluginManager>,
+        db: Db,
+        sources: Vec<String>,
+        proxy: &ProxyConfig,
+    ) -> Result<Self, MarketError> {
         let sources = if sources.is_empty() {
             DEFAULT_INDEX_SOURCES
                 .iter()
@@ -149,30 +156,36 @@ impl MarketClient {
         } else {
             sources
         };
-        let client = reqwest::Client::builder()
+        let client = crate::downloader::build_client_builder(proxy, "", false)
+            .map_err(client_build_error)?
             .timeout(std::time::Duration::from_secs(20))
             .build()
-            .unwrap_or_default();
-        let download_client = reqwest::Client::builder()
+            .map_err(network_error)?;
+        let download_client = crate::downloader::build_client_builder(proxy, "", false)
+            .map_err(client_build_error)?
             .timeout(std::time::Duration::from_secs(20))
             .redirect(reqwest::redirect::Policy::custom(|attempt| {
                 if attempt.previous().len() >= MAX_DOWNLOAD_REDIRECTS {
                     return attempt.error("too many redirects");
                 }
                 if !parsed_url_allowed(attempt.url()) {
-                    return attempt.error("redirect target rejected by mirror guard");
+                    let message = format!(
+                        "redirect target rejected by mirror guard: {}",
+                        safe_url(attempt.url().as_str())
+                    );
+                    return attempt.error(message);
                 }
                 attempt.follow()
             }))
             .build()
-            .unwrap_or_default();
-        Self {
+            .map_err(network_error)?;
+        Ok(Self {
             manager,
             db,
             client,
             download_client,
             sources,
-        }
+        })
     }
 
     /// 拉取索引（逐源 failover，首个成功者胜出）。校验 sequence 不回退（防回滚）。
@@ -181,22 +194,36 @@ impl MarketClient {
         for src in &self.sources {
             match self.fetch_index_from(src).await {
                 Ok(idx) => {
-                    self.check_and_update_watermark(&idx).await?;
+                    if let Err(error) = self.check_and_update_watermark(&idx).await {
+                        log_warn!(
+                            "[market] index source={} rejected: {error:#}",
+                            safe_url(src)
+                        );
+                        return Err(error);
+                    }
                     return Ok(idx);
                 }
-                Err(e) => last_err = e,
+                Err(error) => {
+                    log_warn!(
+                        "[market] index source={} failed, trying next source: {error:#}",
+                        safe_url(src)
+                    );
+                    last_err = error;
+                }
             }
         }
         Err(last_err)
     }
 
     async fn fetch_index_from(&self, url: &str) -> Result<MarketIndex, MarketError> {
-        let mut resp = self
-            .client
-            .get(url)
-            .send()
-            .await
-            .map_err(|e| MarketError::Network(e.to_string()))?;
+        let mut resp = self.client.get(url).send().await.map_err(network_error)?;
+        if !resp.status().is_success() {
+            return Err(MarketError::Network(format!(
+                "HTTP {} at {}",
+                resp.status(),
+                safe_url(resp.url().as_str())
+            )));
+        }
         // 流式读取 + 体积上限（与 download_one 对称，防恶意源 OOM）。
         let mut buf = Vec::new();
         loop {
@@ -208,7 +235,7 @@ impl MarketClient {
                     buf.extend_from_slice(&chunk);
                 }
                 Ok(None) => break,
-                Err(e) => return Err(MarketError::Network(e.to_string())),
+                Err(error) => return Err(network_error(error)),
             }
         }
         serde_json::from_slice::<MarketIndex>(&buf)
@@ -222,7 +249,7 @@ impl MarketClient {
             .db
             .get_config(&key)
             .await
-            .map_err(|e| PluginError::Runtime(format!("读取市场高水位失败: {e}")))?
+            .map_err(|e| PluginError::Runtime(format!("读取市场高水位失败: {e:#}")))?
             .and_then(|v| v.parse().ok())
             .unwrap_or(0);
         if idx.sequence < watermark {
@@ -235,7 +262,7 @@ impl MarketClient {
             self.db
                 .set_config(&key, &idx.sequence.to_string())
                 .await
-                .map_err(|e| PluginError::Runtime(format!("写入市场高水位失败: {e}")))?;
+                .map_err(|e| PluginError::Runtime(format!("写入市场高水位失败: {e:#}")))?;
         }
         Ok(())
     }
@@ -277,27 +304,56 @@ impl MarketClient {
             .strip_prefix("sha256:")
             .unwrap_or(&entry.content_hash)
             .to_ascii_lowercase();
+        // 下载错误不能盖掉已确认的内容错误；所有镜像仍继续尝试。
+        let mut verification_error = None;
         for url in &entry.mirrors {
             // 镜像白名单：https-only（防降级）+ 字面量 IP 必须可全局路由（联邦
             // 索引的镜像 URL 不可全信，挡「把环回/内网地址伪装成镜像」的 SSRF
             // 探测；hostname 级过滤不做——自托管 LAN 索引经 hostname 仍可用，
             // 记录在案的 v1 取舍，完整性由 content_hash 钉住兜底）。
             if !mirror_url_allowed(url) {
+                log_warn!(
+                    "[market] plugin={:?} version={:?} mirror={} rejected by URL guard (HTTPS and globally routable literal IP required)",
+                    entry.plugin_id,
+                    entry.version,
+                    safe_url(url)
+                );
                 continue;
             }
-            match self.download_one(url).await {
+            let error = match self.download_one(url).await {
                 Ok(bytes) => {
                     let actual = sha256_hex(&bytes);
                     if actual == expected {
                         return Ok(bytes);
                     }
-                    // 哈希不符 → 试下一镜像（可能是被投毒/损坏的源）。
-                    continue;
+                    MarketError::HashMismatch {
+                        expected: expected.clone(),
+                        actual,
+                    }
                 }
-                Err(_) => continue,
+                Err(error) => error,
+            };
+            log_warn!(
+                "[market] plugin={:?} version={:?} mirror={} failed, trying next mirror: {error:#}",
+                entry.plugin_id,
+                entry.version,
+                safe_url(url)
+            );
+            if matches!(
+                error,
+                MarketError::HashMismatch { .. } | MarketError::TooLarge
+            ) {
+                verification_error = Some(error);
             }
         }
-        Err(MarketError::AllMirrorsFailed)
+        let error = verification_error.unwrap_or(MarketError::AllMirrorsFailed);
+        log_warn!(
+            "[market] plugin={:?} version={:?} all {} mirrors failed: {error:#}",
+            entry.plugin_id,
+            entry.version,
+            entry.mirrors.len()
+        );
+        Err(error)
     }
 
     async fn download_one(&self, url: &str) -> Result<Vec<u8>, MarketError> {
@@ -306,9 +362,13 @@ impl MarketClient {
             .get(url)
             .send()
             .await
-            .map_err(|e| MarketError::Network(e.to_string()))?;
+            .map_err(network_error)?;
         if !resp.status().is_success() {
-            return Err(MarketError::Network(format!("HTTP {}", resp.status())));
+            return Err(MarketError::Network(format!(
+                "HTTP {} at {}",
+                resp.status(),
+                safe_url(resp.url().as_str())
+            )));
         }
         let mut stream_resp = resp;
         let mut buf = Vec::new();
@@ -316,12 +376,18 @@ impl MarketClient {
             match stream_resp.chunk().await {
                 Ok(Some(chunk)) => {
                     if buf.len() + chunk.len() > MAX_FXPLUG_BYTES {
+                        log_warn!(
+                            "[market] package source={} exceeds size limit: received at least {} bytes, limit {} bytes",
+                            safe_url(stream_resp.url().as_str()),
+                            buf.len() + chunk.len(),
+                            MAX_FXPLUG_BYTES
+                        );
                         return Err(MarketError::TooLarge);
                     }
                     buf.extend_from_slice(&chunk);
                 }
                 Ok(None) => break,
-                Err(e) => return Err(MarketError::Network(e.to_string())),
+                Err(error) => return Err(network_error(error)),
             }
         }
         Ok(buf)
@@ -362,6 +428,43 @@ impl MarketClient {
             })
             .unwrap_or_default()
     }
+}
+
+/// 日志仅保留 URL 的 scheme、域名/端口和路径，绝不带凭据/query/fragment。
+fn safe_url(raw: &str) -> String {
+    let Ok(parsed) = url::Url::parse(raw) else {
+        return "<invalid URL>".to_owned();
+    };
+    if parsed.host_str().is_none() {
+        return "<URL without host>".to_owned();
+    }
+    sanitize_log_str(&format!(
+        "{}://{}",
+        parsed.scheme(),
+        &parsed[url::Position::BeforeHost..url::Position::AfterPath]
+    ))
+}
+
+fn safe_error_chain(error: &(dyn std::error::Error + 'static)) -> String {
+    static URLS: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(r#"(?i)[a-z][a-z0-9+.-]*://[^\s<>()"'{}]+"#)
+            .unwrap_or_else(|error| panic!("invalid market diagnostic URL regex: {error}"))
+    });
+    let chain = crate::logger::format_error_chain(error);
+    sanitize_log_str(&URLS.replace_all(&chain, |capture: &regex::Captures<'_>| {
+        safe_url(&capture[0])
+    }))
+}
+
+fn network_error(error: reqwest::Error) -> MarketError {
+    MarketError::Network(safe_error_chain(&error.without_url()))
+}
+
+fn client_build_error(error: crate::downloader::DownloadError) -> MarketError {
+    MarketError::Network(format!(
+        "构造市场 HTTP 客户端失败: {}",
+        safe_error_chain(&error)
+    ))
 }
 
 /// 调用方确认过的版本必须与当前最新可装版本一致；未指定（旧客户端）不校验。
@@ -418,9 +521,49 @@ fn parsed_url_allowed(parsed: &url::Url) -> bool {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::{
-        MarketEntry, MarketError, MarketIndex, check_expected_version, mirror_url_allowed,
-        sha256_hex,
+        MarketError, MarketIndex, check_expected_version, mirror_url_allowed, safe_error_chain,
+        safe_url, sha256_hex,
     };
+
+    #[test]
+    fn diagnostics_keep_causes_but_strip_all_url_secrets() {
+        let raw = "https://private-user:private-pass@cdn.example.com:8443/p.fxplug?query-secret#fragment-secret";
+        assert_eq!(safe_url(raw), "https://cdn.example.com:8443/p.fxplug");
+        assert_eq!(safe_url("malformed-query-secret"), "<invalid URL>");
+
+        #[derive(Debug, thiserror::Error)]
+        #[error("request for {url} failed")]
+        struct RequestFailure {
+            url: String,
+            #[source]
+            source: std::io::Error,
+        }
+        let error = RequestFailure {
+            url: raw.to_owned(),
+            source: std::io::Error::other(
+                "TLS certificate root failure at https://nested-user:nested-pass@proxy.example.com/tunnel?nested-query#nested-fragment",
+            ),
+        };
+        let diagnostic = safe_error_chain(&error);
+        assert!(diagnostic.contains("TLS certificate root failure"));
+        assert!(diagnostic.contains("https://cdn.example.com:8443/p.fxplug"));
+        assert!(diagnostic.contains("https://proxy.example.com/tunnel"));
+        for secret in [
+            "private-user",
+            "private-pass",
+            "query-secret",
+            "fragment-secret",
+            "nested-user",
+            "nested-pass",
+            "nested-query",
+            "nested-fragment",
+        ] {
+            assert!(
+                !diagnostic.contains(secret),
+                "leaked {secret}: {diagnostic}"
+            );
+        }
+    }
 
     /// 确认过的版本与最新不一致必须拒绝；一致或未指定放行。
     #[test]
@@ -482,60 +625,5 @@ mod tests {
         assert_eq!(idx.entries.len(), 1);
         assert_eq!(idx.entries[0].plugin_id, "a@b");
         assert_eq!(idx.entries[0].sig_scheme, "none"); // 默认值
-    }
-
-    #[test]
-    fn latest_entry_skips_yanked_and_picks_highest_sequence() {
-        let idx = MarketIndex {
-            index_id: "i".into(),
-            sequence: 5,
-            updated: String::new(),
-            entries: vec![
-                MarketEntry {
-                    plugin_id: "a@b".into(),
-                    version: "1.0.0".into(),
-                    sequence: 3,
-                    content_hash: "sha256:x".into(),
-                    min_app_version: String::new(),
-                    name: String::new(),
-                    description: String::new(),
-                    author: String::new(),
-                    homepage: String::new(),
-                    mirrors: vec![],
-                    publish_time: String::new(),
-                    yanked: "none".into(),
-                    tags: vec![],
-                    permissions: vec![],
-                    sig_scheme: "none".into(),
-                    sigstore_bundle_ref: String::new(),
-                },
-                MarketEntry {
-                    plugin_id: "a@b".into(),
-                    version: "2.0.0".into(),
-                    sequence: 5,
-                    content_hash: "sha256:y".into(),
-                    min_app_version: String::new(),
-                    name: String::new(),
-                    description: String::new(),
-                    author: String::new(),
-                    homepage: String::new(),
-                    mirrors: vec![],
-                    publish_time: String::new(),
-                    yanked: "vulnerable".into(),
-                    tags: vec![],
-                    permissions: vec![],
-                    sig_scheme: "none".into(),
-                    sigstore_bundle_ref: String::new(),
-                },
-            ],
-        };
-        // 2.0.0 被 yank → 回退到 1.0.0。
-        let mgr_latest = idx
-            .entries
-            .iter()
-            .filter(|e| e.plugin_id == "a@b" && e.yanked == "none")
-            .max_by(|a, b| a.sequence.cmp(&b.sequence))
-            .unwrap();
-        assert_eq!(mgr_latest.version, "1.0.0");
     }
 }

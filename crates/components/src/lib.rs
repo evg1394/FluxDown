@@ -5,6 +5,7 @@
 
 mod icons;
 mod kit;
+mod sidebar;
 
 pub use icons::{ComponentAssets, FluxIcon, category_icon};
 pub use kit::{
@@ -13,6 +14,7 @@ pub use kit::{
     field_label, form, form_field, form_gap, form_row, input_with_action, option_group, option_row,
     segmented_tabs,
 };
+pub use sidebar::{SidebarChange, SidebarPanel, SidebarState};
 
 use fluxdown_ui_theme::active_theme;
 use gpui::prelude::FluentBuilder as _;

@@ -3,11 +3,14 @@
 //! Cookie / 请求头 / 请求体只留在事务里；官方 UI 只拿到 [`PendingCaptureDto`] 摘要，
 //! 确认时提交表单产出的 [`CreateTaskRequest`]，由 [`merge_confirmed_request`] 以捕获原请求为底合并。
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::Arc;
 
+use base64::Engine;
 use fluxdown_protocol::{
-    AgentEvent, CreateTaskRequest, DaemonCreateTaskParams, DownloadRequest, PendingCaptureDto,
+    AgentEvent, ApplicationErrorCode, CreateGroupRequest, CreateGroupResponse, CreateTaskRequest,
+    DaemonCreateTaskParams, DownloadRequest, PendingCaptureDto, ResolvePreviewRequest,
+    ResolvePreviewResponse, RpcErrorData,
 };
 use serde_json::{Value, json};
 use tokio::sync::Mutex;
@@ -83,6 +86,8 @@ impl ExternalPolicy {
 struct CaptureTransaction {
     public: PendingCaptureDto,
     request: DownloadRequest,
+    /// 按需分配；owned guard 跨 daemon 调用存活，避免重入或旧 resolve 重复建任务。
+    group_creation: Option<Arc<Mutex<()>>>,
 }
 
 pub struct CaptureService {
@@ -198,7 +203,11 @@ impl CaptureService {
             for request in requests {
                 let public = pending_capture_dto(&request);
                 transaction_ids.push(public.transaction_id.clone());
-                pending.push_back(CaptureTransaction { public, request });
+                pending.push_back(CaptureTransaction {
+                    public,
+                    request,
+                    group_creation: None,
+                });
             }
             (first, transaction_ids)
         };
@@ -236,6 +245,116 @@ impl CaptureService {
             .collect()
     }
 
+    /// 克隆捕获上下文只读预解析；UI 不会拿到 Cookie、请求头值或请求体。
+    /// group 协议无法表达非 GET / body / 音频轨，故这些捕获返回空清单走旧确认路径。
+    pub async fn preview(
+        &self,
+        transaction_id: &str,
+        confirmed: CreateTaskRequest,
+    ) -> Result<ResolvePreviewResponse, CaptureError> {
+        let captured = self
+            .pending
+            .lock()
+            .await
+            .iter()
+            .find(|transaction| transaction.public.transaction_id == transaction_id)
+            .ok_or(CaptureError::NotFound)?
+            .request
+            .clone();
+        let request = merge_confirmed_request(captured, confirmed).request;
+        if !supports_manifest(&request) {
+            return Ok(ResolvePreviewResponse {
+                name: String::new(),
+                source_url: request.url,
+                error: String::new(),
+                items: Vec::new(),
+            });
+        }
+        let source_url = request.url.clone();
+        let mut preview: ResolvePreviewResponse = self
+            .daemon
+            .call(
+                fluxdown_protocol::method::DAEMON_GROUP_RESOLVE_PREVIEW,
+                Some(into_preview_request(request)),
+            )
+            .await
+            .map_err(CaptureError::Daemon)?;
+        preview.source_url = source_url;
+        Ok(preview)
+    }
+
+    /// 最终选择建组：无效条目不占用事务；daemon 失败可重试，成功后单次消费。
+    ///
+    /// 创建工作独立存活于调用者：UI 取消等待不能解除尚在运行的 single-flight 锁。
+    /// 同一事务创建期间，包括旧 `resolve` 在内的再次确认/拒绝都返回 Conflict。
+    pub async fn create_group(
+        self: &Arc<Self>,
+        transaction_id: &str,
+        request: CreateGroupRequest,
+        context: CreateTaskRequest,
+    ) -> Result<CreateGroupResponse, CaptureError> {
+        validate_group_items(&request)?;
+        let (request, claim) = {
+            let mut pending = self.pending.lock().await;
+            let transaction = pending
+                .iter_mut()
+                .find(|transaction| transaction.public.transaction_id == transaction_id)
+                .ok_or(CaptureError::NotFound)?;
+            let request = merge_group_request(transaction.request.clone(), request, &context)?;
+            let claim = transaction
+                .group_creation
+                .get_or_insert_with(|| Arc::new(Mutex::new(())))
+                .clone()
+                .try_lock_owned()
+                .map_err(|_| CaptureError::Busy)?;
+            (request, claim)
+        };
+        let save_auth = (context.save_site_auth && !context.http_user.is_empty()).then(|| {
+            fluxdown_protocol::SiteAuthSaveRequest {
+                site: request.source_url.clone(),
+                user: context.http_user,
+                pass: context.http_password,
+            }
+        });
+        let service = Arc::clone(self);
+        let transaction_id = transaction_id.to_owned();
+        tokio::spawn(async move {
+            let _claim = claim;
+            let created: CreateGroupResponse = service
+                .daemon
+                .call(fluxdown_protocol::method::DAEMON_GROUP_CREATE, Some(request))
+                .await
+                .map_err(CaptureError::Daemon)?;
+            {
+                let mut pending = service.pending.lock().await;
+                let index = pending
+                    .iter()
+                    .position(|transaction| transaction.public.transaction_id == transaction_id)
+                    .ok_or(CaptureError::NotFound)?;
+                pending.remove(index).ok_or(CaptureError::NotFound)?;
+            }
+            service.publish().await;
+            if let Some(save_auth) = save_auth
+                && let Err(error) = service
+                    .daemon
+                    .call::<_, fluxdown_protocol::SiteAuthEntryDto>(
+                        fluxdown_protocol::method::DAEMON_SITE_AUTH_SAVE,
+                        Some(save_auth),
+                    )
+                    .await
+            {
+                // 与 TaskCreate 一样，凭据保存失败不撤销已创建的下载；不记录凭据或 URL。
+                tracing::warn!(code = ?error.code, "could not save site authentication after capture group creation");
+            }
+            Ok(created)
+        })
+        .await
+        .map_err(|error| {
+            tracing::error!(error = %error, "capture group creation worker failed");
+            CaptureError::Daemon(RpcErrorData::new(ApplicationErrorCode::Internal, false))
+        })?
+    }
+
     /// 确认/拒绝均只消费一次；确认时 `confirmed`（官方 UI 表单结果）经
     /// [`merge_confirmed_request`] 合并进捕获原请求，`None` 按原请求建任务。
     pub async fn resolve(
@@ -250,6 +369,13 @@ impl CaptureService {
                 .iter()
                 .position(|transaction| transaction.public.transaction_id == transaction_id)
                 .ok_or(CaptureError::NotFound)?;
+            if pending[index]
+                .group_creation
+                .as_ref()
+                .is_some_and(|lock| lock.try_lock().is_err())
+            {
+                return Err(CaptureError::Busy);
+            }
             pending.remove(index).ok_or(CaptureError::NotFound)?
         };
         self.publish().await;
@@ -438,6 +564,94 @@ fn merge_confirmed_request(
     }
 }
 
+fn supports_manifest(request: &CreateTaskRequest) -> bool {
+    request
+        .method
+        .as_ref()
+        .is_none_or(|method| method.eq_ignore_ascii_case("GET"))
+        && request.body.is_none()
+        && request.audio_url.is_none()
+}
+
+fn into_preview_request(mut request: CreateTaskRequest) -> ResolvePreviewRequest {
+    let mut extra_headers = request.headers.take().unwrap_or_default();
+    inject_http_auth(&mut extra_headers, &request);
+    ResolvePreviewRequest {
+        url: request.url,
+        cookies: request.cookies,
+        referrer: request.referrer,
+        user_agent: request.user_agent,
+        extra_headers,
+    }
+}
+
+/// 组的最终选项不由旧 context 覆盖；context 仅提供 group wire 缺少的 Basic 凭据。
+fn merge_group_request(
+    captured: DownloadRequest,
+    mut request: CreateGroupRequest,
+    context: &CreateTaskRequest,
+) -> Result<CreateGroupRequest, CaptureError> {
+    let base = captured_create_request(captured).request;
+    if !supports_manifest(&base) {
+        return Err(CaptureError::InvalidGroup);
+    }
+    request.source_url = base.url;
+    fill_if_blank(&mut request.cookies, base.cookies);
+    fill_if_blank(&mut request.referrer, base.referrer);
+    let mut headers = base.headers.unwrap_or_default();
+    if !request.user_agent.trim().is_empty() {
+        headers.retain(|name, _| !name.eq_ignore_ascii_case("user-agent"));
+    }
+    for (name, value) in request.extra_headers {
+        headers.retain(|existing, _| !existing.eq_ignore_ascii_case(&name));
+        headers.insert(name, value);
+    }
+    inject_http_auth(&mut headers, context);
+    request.extra_headers = headers;
+    Ok(request)
+}
+
+fn inject_http_auth(headers: &mut HashMap<String, String>, context: &CreateTaskRequest) {
+    // 与 TaskCreate 的 HTTP Basic 规则一致：只检查 is_empty，不修剪凭据。
+    if !context.http_user.is_empty() {
+        headers.retain(|name, _| !name.eq_ignore_ascii_case("authorization"));
+        headers.insert(
+            "Authorization".to_owned(),
+            format!(
+                "Basic {}",
+                base64::engine::general_purpose::STANDARD
+                    .encode(format!("{}:{}", context.http_user, context.http_password))
+            ),
+        );
+    }
+}
+
+fn validate_group_items(request: &CreateGroupRequest) -> Result<(), CaptureError> {
+    if request.items.is_empty()
+        || request.items.iter().any(|item| {
+            item.resolver_item.trim().is_empty()
+                || item.file_name.trim().is_empty()
+                || item.file_name.contains(['/', '\\'])
+                || !is_safe_relative_path(&item.file_name)
+                || (!item.rel_path.is_empty() && !is_safe_relative_path(&item.rel_path))
+        })
+    {
+        return Err(CaptureError::InvalidGroup);
+    }
+    Ok(())
+}
+
+// 与插件 manifest 的相对路径规则一致；agent 不依赖 engine，不能调用其验证器。
+fn is_safe_relative_path(path: &str) -> bool {
+    let bytes = path.as_bytes();
+    !path.is_empty()
+        && !(bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':')
+        && !path.chars().any(char::is_control)
+        && path
+            .split(['/', '\\'])
+            .all(|part| !part.is_empty() && part != "." && part != "..")
+}
+
 fn fill_if_blank(target: &mut String, fallback: String) {
     if target.trim().is_empty() {
         *target = fallback;
@@ -458,6 +672,10 @@ pub enum CaptureError {
     Full,
     #[error("capture transaction not found")]
     NotFound,
+    #[error("capture transaction is already creating a group")]
+    Busy,
+    #[error("capture cannot create the selected group")]
+    InvalidGroup,
     #[error("daemon capture create failed: {0:?}")]
     Daemon(fluxdown_protocol::RpcErrorData),
     #[error(transparent)]
@@ -570,13 +788,20 @@ pub enum BlobError {
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+    use std::sync::Arc;
+    use std::time::Duration;
 
-    use fluxdown_protocol::{AgentSnapshot, CreateTaskRequest, RequestBody};
-    use serde_json::json;
+    use fluxdown_protocol::{
+        AgentEvent, AgentSnapshot, ApplicationErrorCode, CreateGroupRequest, CreateTaskRequest,
+        RequestBody, RpcErrorData, RpcErrorObject, RpcRequest, RpcResponse, ServiceEvent,
+    };
+    use futures_util::{SinkExt, StreamExt};
+    use serde_json::{Value, json};
 
     use super::{
-        CaptureOrigin, CaptureService, DownloadRequest, ExternalPolicy, captured_create_request,
-        merge_confirmed_request, pending_capture_dto, split_batch, with_category_dir,
+        CaptureError, CaptureOrigin, CaptureService, DownloadRequest, ExternalPolicy,
+        captured_create_request, into_preview_request, merge_confirmed_request,
+        merge_group_request, pending_capture_dto, split_batch, with_category_dir,
     };
 
     fn preferences(
@@ -716,6 +941,560 @@ mod tests {
 
     fn form(value: serde_json::Value) -> CreateTaskRequest {
         serde_json::from_value(value).expect("form request")
+    }
+
+    fn get_capture() -> DownloadRequest {
+        DownloadRequest {
+            method: None,
+            body: None,
+            audio_url: None,
+            ..captured()
+        }
+    }
+
+    fn group() -> CreateGroupRequest {
+        serde_json::from_value(json!({
+            "sourceUrl": "https://changed.example/other",
+            "groupName": "Selected",
+            "saveDir": "/selected",
+            "queueId": "selected-queue",
+            "segments": 3,
+            "startPaused": true,
+            "items": [{ "resolverItem": "opaque@chosen", "fileName": "chosen.bin" }],
+        }))
+        .expect("group request")
+    }
+
+    // Seed only the transaction under test: do not launch the desktop confirmation UI.
+    async fn queued_capture(capture: &CaptureService, request: DownloadRequest) -> String {
+        let public = pending_capture_dto(&request);
+        let id = public.transaction_id.clone();
+        capture
+            .pending
+            .lock()
+            .await
+            .push_back(super::CaptureTransaction {
+                public,
+                request,
+                group_creation: None,
+            });
+        capture.publish().await;
+        id
+    }
+
+    #[test]
+    fn capture_preview_and_group_auth_override_browser_headers_without_changing_source() {
+        let context = form(json!({
+            "url": "https://changed.example/other",
+            "saveDir": "/old-base",
+            "queueId": "old-queue",
+            "segments": 99,
+            "startPaused": false,
+            "httpUser": "alice",
+            "httpPassword": "secret",
+            "userAgent": "Form/2",
+            "headers": { "authorization": "Bearer form", "accept": "form/type" },
+        }));
+        let preview =
+            into_preview_request(merge_confirmed_request(get_capture(), context.clone()).request);
+        assert_eq!(preview.url, captured().url);
+        assert_eq!(preview.cookies, "sid=1");
+        assert_eq!(preview.referrer, captured().referrer);
+        assert_eq!(preview.user_agent, "Form/2");
+        assert_eq!(
+            preview.extra_headers["Authorization"],
+            "Basic YWxpY2U6c2VjcmV0"
+        );
+        assert!(!preview.extra_headers.contains_key("authorization"));
+        assert_eq!(preview.extra_headers["accept"], "form/type");
+        assert!(!preview.extra_headers.contains_key("User-Agent"));
+
+        let mut selected = group();
+        selected
+            .extra_headers
+            .insert("authorization".to_owned(), "Bearer selected".to_owned());
+        selected
+            .extra_headers
+            .insert("accept".to_owned(), "selected/type".to_owned());
+        let merged = merge_group_request(get_capture(), selected, &context).expect("merge group");
+        assert_eq!(merged.source_url, captured().url);
+        assert_eq!(merged.save_dir, "/selected");
+        assert_eq!(merged.queue_id, "selected-queue");
+        assert_eq!(merged.segments, 3);
+        assert!(merged.start_paused);
+        assert_eq!(merged.items[0].resolver_item, "opaque@chosen");
+        assert_eq!(merged.cookies, "sid=1");
+        assert_eq!(merged.referrer, captured().referrer);
+        assert_eq!(merged.extra_headers["User-Agent"], "Browser/1");
+        assert_eq!(
+            merged.extra_headers["Authorization"],
+            "Basic YWxpY2U6c2VjcmV0"
+        );
+        assert!(!merged.extra_headers.contains_key("authorization"));
+        assert_eq!(merged.extra_headers["accept"], "selected/type");
+        assert!(!merged.extra_headers.contains_key("Accept"));
+
+        let mut selected = group();
+        selected.cookies = "chosen=2".to_owned();
+        selected.referrer = "https://chosen.example".to_owned();
+        selected.user_agent = "Chosen/3".to_owned();
+        let merged = merge_group_request(get_capture(), selected, &form(json!({ "url": "" })))
+            .expect("merge without explicit credentials");
+        assert_eq!(merged.cookies, "chosen=2");
+        assert_eq!(merged.referrer, "https://chosen.example");
+        assert_eq!(merged.user_agent, "Chosen/3");
+        assert!(!merged.extra_headers.contains_key("User-Agent"));
+        assert_eq!(merged.extra_headers["Authorization"], "Basic YTpi");
+    }
+
+    #[tokio::test]
+    async fn unsupported_capture_preview_keeps_original_request_for_legacy_confirmation() {
+        for request in [
+            captured(),
+            DownloadRequest {
+                method: Some("POST".to_owned()),
+                ..get_capture()
+            },
+            DownloadRequest {
+                body: captured().body,
+                ..get_capture()
+            },
+            DownloadRequest {
+                audio_url: captured().audio_url,
+                ..get_capture()
+            },
+        ] {
+            let capture = Arc::new(service(json!({})));
+            let id = queued_capture(&capture, request.clone()).await;
+            let preview = capture
+                .preview(
+                    &id,
+                    form(json!({ "url": "https://changed.example", "method": "GET" })),
+                )
+                .await
+                .expect("skip inexpressible request without contacting disconnected daemon");
+            assert!(preview.items.is_empty());
+            assert!(preview.error.is_empty());
+            assert_eq!(preview.source_url, request.url);
+            let pending = capture.pending.lock().await;
+            let original = serde_json::to_value(&request).expect("original request");
+            assert_eq!(
+                serde_json::to_value(&pending[0].request).expect("pending request"),
+                original
+            );
+            drop(pending);
+            assert!(matches!(
+                capture
+                    .create_group(&id, group(), form(json!({ "url": "" })))
+                    .await,
+                Err(CaptureError::InvalidGroup)
+            ));
+            assert_eq!(capture.list().await.len(), 1);
+            capture
+                .resolve(&id, false, None)
+                .await
+                .expect("legacy rejection");
+            assert!(matches!(
+                capture.resolve(&id, false, None).await,
+                Err(CaptureError::NotFound)
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn invalid_group_items_and_failed_creation_do_not_consume_capture() {
+        let capture = Arc::new(service(json!({})));
+        let id = queued_capture(&capture, get_capture()).await;
+        for (name, path, token) in [
+            ("", "", "opaque"),
+            ("safe.bin", "", ""),
+            ("../outside.bin", "", "opaque"),
+            ("safe.bin", "/outside", "opaque"),
+            ("safe.bin", "..\\outside", "opaque"),
+            ("safe.bin", "C:\\outside", "opaque"),
+            ("safe.bin", "parent/../outside", "opaque"),
+            ("safe.bin", "parent\0outside", "opaque"),
+        ] {
+            let mut request = group();
+            request.items[0].file_name = name.to_owned();
+            request.items[0].rel_path = path.to_owned();
+            request.items[0].resolver_item = token.to_owned();
+            assert!(
+                matches!(
+                    capture
+                        .create_group(&id, request, form(json!({ "url": "" })))
+                        .await,
+                    Err(CaptureError::InvalidGroup)
+                ),
+                "{name:?} {path:?} {token:?}"
+            );
+        }
+        let mut empty = group();
+        empty.items.clear();
+        assert!(matches!(
+            capture
+                .create_group(&id, empty, form(json!({ "url": "" })))
+                .await,
+            Err(CaptureError::InvalidGroup)
+        ));
+        for _ in 0..2 {
+            assert!(matches!(
+                capture
+                    .create_group(&id, group(), form(json!({ "url": "" })))
+                    .await,
+                Err(CaptureError::Daemon(_))
+            ));
+            assert_eq!(capture.list().await.len(), 1);
+        }
+        capture
+            .resolve(&id, false, None)
+            .await
+            .expect("transaction remains rejectable");
+    }
+
+    type DaemonCall = (
+        RpcRequest,
+        tokio::sync::oneshot::Sender<Result<Value, RpcErrorData>>,
+    );
+
+    type TestSocket = tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>;
+
+    async fn socket_request(socket: &mut TestSocket) -> RpcRequest {
+        loop {
+            let frame = socket
+                .next()
+                .await
+                .expect("daemon client frame")
+                .expect("valid frame");
+            if let tokio_tungstenite::tungstenite::Message::Text(text) = frame {
+                return serde_json::from_str(&text).expect("RPC request");
+            }
+        }
+    }
+
+    async fn socket_response(socket: &mut TestSocket, response: RpcResponse) {
+        socket
+            .send(tokio_tungstenite::tungstenite::Message::Text(
+                serde_json::to_string(&response)
+                    .expect("encode response")
+                    .into(),
+            ))
+            .await
+            .expect("send response");
+    }
+
+    async fn authenticate_test_daemon(socket: &mut TestSocket, token: &str) {
+        use fluxdown_protocol::handshake::{
+            AuthChallengeParams, AuthProveParams, server_proof, verify_client_proof,
+        };
+        use fluxdown_protocol::{ServiceHello, ServiceRole, Snapshot, SnapshotBody};
+
+        let challenge = socket_request(socket).await;
+        let params: AuthChallengeParams =
+            serde_json::from_value(challenge.params.expect("challenge params")).expect("challenge");
+        let nonce = format!(
+            "{}{}",
+            uuid::Uuid::new_v4().simple(),
+            uuid::Uuid::new_v4().simple()
+        );
+        socket_response(
+            socket,
+            RpcResponse::success(challenge.id, json!({
+                "serverNonce": nonce,
+                "serverProof": server_proof(token, &params.client_nonce, &nonce).expect("server proof"),
+            })),
+        ).await;
+        let prove = socket_request(socket).await;
+        let proof: AuthProveParams =
+            serde_json::from_value(prove.params.expect("prove params")).expect("proof");
+        assert!(verify_client_proof(
+            token,
+            &params.client_nonce,
+            &nonce,
+            &proof.client_proof
+        ));
+        socket_response(
+            socket,
+            RpcResponse::success(prove.id, json!({ "authenticated": true })),
+        )
+        .await;
+        let hello = socket_request(socket).await;
+        socket_response(
+            socket,
+            RpcResponse::success(
+                hello.id,
+                serde_json::to_value(ServiceHello::new(
+                    ServiceRole::Daemon,
+                    "daemon",
+                    "test",
+                    "capture-test",
+                    Vec::new(),
+                ))
+                .expect("hello"),
+            ),
+        )
+        .await;
+        let snapshot = socket_request(socket).await;
+        socket_response(
+            socket,
+            RpcResponse::success(
+                snapshot.id,
+                serde_json::to_value(Snapshot {
+                    epoch: "capture-test".to_owned(),
+                    sequence: 0,
+                    body: SnapshotBody::Daemon(Box::default()),
+                })
+                .expect("snapshot"),
+            ),
+        )
+        .await;
+    }
+
+    /// 真实 agent RPC 传输，测试控制 daemon 完成时间与失败结果来覆盖事务状态转换。
+    async fn daemon_service() -> (
+        Arc<CaptureService>,
+        tokio::sync::mpsc::Receiver<DaemonCall>,
+        tokio::sync::mpsc::Receiver<crate::daemon_client::DaemonClientEvent>,
+        tokio::sync::oneshot::Sender<()>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        const TOKEN: &str = "capture-behavior-test-token";
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind daemon");
+        let address = listener.local_addr().expect("daemon address");
+        let (calls, requests) = tokio::sync::mpsc::channel(8);
+        let (stop, mut stopping) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept agent");
+            let mut socket = tokio_tungstenite::accept_async(stream)
+                .await
+                .expect("WebSocket");
+            authenticate_test_daemon(&mut socket, TOKEN).await;
+            loop {
+                let frame = tokio::select! {
+                    biased;
+                    _ = &mut stopping => break,
+                    frame = socket.next() => frame,
+                };
+                let Some(frame) = frame else {
+                    break;
+                };
+                let frame = frame.expect("valid client frame");
+                if frame.is_close() {
+                    break;
+                }
+                let tokio_tungstenite::tungstenite::Message::Text(text) = frame else {
+                    continue;
+                };
+                let request: RpcRequest = serde_json::from_str(&text).expect("daemon request");
+                let id = request.id.clone();
+                let (reply, response) = tokio::sync::oneshot::channel();
+                calls
+                    .send((request, reply))
+                    .await
+                    .expect("deliver daemon call");
+                let response = match response.await.expect("test daemon outcome") {
+                    Ok(value) => RpcResponse::success(id, value),
+                    Err(error) => {
+                        RpcResponse::failure(id, RpcErrorObject::application("rejected", error))
+                    }
+                };
+                socket_response(&mut socket, response).await;
+            }
+        });
+        let (daemon, events) = crate::daemon_client::DaemonClient::start(
+            crate::daemon_client::DaemonClientConfig::new(format!("ws://{address}/rpc"), TOKEN),
+            Arc::new(crate::supervisor::DaemonSupervisor::new(address)),
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .expect("start daemon client");
+        let daemon = Arc::new(daemon);
+        daemon
+            .wait_ready(Duration::from_secs(2))
+            .await
+            .expect("daemon ready");
+        let hub = crate::event_hub::AgentEventHub::new(AgentSnapshot::default());
+        let shell = crate::shell::ShellState::new(
+            crate::shell::TrayAvailability::Unavailable(
+                fluxdown_protocol::TrayUnavailableReason::NotBuilt,
+            ),
+            daemon.clone(),
+            hub.clone(),
+        );
+        (
+            Arc::new(CaptureService::new(daemon, hub, shell)),
+            requests,
+            events,
+            stop,
+            server,
+        )
+    }
+
+    #[tokio::test]
+    async fn capture_preview_is_read_only_and_returns_metadata_without_request_secrets() {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let (capture, mut calls, daemon_events, stop, server) = daemon_service().await;
+            let id = queued_capture(&capture, get_capture()).await;
+            let previewing = {
+                let capture = capture.clone();
+                let id = id.clone();
+                tokio::spawn(async move {
+                    capture.preview(&id, form(json!({
+                        "url": "https://changed.example/other",
+                        "httpUser": "alice", "httpPassword": "secret",
+                        "saveSiteAuth": true,
+                    }))).await
+                })
+            };
+            let (request, reply) = calls.recv().await.expect("preview request");
+            assert_eq!(request.method, fluxdown_protocol::method::DAEMON_GROUP_RESOLVE_PREVIEW);
+            let params: fluxdown_protocol::ResolvePreviewRequest =
+                serde_json::from_value(request.params.expect("preview params")).expect("params");
+            assert_eq!(params.url, captured().url);
+            assert_eq!(params.cookies, "sid=1");
+            assert_eq!(params.extra_headers["User-Agent"], "Browser/1");
+            assert_eq!(params.extra_headers["Authorization"], "Basic YWxpY2U6c2VjcmV0");
+            reply.send(Ok(json!({
+                "name": "Manifest", "sourceUrl": "https://changed.example",
+                "items": [{ "id": "opaque", "name": "safe.bin", "path": "", "size": 16, "variants": [] }],
+                "cookies": "sid=1", "headers": params.extra_headers, "body": "k=v",
+            }))).expect("respond preview");
+            let preview = previewing.await.expect("preview caller").expect("preview");
+            assert_eq!(preview.source_url, captured().url);
+            assert_eq!(preview.items[0].id, "opaque");
+            let wire = serde_json::to_string(&preview).expect("preview metadata");
+            for secret in ["sid=1", "Browser/1", "YWxpY2U6c2VjcmV0", "k=v", "cookies", "headers", "body"] {
+                assert!(!wire.contains(secret), "{secret}");
+            }
+            assert_eq!(capture.list().await[0].transaction_id, id);
+            capture.resolve(&id, false, None).await.expect("still rejectable");
+            assert!(calls.try_recv().is_err(), "preview did not create any task");
+            stop.send(()).expect("stop test daemon");
+            drop(capture);
+            drop(daemon_events);
+            server.await.expect("daemon server");
+        }).await.expect("preview lifecycle");
+    }
+
+    #[tokio::test]
+    async fn capture_group_retry_single_flight_and_ui_cancellation_preserve_single_consumption() {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let (capture, mut calls, daemon_events, stop, server) = daemon_service().await;
+            let id = queued_capture(&capture, get_capture()).await;
+            let create = |capture: Arc<CaptureService>, id: String| tokio::spawn(async move {
+                capture.create_group(&id, group(), form(json!({ "url": "" }))).await
+            });
+            let failing = create(capture.clone(), id.clone());
+            let (request, reply) = calls.recv().await.expect("first group request");
+            assert_eq!(request.method, fluxdown_protocol::method::DAEMON_GROUP_CREATE);
+            reply.send(Err(RpcErrorData::new(ApplicationErrorCode::InvalidArgument, false)))
+                .expect("reject before creation");
+            assert!(matches!(failing.await.expect("first caller"), Err(CaptureError::Daemon(_))));
+            assert_eq!(capture.list().await[0].transaction_id, id);
+
+            let creating = create(capture.clone(), id.clone());
+            let (request, reply) = calls.recv().await.expect("retry group request");
+            assert_eq!(request.method, fluxdown_protocol::method::DAEMON_GROUP_CREATE);
+            for accepted in [false, true] {
+                assert!(matches!(
+                    capture.resolve(&id, accepted, Some(form(json!({ "url": "" })))).await,
+                    Err(CaptureError::Busy)
+                ));
+            }
+            assert!(matches!(
+                capture.create_group(&id, group(), form(json!({ "url": "" }))).await,
+                Err(CaptureError::Busy)
+            ));
+            creating.abort();
+            assert!(creating.await.expect_err("UI caller cancelled").is_cancelled());
+            assert!(matches!(
+                capture.create_group(&id, group(), form(json!({ "url": "" }))).await,
+                Err(CaptureError::Busy)
+            ), "dropping the UI future must not release the running creation");
+            let (mut events, _) = capture.events.subscribe_and_snapshot();
+            reply.send(Ok(json!({ "groupId": "created-group" }))).expect("create group");
+            let event = events.recv().await.expect("consumption published");
+            assert!(matches!(
+                event.event,
+                ServiceEvent::Agent(AgentEvent::PendingCapturesChanged(pending)) if pending.is_empty()
+            ));
+            assert!(capture.list().await.is_empty());
+            assert!(matches!(
+                capture.create_group(&id, group(), form(json!({ "url": "" }))).await,
+                Err(CaptureError::NotFound)
+            ));
+            assert!(matches!(
+                capture.resolve(&id, true, None).await,
+                Err(CaptureError::NotFound)
+            ));
+            assert!(calls.try_recv().is_err(), "no duplicate group or ordinary task");
+            stop.send(()).expect("stop test daemon");
+            drop(capture);
+            drop(daemon_events);
+            server.await.expect("daemon server");
+        }).await.expect("group lifecycle");
+    }
+
+    #[tokio::test]
+    async fn capture_group_saves_credentials_for_original_site_without_revoking_success() {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let (capture, mut calls, daemon_events, stop, server) = daemon_service().await;
+            let id = queued_capture(&capture, get_capture()).await;
+            let creating =
+                {
+                    let capture = capture.clone();
+                    tokio::spawn(async move {
+                        capture.create_group(&id, group(), form(json!({
+                        "url": "https://changed.example/other",
+                        "httpUser": "alice", "httpPassword": "secret", "saveSiteAuth": true,
+                    }))).await
+                    })
+                };
+            let (request, reply) = calls.recv().await.expect("group create");
+            assert_eq!(
+                request.method,
+                fluxdown_protocol::method::DAEMON_GROUP_CREATE
+            );
+            reply
+                .send(Ok(json!({ "groupId": "saved-group" })))
+                .expect("create success");
+            let (request, reply) = calls.recv().await.expect("site authentication save");
+            assert_eq!(
+                request.method,
+                fluxdown_protocol::method::DAEMON_SITE_AUTH_SAVE
+            );
+            let saved: fluxdown_protocol::SiteAuthSaveRequest =
+                serde_json::from_value(request.params.expect("save params")).expect("credentials");
+            assert_eq!(saved.site, captured().url);
+            assert_eq!(saved.user, "alice");
+            assert_eq!(saved.pass, "secret");
+            assert!(
+                capture.list().await.is_empty(),
+                "group already consumed the transaction"
+            );
+            reply
+                .send(Err(RpcErrorData::new(
+                    ApplicationErrorCode::Unavailable,
+                    true,
+                )))
+                .expect("save failure");
+            let created = creating
+                .await
+                .expect("caller")
+                .expect("group remains successful");
+            assert_eq!(created.group_id, "saved-group");
+            assert!(
+                calls.try_recv().is_err(),
+                "save failure does not retry group creation"
+            );
+            stop.send(()).expect("stop test daemon");
+            drop(capture);
+            drop(daemon_events);
+            server.await.expect("daemon server");
+        })
+        .await
+        .expect("credential save lifecycle");
     }
 
     #[test]

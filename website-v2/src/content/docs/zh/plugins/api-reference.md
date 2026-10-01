@@ -3,7 +3,7 @@ title: 插件 API 参考
 description: 入口函数签名、flux.* 完整接口、全部运行时限制。
 section: plugins
 order: 4
-sourceHash: "4501af5b1d55"
+sourceHash: "84d6408325cb"
 ---
 
 插件脚本能看到的一切：FluxDown 会调用的六个入口函数，和注入的 `flux` 对象。跨越 JS 边界的字段名全部是 camelCase。
@@ -26,8 +26,9 @@ sourceHash: "4501af5b1d55"
 | `referrer` | string | 任务附带的 Referrer。 |
 | `userAgent` | string | 生效的 User-Agent。 |
 | `extraHeaders` | object | 额外请求头，字符串键值。 |
+| `resolverItem` | string | 已选择的清单子任务使用插件原始 `item.id`；用户显式选择该文件的规格时为 `<itemId>@<variantId>`。 |
 
-返回 `null` 或 `undefined` 表示放行（FluxDown 按 `ctx.url` 原样下载）。否则返回一个对象，除 `url` 外都可选：
+返回 `null` 或 `undefined` 表示放行（FluxDown 按 `ctx.url` 原样下载）。否则返回直链结果、顶层 `variants` 或多文件 `manifest`：
 
 | 字段 | 类型 | 含义 |
 |---|---|---|
@@ -40,10 +41,20 @@ sourceHash: "4501af5b1d55"
 | `rangeSupported` | boolean | `true` = 你担保解析后的服务支持 HTTP Range 请求（如 googlevideo）。与 `ephemeral` 组合时，FluxDown 依旧跳过探测，但直接按多线程分段规划下载，而不是保守的单流启动。默认 `false`：没有探测时，Range 能力只能从首个响应学习。 |
 | `variants` | array | 多个画质/格式选项。存在且多于一项时，FluxDown 弹出选择对话框，用户选中后在下载前收敛为单一直链（headless 服务器或免打扰下载场景直接静默使用 `defaultVariantIndex`，与 HLS 画质选择完全一致）。每项：`{ label, url, audioUrl?, fileName?, totalBytes?, bandwidth?, width?, height?, container? }`——`label` 和 `url` 必填。`variants` 非空时顶层 `url` 允许为空。最多 50 项，每个 `label` ≤ 200 字符。 |
 | `defaultVariantIndex` | number | 默认变体索引（60 秒超时 / 免打扰 / headless 时使用）。越界回退为 `0`。默认 `0`。 |
+| `manifest` | object | 多文件结果：`{ name?, items: [{ id, name, path?, size?, variants?: [{ id, label, size? }] }] }`。ID 是插件自己的选择令牌，path 是相对目录；宿主不会按文件名推断文件关系或画质。 |
 
 解析完成后，FluxDown 会用**解析后的** URL 重新判定协议引擎——resolver 可以返回 HLS 播放列表、磁力链接或 FTP 地址，对应引擎会自动接管。
 
 错误行为是 fail-closed：抛异常、超时、返回值不合法、插件已卸载或被禁用，任务都进入错误状态。原始 URL 绝不会被悄悄下载。
+
+#### 交互式多文件清单
+
+GPUI 新建下载窗口会在建任务前，对本机单个 GET 链接进行预解析。非空清单在原窗口进入文件选择；返回表单或取消预解析都不建任务。确认后按已选文件建组；建组失败留在清单中重试。
+
+默认选中插件返回的全部文件。已有插件的平铺清单仍保持平铺及原始 ID。只有插件提供 `item.variants` 时，宿主才显示每文件的画质/格式选择：保留「插件默认」时，`ctx.resolverItem` 使用 `item.id`；显式选择后使用 `<itemId>@<variantId>`，由插件把令牌解析到对应资源。这里的每文件元数据规格与上表的顶层直链 `variants` 是两种不同结构。
+
+浏览器捕获的私有请求上下文仍留在 agent，只把清单元数据返回 UI；成功建组后才消费捕获事务。多链接、远程下发、非 GET / body / 独立音轨请求以及无人值守下载沿用现有链路。
+
 
 ### `onStart(ctx)` / `onDone(ctx)` / `onError(ctx)` / `onMetaProbed(ctx)`
 
@@ -85,7 +96,8 @@ sourceHash: "4501af5b1d55"
 | `message` | string | 可选，展示给用户的状态文案。 |
 | `authRef` | string | 可选，成功后应指向刚保存的认证引用（省略时宿主用请求中的 `authRef` 兜底）。 |
 
-`poll` 回包省略 `challenge`/`challengeType` 时，宿主 UI 保留上一帧已展示的挑战，不清空——插件只需要在有新挑战时才带上这两个字段。
+当 `status` 为 `pending` 时，`poll` 回包省略或返回 `null` 的 `challenge`/`challengeType` 保留上一帧挑战；终态回包清除未返回的挑战字段，显式空挑战则清除内容。
+`challengeType: "qrcode"` 的普通文本（含登录 URL）由 GPUI 与 Web 本地生成白底不透明二维码，不把 URL 当图片请求。支持的 base64 图片 data URL 优先使用原图；二维码编码失败时回退文本，并保留完整原文的复制按钮。`pending`/`success` 的消息是普通状态提示，只有 `error` 消息使用错误样式。
 
 登录成功后插件调用 `flux.auth.save` 落库凭据；`authenticate` 本身不负责持久化。
 

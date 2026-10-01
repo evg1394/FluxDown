@@ -6,10 +6,13 @@ import { METHOD } from '../protocol';
 import type {
   AgentLoginResult,
   AgentSessionDto,
+  CaptureCreateGroupParams,
+  CapturePreviewParams,
   CaptureResolveParams,
   CaptureResolveResult,
   CaptureSubmitParams,
   CaptureSubmitResult,
+  CreateGroupResponse,
   ChangeEmailParams,
   ChangeNicknameParams,
   ChangeOriginIdParams,
@@ -68,6 +71,7 @@ import type {
   RemoteDispatchParams,
   RemoteDispatchResult,
   RemoteTaskDto,
+  ResolvePreviewResponse,
   SendCodeParams,
   SendNewEmailCodeParams,
   SyncLocalOnlyParams,
@@ -213,6 +217,11 @@ const capture = {
   list: () => call<PendingCaptureDto[]>(METHOD.AGENT_CAPTURE_LIST),
   resolve: (params: CaptureResolveParams) =>
     call<CaptureResolveResult>(METHOD.AGENT_CAPTURE_RESOLVE, params),
+  /** 保留浏览器上下文的只读预解析，不消费捕获事务。 */
+  preview: (params: CapturePreviewParams) =>
+    call<ResolvePreviewResponse>(METHOD.AGENT_CAPTURE_PREVIEW, params, { timeoutMs: 90_000 }),
+  createGroup: (params: CaptureCreateGroupParams) =>
+    call<CreateGroupResponse>(METHOD.AGENT_CAPTURE_CREATE_GROUP, params),
 };
 
 const diagnostics = {

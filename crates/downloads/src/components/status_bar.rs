@@ -1,7 +1,7 @@
-//! 状态栏：左 = 全局速度 + 全部暂停 / 全部开始；右 = 下行 / 上行限速、完成后关机、剩余空间。
+//! 状态栏：左 = 全局速度 + 全部暂停 / 全部开始；右 = 限速、代理、完成后关机、剩余空间。
 //!
-//! 限速走 `DownloadsCommand::PatchConfig`（键 `speed_limit_bytes` /
-//! `upload_limit_bytes`，单位字节/秒，见 `native/protocol/src/daemon_config.rs`）；
+//! 下载限速走云同步偏好写入；上传限速与代理模式走 `DownloadsCommand::PatchConfig`
+//!（`upload_limit_bytes` 为字节/秒，`proxy_mode` 为现有四模式之一）。
 //! 完成后关机走宿主注入的 `ShutdownPort`（状态机与真正执行归 agent，本文件只发请求 +
 //! 刷新倒计时显示）。
 
@@ -46,7 +46,7 @@ const SHUTDOWN_PRESETS_MIN: [i64; 4] = [1, 5, 10, 30];
 ///
 /// gpui-component 按钮会按 `Size` 在内部 label 上覆盖字号与图标尺寸，所以内容一律经
 /// [`status_button_content`] 作为子元素传入，确保 caption 字号 + `icon.sm` 生效。
-fn status_button(id: &'static str, cx: &App) -> Button {
+pub(super) fn status_button(id: &'static str, cx: &App) -> Button {
     let theme = active_theme(cx);
     Button::new(id)
         .ghost()
@@ -56,7 +56,7 @@ fn status_button(id: &'static str, cx: &App) -> Button {
 }
 
 /// 状态栏按钮内容：可选图标 + 可选文字，caption 字号、等宽数字；`color` 为空时继承按钮前景色。
-fn status_button_content(
+pub(super) fn status_button_content(
     icon: Option<FluxIcon>,
     text: Option<SharedString>,
     color: Option<Hsla>,
@@ -211,7 +211,7 @@ fn open_number_prompt(
 }
 
 impl DownloadView {
-    /// 状态栏冲突 / 失败提示复用现有横幅字段（`last_error`），不新增 `DownloadStrings`。
+    /// 下载限速仍经云同步偏好写入；其余数值配置使用 daemon 增量写回。
     fn execute_config_patch(&mut self, key: &'static str, value: i64, cx: &mut Context<Self>) {
         // 下载限速属于云同步目录（download.speed_limit_bytes）：必须走偏好写入链路，
         // 直写 daemon 配置不会被标记为本地改动，之后会被云端旧值覆盖。
@@ -228,6 +228,15 @@ impl DownloadView {
                 expected_revision: self.controller.config_revision(),
             }
         };
+        self.execute_status_config_command(command, cx);
+    }
+
+    /// 状态栏配置冲突 / 失败复用现有横幅字段，不新增错误文案或宿主回调。
+    pub(super) fn execute_status_config_command(
+        &mut self,
+        command: DownloadsCommand,
+        cx: &mut Context<Self>,
+    ) {
         let future = self.controller.execute(command);
         let conflict_message = SharedString::from(
             self.translator
@@ -516,7 +525,7 @@ impl DownloadView {
             )
     }
 
-    /// 状态栏：左 = 全局速度 + 全部暂停 / 全部开始；右 = 限速、完成后关机、剩余空间。
+    /// 状态栏：左 = 全局速度 + 全部暂停 / 全部开始；右 = 限速、代理、完成后关机、剩余空间。
     pub(crate) fn render_status_bar(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let stats = self.controller.runtime_stats();
         let download_speed = format!("{}/s", format_bytes(stats.total_download_bps.max(0) as u64));
@@ -567,6 +576,7 @@ impl DownloadView {
             "upload_limit_bytes",
             cx,
         );
+        let proxy_control = self.render_proxy_control(cx);
         let shutdown_control = self.render_shutdown_control(cx);
         let icon_cell = move |icon: FluxIcon, text: String| {
             h_flex()
@@ -614,9 +624,10 @@ impl DownloadView {
                     .gap(spacing.xs)
                     .child(download_limit)
                     .child(upload_limit)
+                    .child(proxy_control)
                     .child(shutdown_control)
                     .children(
-                        // 与左侧按钮的内边距对齐，使限速 / 关机 / 磁盘三者视觉间距一致。
+                        // 与左侧按钮内边距对齐，使右侧控件与磁盘信息的视觉间距一致。
                         disk_free.map(|disk_free| {
                             icon_cell(FluxIcon::HardDrive, disk_free).px(spacing.xs)
                         }),

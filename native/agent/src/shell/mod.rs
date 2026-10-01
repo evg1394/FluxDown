@@ -184,7 +184,7 @@ impl ShellState {
     /// 官方 UI 断开。
     pub async fn ui_disconnected(&self) {
         self.ui_clients
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |count| {
                 Some(count.saturating_sub(1))
             })
             .unwrap_or_else(|_| panic!("UI client decrement always supplies an updated count"));

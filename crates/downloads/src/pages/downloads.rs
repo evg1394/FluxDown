@@ -32,7 +32,7 @@ use crate::{
     strings::{DownloadStrings, error_text},
     submission::{NewDownloadSubmission, SubmitNotice, run_submission},
 };
-use fluxdown_ui_components::{ControlExt as _, FluxIcon};
+use fluxdown_ui_components::{ControlExt as _, FluxIcon, SidebarChange, SidebarState};
 use fluxdown_ui_i18n::Translator;
 use gpui::{
     App, AppContext as _, ClipboardItem, Context, Entity, ExternalPaths, FocusHandle, FontWeight,
@@ -119,11 +119,10 @@ pub struct DownloadView {
     pub(crate) section_expanded: HashMap<SidebarSection, bool>,
     pub(crate) section_motion_from: HashMap<SidebarSection, f32>,
     pub(crate) section_motion_started_at: HashMap<SidebarSection, Instant>,
+    pub(crate) sidebar: Entity<SidebarState>,
     pub(crate) table_state: Entity<TableState<DownloadTableDelegate>>,
     pub(crate) host: DownloadHostActions,
     pub(crate) last_error: Option<SharedString>,
-    pub(crate) resizable_state: Entity<ResizableState>,
-    resizable_state_initialized: bool,
     /// 根元素 focus handle：右键菜单 action_context 分派目标，`escape`
     /// 清空搜索框后也交回给它。
     pub(crate) focus_handle: FocusHandle,
@@ -225,6 +224,18 @@ impl DownloadView {
             }
         })
         .detach();
+        let sidebar = cx.new(|cx| SidebarState::new(px(200.), px(176.)..px(300.), cx));
+        cx.observe(&sidebar, |_, _, cx| cx.notify()).detach();
+        cx.subscribe(&sidebar, |this, _, change: &SidebarChange, cx| {
+            this.table_state.update(cx, |table, _| {
+                let prefs = table.delegate_mut().prefs_mut();
+                prefs.sidebar_width = f32::from(change.width);
+                prefs.sidebar_collapsed = change.collapsed;
+            });
+            this.schedule_persist_prefs(cx);
+            cx.notify();
+        })
+        .detach();
 
         Self {
             controller,
@@ -241,11 +252,10 @@ impl DownloadView {
                 .collect(),
             section_motion_from: HashMap::new(),
             section_motion_started_at: HashMap::new(),
+            sidebar,
             table_state,
             host: DownloadHostActions::default(),
             last_error: None,
-            resizable_state: cx.new(|_| ResizableState::default()),
-            resizable_state_initialized: false,
             focus_handle,
             search_input,
             search_placeholder: strings_placeholder,
@@ -261,6 +271,11 @@ impl DownloadView {
             refresh_gate: RefreshGate::default(),
             refreshed_structure: u64::MAX,
         }
+    }
+
+    /// 供 shell 顶栏与页面共享的侧栏状态；布局修改沿用下载页偏好持久化。
+    pub fn sidebar_state(&self) -> Entity<SidebarState> {
+        self.sidebar.clone()
     }
 
     /// 注入宿主入口（新建下载 / 任务窗口 / 队列管理…）。
@@ -1864,13 +1879,6 @@ impl DownloadView {
 
 impl Render for DownloadView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let sizes = self.resizable_state.read(cx).sizes().to_vec();
-        let main_panel_measured = sizes.get(1).is_some_and(|size| *size > px(1.));
-        if !self.resizable_state_initialized && main_panel_measured {
-            self.resizable_state
-                .update(cx, |state, cx| state.reset_panel(1, cx));
-            self.resizable_state_initialized = true;
-        }
         // 语言切换后同步搜索框 placeholder（InputState 只在构造时取一次）。
         if self.search_placeholder != self.strings.search_tasks_placeholder {
             self.search_placeholder = self.strings.search_tasks_placeholder.clone();
@@ -1879,7 +1887,6 @@ impl Render for DownloadView {
                 input.set_placeholder(placeholder, window, cx);
             });
         }
-        let sidebar_width = self.table_state.read(cx).delegate().prefs().sidebar_width;
         v_flex()
             .key_context(KEY_CONTEXT)
             .size_full()
@@ -1917,29 +1924,7 @@ impl Render for DownloadView {
                 let tokens = fluxdown_ui_theme::active_theme(cx).tokens();
                 style.bg(tokens.colors.accent.opacity(0.2))
             })
-            .child(
-                div().flex_1().min_h_0().min_w_0().child(
-                    h_resizable("downloads-content")
-                        .with_state(&self.resizable_state)
-                        .on_resize(cx.listener(|this, state: &Entity<ResizableState>, _, cx| {
-                            state.update(cx, |state, cx| state.reset_panel(1, cx));
-                            if let Some(width) = state.read(cx).sizes().first().copied() {
-                                let width = f32::from(width);
-                                if width > 0. {
-                                    this.mutate_prefs(|prefs| prefs.sidebar_width = width, cx);
-                                }
-                            }
-                        }))
-                        .child(
-                            resizable_panel()
-                                .size(px(sidebar_width))
-                                .flex_none()
-                                .size_range(px(176.)..px(300.))
-                                .child(self.render_sidebar(window, cx)),
-                        )
-                        .child(resizable_panel().child(self.render_main(cx))),
-                ),
-            )
+            .child(self.render_sidebar_layout(window, cx))
             .child(self.render_status_bar(cx))
     }
 }

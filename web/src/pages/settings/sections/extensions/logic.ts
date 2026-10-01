@@ -1,7 +1,7 @@
 // 扩展设置的纯逻辑（无 React / 别名依赖，可被 bun test 直接加载）。
 // 语义与 crates/extensions（plugin_settings.rs / plugins.rs / plugin_auth.rs / managed_components.rs）逐条对齐。
 
-import type { MarketEntryDto, PluginDto, SettingFieldDto } from '../../../../lib/rpc/protocol'
+import type { MarketEntryDto, PluginAuthResponse, PluginDto, SettingFieldDto } from '../../../../lib/rpc/protocol'
 
 // ── 插件设置校验 ────────────────────────────────────────────
 
@@ -168,6 +168,37 @@ export function permissionKeys(permission: string): { name: string; desc: string
 }
 
 // ── 插件登录挑战 ────────────────────────────────────────────
+
+export interface PluginAuthState {
+  status: string
+  sessionId: string
+  authRef: string
+  challenge: string | null
+  challengeType: string | null
+  message: string | null
+}
+
+export function isQrcodeChallenge(type: string | null): boolean {
+  return type?.toLowerCase() === 'qrcode'
+}
+
+/** pending poll 可以省略挑战；终态不沿用旧挑战，logout 始终清空本地登录态。 */
+export function applyPluginAuthResponse(
+  previous: PluginAuthState,
+  response: PluginAuthResponse,
+  wasLogout: boolean,
+): PluginAuthState {
+  const pending = response.status === 'pending'
+  const next: PluginAuthState = {
+    status: response.status,
+    sessionId: response.sessionId,
+    authRef: response.authRef ?? '',
+    challenge: pending ? (response.challenge ?? previous.challenge) : (response.challenge ?? null),
+    challengeType: pending ? (response.challengeType ?? previous.challengeType) : (response.challengeType ?? null),
+    message: response.message || null,
+  }
+  return wasLogout ? { ...next, authRef: '', sessionId: '', challenge: null, challengeType: null } : next
+}
 
 /** 挑战文本超过该长度即截断显示（复制按钮始终给出完整原文）。 */
 export const CHALLENGE_TEXT_LIMIT = 512
