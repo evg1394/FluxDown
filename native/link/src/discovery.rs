@@ -57,6 +57,32 @@ impl MdnsAdvertiser {
         app_version: Option<&str>,
     ) -> LinkResult<Self> {
         let daemon = ServiceDaemon::new().map_err(map_mdns_err)?;
+        let info = Self::service_info(port, fingerprint, name, platform, app_version)?;
+        daemon.register(info).map_err(map_mdns_err)?;
+        Ok(Self { daemon })
+    }
+
+    /// 将已有广告重新通告为新端口，沿用同一 daemon、服务名与设备身份。
+    pub(crate) fn update_port(
+        &self,
+        port: u16,
+        fingerprint: &str,
+        name: &str,
+        platform: Option<&str>,
+        app_version: Option<&str>,
+    ) -> LinkResult<()> {
+        let info = Self::service_info(port, fingerprint, name, platform, app_version)?;
+        // mdns-sd 用相同 fullname 原地替换服务，无需 unregister（避免广告空窗）。
+        self.daemon.register(info).map_err(map_mdns_err)
+    }
+
+    fn service_info(
+        port: u16,
+        fingerprint: &str,
+        name: &str,
+        platform: Option<&str>,
+        app_version: Option<&str>,
+    ) -> LinkResult<ServiceInfo> {
         // 实例名用短指纹保证唯一（同名设备不冲突）；host_name 走 <fp>.local.。
         let short_fp: String = fingerprint.chars().take(12).collect();
         let host_name = format!("{short_fp}.local.");
@@ -67,11 +93,9 @@ impl MdnsAdvertiser {
             (TXT_VERSION, app_version.unwrap_or("")),
         ];
         // ip 传空 + enable_addr_auto()：由 mdns-sd 自动探测并跟踪本机接口地址。
-        let info = ServiceInfo::new(SERVICE_TYPE, &short_fp, &host_name, "", port, &props[..])
-            .map_err(map_mdns_err)?
-            .enable_addr_auto();
-        daemon.register(info).map_err(map_mdns_err)?;
-        Ok(Self { daemon })
+        ServiceInfo::new(SERVICE_TYPE, &short_fp, &host_name, "", port, &props[..])
+            .map(ServiceInfo::enable_addr_auto)
+            .map_err(map_mdns_err)
     }
 }
 

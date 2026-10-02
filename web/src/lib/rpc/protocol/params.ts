@@ -305,6 +305,8 @@ export interface GatewayPatchParams {
   mcpEnabled?: boolean;
   corsEnabled?: boolean;
   lanEnabled?: boolean;
+  /** 1024..=65535；验证新 API/RPC 服务可用后立即切换，固定监听模式拒绝修改。 */
+  port?: number;
   /** 空串 = 清除用户 token；省略 = 保持。 */
   userToken?: string;
   /** true 生成新的随机 token（优先于 `userToken`）。 */

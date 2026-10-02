@@ -341,8 +341,10 @@ export interface GatewayStatusDto {
   mcpEnabled: boolean;
   corsEnabled: boolean;
   userTokenConfigured: boolean;
-  /** 当前监听端口（只读，默认 17800）。 */
+  /** 当前已验证可用的实际监听端口；修改失败时保持原值。 */
   port: number;
+  /** server 模式或环境固定监听地址时为 false。 */
+  portEditable: boolean;
   /** 是否对局域网开放兼容 API；修改后下次 agent 启动生效。 */
   lanEnabled: boolean;
 }

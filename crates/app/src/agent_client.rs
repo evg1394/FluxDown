@@ -44,7 +44,7 @@ pub enum AgentClientEvent {
 
 #[derive(Clone)]
 pub struct AgentClientConfig {
-    pub rpc_url: String,
+    pub rpc_url: Option<String>,
     pub bearer_path: PathBuf,
 }
 
@@ -65,7 +65,9 @@ impl AgentClient {
         config: AgentClientConfig,
         bootstrap: Arc<ServiceBootstrap>,
     ) -> Result<(Arc<Self>, mpsc::Receiver<AgentClientEvent>), AgentClientError> {
-        validate_url(&config.rpc_url)?;
+        if let Some(url) = config.rpc_url.as_deref() {
+            validate_url(url)?;
+        }
         let runtime = Arc::new(
             tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
@@ -137,7 +139,26 @@ async fn run_client(
     let mut replaced_incompatible = false;
     let mut link_log = ConnectionLog::default();
     loop {
-        match connect(&config).await {
+        let rpc_url = match crate::agent_endpoint::discover_rpc_url(
+            config.rpc_url.as_deref(),
+            &config.bearer_path,
+        )
+        .await
+        {
+            Ok(url) => url,
+            Err(error) => {
+                log::error!("could not discover local agent endpoint: {error}");
+                if events
+                    .send(AgentClientEvent::Fatal(internal_error()))
+                    .await
+                    .is_err()
+                {
+                    log::debug!("agent event receiver closed during desktop shutdown");
+                }
+                return;
+            }
+        };
+        match connect(&config, &rpc_url).await {
             Ok((socket, snapshot, buffered)) => {
                 attempt = 0;
                 link_log.connected();
@@ -183,10 +204,7 @@ async fn run_client(
             Err(error @ (ConnectError::NoBearer | ConnectError::Refused)) => {
                 let probe_listener = matches!(error, ConnectError::NoBearer);
                 link_log.failed(&error);
-                match bootstrap
-                    .ensure_running(&config.rpc_url, probe_listener)
-                    .await
-                {
+                match bootstrap.ensure_running(&rpc_url, probe_listener).await {
                     Ok(true) => {
                         if events
                             .send(AgentClientEvent::ServiceStarting)
@@ -208,13 +226,10 @@ async fn run_client(
             Err(ConnectError::Incompatible) if !replaced_incompatible => {
                 replaced_incompatible = true;
                 log::warn!("running agent speaks an incompatible protocol; asking it to shut down");
-                if request_shutdown(&config).await {
+                if request_shutdown(&config, &rpc_url).await {
                     // 旧 agent 关停 daemon 后退出；连接被拒时由 bootstrap 拉起同级新版本。
-                    crate::service_bootstrap::wait_until_stopped(
-                        &config.rpc_url,
-                        Duration::from_secs(30),
-                    )
-                    .await;
+                    crate::service_bootstrap::wait_until_stopped(&rpc_url, Duration::from_secs(30))
+                        .await;
                     attempt = 0;
                     continue;
                 }
@@ -319,8 +334,8 @@ fn retry_delay(attempt: usize) -> Duration {
 }
 
 /// 握手前 `system.shutdown`：只有支持该首帧的 agent（协议 v4 起）会受理。
-async fn request_shutdown(config: &AgentClientConfig) -> bool {
-    let Ok(mut socket) = open_socket(config).await else {
+async fn request_shutdown(config: &AgentClientConfig, rpc_url: &str) -> bool {
+    let Ok(mut socket) = open_socket(config, rpc_url).await else {
         return false;
     };
     let mut buffered = Vec::new();
@@ -329,7 +344,7 @@ async fn request_shutdown(config: &AgentClientConfig) -> bool {
         .is_ok()
 }
 
-async fn open_socket(config: &AgentClientConfig) -> Result<Socket, ConnectError> {
+async fn open_socket(config: &AgentClientConfig, rpc_url: &str) -> Result<Socket, ConnectError> {
     let bearer = tokio::fs::read_to_string(&config.bearer_path)
         .await
         .map_err(|_| ConnectError::NoBearer)?;
@@ -337,9 +352,7 @@ async fn open_socket(config: &AgentClientConfig) -> Result<Socket, ConnectError>
     if bearer.is_empty() {
         return Err(ConnectError::NoBearer);
     }
-    let mut request = config
-        .rpc_url
-        .clone()
+    let mut request = rpc_url
         .into_client_request()
         .map_err(|_| ConnectError::Fatal(protocol_error()))?;
     let authorization = HeaderValue::from_str(&format!("Bearer {bearer}"))
@@ -348,7 +361,7 @@ async fn open_socket(config: &AgentClientConfig) -> Result<Socket, ConnectError>
         .headers_mut()
         .insert(header::AUTHORIZATION, authorization);
     // 先自行完成 TCP 连接：回环端口无人监听时按超时判定，不等 Windows 约 2s 的拒绝。
-    let stream = match crate::service_bootstrap::connect_listener(&config.rpc_url).await {
+    let stream = match crate::service_bootstrap::connect_listener(rpc_url).await {
         Ok(Some(stream)) => stream,
         Ok(None) => return Err(ConnectError::Refused),
         Err(error) => return Err(ConnectError::Transient(format!("connect: {error}"))),
@@ -361,8 +374,9 @@ async fn open_socket(config: &AgentClientConfig) -> Result<Socket, ConnectError>
 
 async fn connect(
     config: &AgentClientConfig,
+    rpc_url: &str,
 ) -> Result<(Socket, Snapshot, Vec<EventFrame>), ConnectError> {
-    let mut socket = open_socket(config).await?;
+    let mut socket = open_socket(config, rpc_url).await?;
     let mut buffered = Vec::new();
     let hello = serde_json::json!({
         "clientName": "fluxdown-desktop",
@@ -614,25 +628,8 @@ impl ConnectError {
 }
 
 fn validate_url(url: &str) -> Result<(), AgentClientError> {
-    let url = reqwest_url(url)?;
-    let host = url
-        .host()
-        .ok_or_else(|| AgentClientError::Configuration("agent URL has no host".to_owned()))?;
-    let loopback = host == "localhost"
-        || host
-            .parse::<std::net::IpAddr>()
-            .is_ok_and(|ip| ip.is_loopback());
-    if loopback {
-        Ok(())
-    } else {
-        Err(AgentClientError::Configuration(
-            "agent URL must be loopback".to_owned(),
-        ))
-    }
-}
-
-fn reqwest_url(url: &str) -> Result<tokio_tungstenite::tungstenite::http::Uri, AgentClientError> {
-    url.parse::<tokio_tungstenite::tungstenite::http::Uri>()
+    crate::agent_endpoint::socket_target(url)
+        .map(|_| ())
         .map_err(|error| AgentClientError::Configuration(error.to_string()))
 }
 

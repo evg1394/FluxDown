@@ -38,7 +38,7 @@
  *   2. 在页面 JS 层 hook fetch / XMLHttpRequest / MediaSource 嗅探流媒体清单
  *      （HLS .m3u8 / DASH .mpd）与 AJAX 加载的可下载资源；
  *   3. 通过 GM_xmlhttpRequest POST 到 FluxDown 的本地 HTTP 接管服务
- *      （默认 http://127.0.0.1:17800/download），由桌面端弹出确认框后下载。
+ *      （默认 http://127.0.0.1:17800/download），进入桌面端的外部下载流程。
  *
  * 与浏览器扩展的能力差异（务必知悉）
  * ----------------------------------
@@ -52,8 +52,9 @@
  * ----
  *   - 仅连接 127.0.0.1 / localhost；
  *   - 每个请求携带 X-FluxDown-Client 头（FluxDown 据此拦截恶意网页的跨域伪造请求）；
- *   - 可在菜单里设置 Token（与 FluxDown 设置页一致）做额外鉴权；
- *   - 最终所有下载都会在 FluxDown 弹出确认框，不会静默下载。
+ *   - 设置页复制的脚本自带当前端口和 Token；也可在油猴菜单里修改；
+ *   - 凭据仅保存在脚本沙箱，请勿分享含 Token 的脚本；无需打开 CORS；
+ *   - 下载遵从桌面端的确认 / 免打扰设置，不绕过现有接管策略。
  *
  * 配置（点击油猴菜单 → FluxDown ...）
  * -----------------------------------
@@ -73,10 +74,19 @@
   // 配置
   // ==========================================================================
 
+  // 设置页复制时只替换此安装配置；凭据留在脚本沙箱，不挂到 unsafeWindow / DOM。
+  const INSTALL_CONFIG = { port: 17800, token: '' };
+  const installation = JSON.stringify(INSTALL_CONFIG);
+  if (GM_getValue('installationConfig', null) !== installation) {
+    GM_setValue('port', INSTALL_CONFIG.port);
+    GM_setValue('token', INSTALL_CONFIG.token);
+    GM_setValue('installationConfig', installation);
+  }
+
   const CFG = {
-    get port() { return GM_getValue('port', 17800); },
+    get port() { return GM_getValue('port', INSTALL_CONFIG.port); },
     set port(v) { GM_setValue('port', v); },
-    get token() { return GM_getValue('token', ''); },
+    get token() { return GM_getValue('token', INSTALL_CONFIG.token); },
     set token(v) { GM_setValue('token', v); },
     get enabled() { return GM_getValue('enabled', true); },
     set enabled(v) { GM_setValue('enabled', v); },
@@ -381,6 +391,7 @@
           headers: opts.headers || {},
           data: opts.data,
           timeout: opts.timeout || 8000,
+          anonymous: true,
           onload: (r) => resolve(r),
           onerror: (e) => reject(e),
           ontimeout: () => reject(new Error('timeout')),
@@ -1021,8 +1032,8 @@
     add(t('menuPort', CFG.port), () => {
       const p = prompt(t('promptPort'), String(CFG.port));
       if (p !== null) {
-        const n = parseInt(p.trim(), 10);
-        if (n >= 1 && n <= 65535) { CFG.port = n; toast(t('portSet', n)); registerMenu(); }
+        const n = Number(p.trim());
+        if (Number.isInteger(n) && n >= 1024 && n <= 65535) { CFG.port = n; toast(t('portSet', n)); registerMenu(); }
         else toast(t('portBad'), true);
       }
     });

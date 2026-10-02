@@ -146,8 +146,15 @@ pub(crate) fn run() -> Result<RunOutcome, AppError> {
     let listener =
         instance_ipc::Listener::bind(endpoint.clone()).map_err(AppError::ActivationListener)?;
     let agent_config = AgentClientConfig {
-        rpc_url: env::var("FLUXDOWN_AGENT_URL")
-            .unwrap_or_else(|_| "ws://127.0.0.1:17800/rpc".to_owned()),
+        rpc_url: match env::var("FLUXDOWN_AGENT_URL") {
+            Ok(url) => Some(url),
+            Err(env::VarError::NotPresent) => None,
+            Err(env::VarError::NotUnicode(_)) => {
+                return Err(AppError::AgentClient(AgentClientError::Configuration(
+                    "FLUXDOWN_AGENT_URL is not valid UTF-8".to_owned(),
+                )));
+            }
+        },
         bearer_path: token_path,
     };
 

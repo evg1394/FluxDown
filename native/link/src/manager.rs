@@ -14,6 +14,7 @@
 
 use std::collections::HashMap;
 use std::net::IpAddr;
+use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::{Arc, Mutex};
 
 use base64::Engine as _;
@@ -190,7 +191,9 @@ pub struct LinkManager {
     responder: PairingResponder,
     transport: TransportStack,
     client: reqwest::Client,
-    options: LinkOptions,
+    api_port: AtomicU16,
+    reachable: bool,
+    advertise: bool,
     events: mpsc::Sender<LinkEngineEvent>,
     advertiser: Mutex<Option<MdnsAdvertiser>>,
     browser: Mutex<Option<MdnsBrowser>>,
@@ -237,7 +240,9 @@ impl LinkManager {
             responder,
             transport,
             client,
-            options,
+            api_port: AtomicU16::new(options.api_port),
+            reachable: options.reachable,
+            advertise: options.advertise,
             events,
             advertiser: Mutex::new(None),
             browser: Mutex::new(None),
@@ -295,6 +300,36 @@ impl LinkManager {
     #[must_use]
     pub fn self_name(&self) -> &str {
         &self.self_info.name
+    }
+
+    /// 更新实际 API 端口及已开启的 mDNS 广播；不改变可达范围、身份、配对或浏览状态。
+    ///
+    /// 广播更新失败时保留旧端口并恢复旧广告。未开始广播时只更新未来的自报候选与广播端口。
+    pub fn update_api_port(&self, api_port: u16) -> LinkResult<()> {
+        let advertiser = self.advertiser.lock().map_err(|_| LinkError::Unavailable)?;
+        let old_port = self.api_port.load(Ordering::Relaxed);
+        if let Some(advertiser) = advertiser.as_ref() {
+            let update = |port| {
+                advertiser.update_port(
+                    port,
+                    self.identity.fingerprint(),
+                    &self.self_info.name,
+                    self.self_info.platform.as_deref(),
+                    self.self_info.app_version.as_deref(),
+                )
+            };
+            if let Err(error) = update(api_port) {
+                // register 的通知 socket 失败时，命令可能已经排队；必须显式恢复旧广告。
+                update(old_port).map_err(|rollback| {
+                    LinkError::Io(format!(
+                        "mDNS port update failed: {error}; restoring previous port failed: {rollback}"
+                    ))
+                })?;
+                return Err(error);
+            }
+        }
+        self.api_port.store(api_port, Ordering::Relaxed);
+        Ok(())
     }
 
     /// 本机平台（供 `/ping` 透出）。
@@ -455,7 +490,7 @@ impl LinkManager {
     /// 确保 mDNS 广播运行（幂等）。本机 API 局域网不可达（[`LinkOptions::reachable`]
     /// 为 `false`）时不广播。失败仅记 Error 事件，不阻断配对（手动地址可兜底）。
     fn ensure_advertising(&self) {
-        if !self.options.reachable || !self.options.advertise {
+        if !self.reachable || !self.advertise {
             return;
         }
         let mut guard = match self.advertiser.lock() {
@@ -466,7 +501,7 @@ impl LinkManager {
             return;
         }
         match MdnsAdvertiser::start(
-            self.options.api_port,
+            self.api_port.load(Ordering::Relaxed),
             self.identity.fingerprint(),
             &self.self_info.name,
             self.self_info.platform.as_deref(),
@@ -746,7 +781,7 @@ impl LinkManager {
     /// 本机朝向 `peer` 的可回连地址（`initiatorAddrs`，供对端存为回连候选）。本机 API
     /// 局域网不可达、或对端是 https 站点（多半是公网反代，回连无意义）时为空。
     async fn self_addrs_towards(&self, peer: &PeerAddress) -> Vec<String> {
-        if !self.options.reachable || peer.is_https() {
+        if !self.reachable || peer.is_https() {
             return Vec::new();
         }
         let host = peer.host();
@@ -762,7 +797,7 @@ impl LinkManager {
                 Err(_) => String::new(),
             }
         };
-        discovery::local_direct_addrs(&ip_text, self.options.api_port)
+        discovery::local_direct_addrs(&ip_text, self.api_port.load(Ordering::Relaxed))
     }
 
     /// SAS 核对后确认/拒绝配对。`accept=true` 且对端确认成功 → 落库 + 广播 Paired。
@@ -1418,6 +1453,96 @@ mod tests {
         let sealed = seal_link_body(&derive_link_aead_key(secret), plaintext);
         let tag = link_auth_tag(secret, "POST", path, ts, nonce, &sealed);
         (sealed, tag)
+    }
+
+    #[tokio::test]
+    async fn api_port_update_refreshes_pairing_candidates_without_resetting_identity_or_auth() {
+        let secret = vec![7u8; 32];
+        let (mgr, fp) = mgr_with_device(secret.clone()).await;
+        let identity = mgr.fingerprint().to_owned();
+        let peer = PeerAddress::parse("127.0.0.1:17800").unwrap();
+        let path = LINK_TASKS_PATH;
+        let ts = now_unix();
+        let plaintext = br#"{"url":"http://example.test/file"}"#;
+        let (sealed, tag) = seal_and_tag(&secret, path, ts, "before-port-update", plaintext);
+        mgr.authorize(
+            "POST",
+            path,
+            &fp,
+            ts,
+            "before-port-update",
+            &sealed,
+            &tag,
+            "v1",
+        )
+        .await
+        .unwrap();
+        assert_eq!(mgr.self_addrs_towards(&peer).await, vec!["127.0.0.1:17800"]);
+
+        mgr.update_api_port(17801).unwrap();
+        assert_eq!(mgr.self_addrs_towards(&peer).await, vec!["127.0.0.1:17801"]);
+        assert_eq!(mgr.fingerprint(), identity);
+        assert!(
+            mgr.advertiser
+                .lock()
+                .is_ok_and(|advertiser| advertiser.is_none()),
+            "updating a port must not start advertising"
+        );
+        // 端口切换不能清除防重放状态，也不能使已有 link_secret 失效。
+        assert!(matches!(
+            mgr.authorize(
+                "POST",
+                path,
+                &fp,
+                ts,
+                "before-port-update",
+                &sealed,
+                &tag,
+                "v1"
+            )
+            .await,
+            Err(LinkError::Unauthorized)
+        ));
+        let (sealed, tag) = seal_and_tag(&secret, path, ts, "after-port-update", plaintext);
+        let authorized = mgr
+            .authorize(
+                "POST",
+                path,
+                &fp,
+                ts,
+                "after-port-update",
+                &sealed,
+                &tag,
+                "v1",
+            )
+            .await
+            .unwrap();
+        assert_eq!(authorized.device, fp);
+        assert_eq!(authorized.body, plaintext);
+
+        mgr.update_api_port(17800).unwrap();
+        assert_eq!(mgr.self_addrs_towards(&peer).await, vec!["127.0.0.1:17800"]);
+    }
+
+    #[tokio::test]
+    async fn api_port_update_does_not_expand_reachability_or_revoke_pairing_codes() {
+        let (mgr, _events) = responder_mgr().await;
+        let code = mgr.generate_code();
+        mgr.update_api_port(17801).unwrap();
+        let peer = PeerAddress::parse("127.0.0.1:17800").unwrap();
+        assert!(mgr.self_addrs_towards(&peer).await.is_empty());
+        assert!(
+            mgr.advertiser
+                .lock()
+                .is_ok_and(|advertiser| advertiser.is_none())
+        );
+        let mut initiator = PairingInitiator::new(LinkIdentity::generate());
+        let hello = initiator.build_hello(&code, &mgr.self_info, Vec::new());
+        let response = mgr.responder.handle_hello(&hello, None).unwrap();
+        assert_eq!(
+            crate::crypto::fingerprint(&response.responder_id_pub),
+            mgr.fingerprint()
+        );
     }
 
     #[tokio::test]

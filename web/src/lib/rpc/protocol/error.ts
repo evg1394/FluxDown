@@ -71,6 +71,8 @@ export type ErrorReason =
   | 'runningElevated'
   | 'repairIncomplete'
   | 'repairNotApplicable'
+  | 'gatewayPortInUse'
+  | 'gatewayRestartFailed'
   | 'unknown';
 
 /** `error.data`：应用错误的机器可读详情。 */

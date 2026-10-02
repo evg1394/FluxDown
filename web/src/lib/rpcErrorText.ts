@@ -34,6 +34,10 @@ export function rpcErrorKind(error: RpcError): RpcErrorKind {
  */
 export function rpcErrorText(error: unknown, t: TFunction): string {
   if (!(error instanceof RpcError)) return describeUploadError(error, t)
+  switch (error.data?.reason) {
+    case 'gatewayPortInUse': return t('apiServicePortInUse')
+    case 'gatewayRestartFailed': return t('apiServiceRestartFailed')
+  }
   const kind = rpcErrorKind(error)
   const base = t(RPC_ERROR_KEYS[kind])
   return kind === 'invalidArgument' && error.message ? `${base}: ${error.message}` : base

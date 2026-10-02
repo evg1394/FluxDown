@@ -101,21 +101,35 @@ pub(crate) async fn run_with(
 
     // 先绑定 UI Gateway：实际端口进入状态与快照，后续 Doctor/兼容 API 都据此探测。
     // server 模式只由 `FLUXDOWN_BIND` 决定（允许非回环，不看 `lan_enabled`）。
-    let listener = match server_config {
-        Some(config) => TcpListener::bind(config.bind).await?,
-        None => {
-            let override_bind = std::env::var("FLUXDOWN_AGENT_BIND").ok();
-            TcpListener::bind(gateway_bind_address(
-                state.gateway.lan_enabled,
-                override_bind.as_deref(),
-            )?)
-            .await?
+    let override_bind = if server_config.is_none() {
+        match std::env::var("FLUXDOWN_AGENT_BIND") {
+            Ok(value) => Some(value),
+            Err(std::env::VarError::NotPresent) => None,
+            Err(error) => return Err(error.into()),
         }
+    } else {
+        None
     };
+    let listener = bind_gateway_listener(
+        &mut state,
+        &store,
+        server_config.map(|config| config.bind),
+        override_bind.as_deref(),
+    )
+    .await?;
     let bound = listener.local_addr()?;
-    if state.gateway.port != bound.port() {
-        state.gateway.port = bound.port();
-        store.save(&state).await?;
+    let bearer_override = std::env::var_os("FLUXDOWN_AGENT_TOKEN_FILE").map(PathBuf::from);
+    let bearer = load_or_create_bearer(store.data_dir(), bearer_override.as_deref()).await?;
+    let endpoint_dir = server.is_none().then(|| match bearer_override.as_deref() {
+        Some(path) => path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."))
+            .to_path_buf(),
+        None => store.data_dir().to_path_buf(),
+    });
+    if let Some(directory) = &endpoint_dir {
+        store.save_gateway_endpoint(directory, bound).await?;
     }
     tracing::info!(address = %bound, "fluxdown-agent gateway listening");
 
@@ -382,13 +396,6 @@ pub(crate) async fn run_with(
         .with_server_mode(server.is_some())
         .with_link(link.clone()),
     );
-    let bearer = load_or_create_bearer(
-        store.data_dir(),
-        std::env::var_os("FLUXDOWN_AGENT_TOKEN_FILE")
-            .as_deref()
-            .map(Path::new),
-    )
-    .await?;
     let shell_task = tokio::spawn(crate::shell::run_controller(
         ShellServices {
             state: shell,
@@ -454,6 +461,7 @@ pub(crate) async fn run_with(
         bearer,
         cancel.clone(),
         server_handle,
+        endpoint_dir,
     )
     .await
     .map_err(Into::into);
@@ -836,10 +844,34 @@ fn compatibility_api_config(state: &AgentState) -> fluxdown_api::server::ApiServ
     fluxdown_api::server::ApiServerConfig::from_config_map(&config, fluxdown_protocol::APP_VERSION)
 }
 
+/// 发布实际绑定端口；固定 server / env 地址禁止运行期端口修改。
+async fn bind_gateway_listener(
+    state: &mut AgentState,
+    store: &StateStore,
+    server_bind: Option<std::net::SocketAddr>,
+    override_bind: Option<&str>,
+) -> Result<TcpListener, Box<dyn std::error::Error + Send + Sync>> {
+    let address = match server_bind {
+        Some(bind) => bind,
+        None => gateway_bind_address(&state.gateway, override_bind)?,
+    };
+    let listener = TcpListener::bind(address).await?;
+    let previous = state.gateway.clone();
+    state.gateway.port = listener.local_addr()?.port();
+    state.gateway.port_editable = server_bind.is_none() && override_bind.is_none();
+    if state.gateway != previous
+        && let Err(error) = store.save(state).await
+    {
+        state.gateway = previous;
+        return Err(error.into());
+    }
+    Ok(listener)
+}
+
 /// UI Gateway 监听地址：`FLUXDOWN_AGENT_BIND` 覆盖时必须是回环；否则按持久化的
-/// `lan_enabled` 选择 `0.0.0.0` / `127.0.0.1`，端口固定 17800。
+/// `lan_enabled` 选择接口，直接使用已生效端口；旧状态的零端口兼容默认值。
 fn gateway_bind_address(
-    lan_enabled: bool,
+    gateway: &fluxdown_protocol::GatewayStatusDto,
     override_bind: Option<&str>,
 ) -> Result<std::net::SocketAddr, Box<dyn std::error::Error + Send + Sync>> {
     if let Some(value) = override_bind {
@@ -849,12 +881,18 @@ fn gateway_bind_address(
         }
         return Ok(bind);
     }
-    let ip = if lan_enabled {
+    let ip = if gateway.lan_enabled {
         std::net::Ipv4Addr::UNSPECIFIED
     } else {
         std::net::Ipv4Addr::LOCALHOST
     };
-    Ok(std::net::SocketAddr::new(ip.into(), DEFAULT_GATEWAY_PORT))
+    let port = gateway.port;
+    let port = if port == 0 {
+        DEFAULT_GATEWAY_PORT
+    } else {
+        port
+    };
+    Ok(std::net::SocketAddr::new(ip.into(), port))
 }
 
 const DEFAULT_GATEWAY_PORT: u16 = 17800;
@@ -1006,33 +1044,150 @@ fn daemon_socket_address(
 
 #[cfg(test)]
 mod tests {
-    use super::{compatibility_api_config, gateway_bind_address};
+    use super::{bind_gateway_listener, gateway_bind_address};
     use crate::state::AgentState;
 
     #[test]
     fn lan_flag_selects_interface_without_env_override() {
-        let loopback = gateway_bind_address(false, None).expect("loopback bind");
-        assert_eq!(loopback.to_string(), "127.0.0.1:17800");
-        let lan = gateway_bind_address(true, None).expect("lan bind");
-        assert_eq!(lan.to_string(), "0.0.0.0:17800");
+        let mut gateway = fluxdown_protocol::GatewayStatusDto::default();
+        let loopback = gateway_bind_address(&gateway, None).expect("loopback bind");
+        assert_eq!(loopback.ip(), std::net::Ipv4Addr::LOCALHOST);
+        gateway.lan_enabled = true;
+        let lan = gateway_bind_address(&gateway, None).expect("lan bind");
+        assert_eq!(lan.ip(), std::net::Ipv4Addr::UNSPECIFIED);
     }
 
     #[test]
     fn env_override_wins_but_must_stay_loopback() {
-        let bound = gateway_bind_address(true, Some("127.0.0.1:0")).expect("override bind");
+        let gateway = fluxdown_protocol::GatewayStatusDto {
+            lan_enabled: true,
+            ..Default::default()
+        };
+        let bound = gateway_bind_address(&gateway, Some("127.0.0.1:0")).expect("override bind");
         assert_eq!(bound.to_string(), "127.0.0.1:0");
-        assert!(gateway_bind_address(false, Some("0.0.0.0:17800")).is_err());
-        assert!(gateway_bind_address(false, Some("not-an-address")).is_err());
+        assert!(gateway_bind_address(&gateway, Some("0.0.0.0:17800")).is_err());
+        assert!(gateway_bind_address(&gateway, Some("not-an-address")).is_err());
     }
 
     #[test]
-    fn compatibility_config_mirrors_gateway_state() {
+    fn legacy_zero_port_falls_back_and_saved_port_is_used() {
+        let mut gateway = fluxdown_protocol::GatewayStatusDto {
+            port: 0,
+            ..Default::default()
+        };
+        assert_eq!(
+            gateway_bind_address(&gateway, None)
+                .expect("legacy bind")
+                .port(),
+            17800
+        );
+        gateway.port = u16::MAX;
+        assert_eq!(
+            gateway_bind_address(&gateway, None)
+                .expect("saved bind")
+                .port(),
+            u16::MAX
+        );
+    }
+
+    fn gateway_test_dir(label: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "fluxdown_agent_{label}_{}_{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ))
+    }
+
+    #[tokio::test]
+    async fn gateway_startup_binds_the_saved_active_port() {
+        let dir = gateway_test_dir("restart_port");
+        let store = crate::state::StateStore::open(dir.clone())
+            .await
+            .expect("open store");
         let mut state = AgentState::default();
-        state.gateway.lan_enabled = true;
-        state.gateway.port = 17999;
-        let config = compatibility_api_config(&state);
-        assert!(config.lan_enabled);
-        assert_eq!(config.port, 17999);
-        assert_eq!(config.bind_addr().to_string(), "0.0.0.0:17999");
+        let first = bind_gateway_listener(&mut state, &store, None, Some("127.0.0.1:0"))
+            .await
+            .expect("first bind");
+        let requested = first.local_addr().expect("first address").port();
+        drop(first);
+        state.gateway.port = requested;
+        store.save(&state).await.expect("save active port");
+        let mut restarted = store.load().await.expect("reload before startup");
+        let listener = bind_gateway_listener(&mut restarted, &store, None, None)
+            .await
+            .expect("start saved listener");
+        assert_eq!(
+            listener.local_addr().expect("restarted address").port(),
+            requested
+        );
+        assert_eq!(restarted.gateway.port, requested);
+        assert!(restarted.gateway.port_editable);
+        let persisted = store.load().await.expect("reload bound status");
+        assert_eq!(persisted.gateway, restarted.gateway);
+        drop(listener);
+        drop(store);
+        if let Err(error) = tokio::fs::remove_dir_all(&dir).await {
+            tracing::warn!(path = %dir.display(), error = %error, "remove restart port test directory");
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_gateway_bind_preserves_the_active_port() {
+        let dir = gateway_test_dir("failed_port_bind");
+        let store = crate::state::StateStore::open(dir.clone())
+            .await
+            .expect("open store");
+        let occupied = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("reserve conflicting port");
+        let mut state = AgentState::default();
+        state.gateway.port = occupied.local_addr().expect("occupied address").port();
+        store.save(&state).await.expect("save active port");
+        let before = state.gateway.clone();
+        assert!(
+            bind_gateway_listener(&mut state, &store, None, None)
+                .await
+                .is_err()
+        );
+        assert_eq!(state.gateway, before);
+        assert_eq!(
+            store.load().await.expect("reload failed bind").gateway,
+            before
+        );
+        drop(occupied);
+        drop(store);
+        if let Err(error) = tokio::fs::remove_dir_all(&dir).await {
+            tracing::warn!(path = %dir.display(), error = %error, "remove failed bind test directory");
+        }
+    }
+
+    #[tokio::test]
+    async fn server_and_environment_bindings_publish_non_editable_actual_ports() {
+        for server_mode in [false, true] {
+            let dir = gateway_test_dir("fixed_port_bind");
+            let store = crate::state::StateStore::open(dir.clone())
+                .await
+                .expect("open store");
+            let mut state = AgentState::default();
+            let server_bind = server_mode.then(|| "127.0.0.1:0".parse().expect("server bind"));
+            let override_bind = (!server_mode).then_some("127.0.0.1:0");
+            let listener = bind_gateway_listener(&mut state, &store, server_bind, override_bind)
+                .await
+                .expect("fixed listener");
+            assert_eq!(
+                state.gateway.port,
+                listener.local_addr().expect("bound address").port()
+            );
+            assert!(!state.gateway.port_editable);
+            assert_eq!(
+                store.load().await.expect("reload fixed status").gateway,
+                state.gateway
+            );
+            drop(listener);
+            drop(store);
+            if let Err(error) = tokio::fs::remove_dir_all(&dir).await {
+                tracing::warn!(path = %dir.display(), error = %error, "remove fixed bind test directory");
+            }
+        }
     }
 }

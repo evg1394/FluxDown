@@ -125,6 +125,10 @@ pub enum ErrorReason {
     RepairIncomplete,
     /// Doctor 修复：目标不在自动修复范围内（系统目录、家目录本身、非权限类错误），需用户手动处理。
     RepairNotApplicable,
+    /// API 服务切换：请求的新监听端口已被占用，原服务与配置保持不变。
+    GatewayPortInUse,
+    /// API 服务切换：新服务未通过启动验证或配置无法保存，已保留原服务。
+    GatewayRestartFailed,
     /// 对端发送了本端不认识的原因。
     #[serde(other)]
     Unknown,

@@ -3,7 +3,6 @@
 use fluxdown_protocol::GatewayPatchParams;
 use fluxdown_ui_components::{
     ButtonVariant, ControlExt as _, FluxIcon, button, icon_button, loading_icon_button,
-    tabular_numbers,
 };
 use fluxdown_ui_theme::active_theme;
 use gpui::{
@@ -11,13 +10,16 @@ use gpui::{
     StatefulInteractiveElement as _, Styled, Window, px,
 };
 use gpui_component::{
-    Icon, h_flex,
+    Icon, WindowExt as _, h_flex,
     input::{Input, InputEvent, InputState},
+    notification::Notification,
     tooltip::Tooltip,
 };
 
 use super::SectionContext;
-use crate::ui::{Control, INPUT_WIDTH, SettingsPage, SettingsSection, body_text};
+use crate::ui::{Control, INPUT_WIDTH, NUMBER_WIDTH, SettingsPage, SettingsSection, body_text};
+
+mod userscript;
 
 pub(crate) fn page(ctx: &SectionContext, cx: &mut App) -> SettingsPage {
     SettingsPage::new(
@@ -31,7 +33,6 @@ pub(crate) fn page(ctx: &SectionContext, cx: &mut App) -> SettingsPage {
 
 fn service_section(ctx: &SectionContext, cx: &mut App) -> SettingsSection {
     let gateway = ctx.store.read(cx).gateway().clone();
-    let port_text = SharedString::from(gateway.port.to_string());
     let address = SharedString::from(format!("http://127.0.0.1:{}", gateway.port));
     let address_for_copy = address.clone();
     let copied = ctx.t("apiServiceCopied");
@@ -39,15 +40,19 @@ fn service_section(ctx: &SectionContext, cx: &mut App) -> SettingsSection {
 
     SettingsSection::new()
         .title(ctx.t("settingsCatApiService"))
-        .row(ctx.item(
-            "apiServicePort",
-            Some("apiServicePortDesc"),
-            Control::custom(move |_, _, _, cx: &mut App| {
-                body_text(cx)
-                    .font_features(tabular_numbers())
-                    .child(port_text.clone())
-            }),
-        ))
+        .row(
+            ctx.item("apiServicePort", None, port_field(ctx))
+                .description(SharedString::from(format!(
+                    "{} {}",
+                    ctx.t("apiServicePortDesc"),
+                    if gateway.port_editable {
+                        ctx.t("apiServicePortRestartHint")
+                    } else {
+                        ctx.t("apiServicePortFixed")
+                    },
+                )))
+                .disabled(!gateway.port_editable),
+        )
         .row(
             ctx.item(
                 "apiServiceAddress",
@@ -106,6 +111,11 @@ fn features_section(ctx: &SectionContext) -> SettingsSection {
             gateway_switch(ctx, GatewayFlag::Takeover),
         ))
         .row(ctx.item(
+            "apiServiceUserscript",
+            Some("apiServiceUserscriptDesc"),
+            userscript_field(ctx),
+        ))
+        .row(ctx.item(
             "apiServiceJsonrpc",
             Some("apiServiceJsonrpcDesc"),
             gateway_switch(ctx, GatewayFlag::Jsonrpc),
@@ -125,6 +135,127 @@ fn features_section(ctx: &SectionContext) -> SettingsSection {
             Some("apiServiceCorsAllowAllDesc"),
             gateway_switch(ctx, GatewayFlag::Cors),
         ))
+}
+
+struct PortSlot {
+    input: Entity<InputState>,
+    last_synced: SharedString,
+    submitted: bool,
+    _subscription: gpui::Subscription,
+}
+
+fn port_field(ctx: &SectionContext) -> Control {
+    let store = ctx.store();
+    let invalid = ctx.t("apiServicePortInvalid");
+    Control::custom(move |disabled, key, window: &mut Window, cx: &mut App| {
+        let snapshot = store.read(cx);
+        let gateway = snapshot.gateway();
+        let value = SharedString::from(gateway.port.to_string());
+        let busy = snapshot.is_busy("gateway");
+        let slot = window.use_keyed_state(SharedString::from(format!("{key}-port")), cx, {
+            let store = store.clone();
+            let value = value.clone();
+            let invalid = invalid.clone();
+            move |window, cx| {
+                let input = cx.new(|cx| InputState::new(window, cx).default_value(value.clone()));
+                let _subscription = cx.subscribe_in(
+                    &input,
+                    window,
+                    move |slot: &mut PortSlot, input, event: &InputEvent, window, cx| {
+                        if !matches!(event, InputEvent::Blur | InputEvent::PressEnter { .. })
+                            || store.read(cx).is_busy("gateway")
+                            || !store.read(cx).gateway().port_editable
+                        {
+                            return;
+                        }
+                        let text = input.read(cx).value();
+                        let Ok(port) = text.trim().parse::<u16>() else {
+                            window.push_notification(Notification::error(invalid.clone()), cx);
+                            input.update(cx, |input, cx| {
+                                input.set_value(slot.last_synced.clone(), window, cx);
+                            });
+                            return;
+                        };
+                        if port < 1024 {
+                            window.push_notification(Notification::error(invalid.clone()), cx);
+                            input.update(cx, |input, cx| {
+                                input.set_value(slot.last_synced.clone(), window, cx);
+                            });
+                            return;
+                        }
+                        if port != store.read(cx).gateway().port {
+                            slot.submitted = true;
+                            store.update(cx, |store, cx| {
+                                store.patch_gateway(
+                                    GatewayPatchParams {
+                                        port: Some(port),
+                                        ..Default::default()
+                                    },
+                                    cx,
+                                );
+                            });
+                        }
+                    },
+                );
+                PortSlot {
+                    input,
+                    last_synced: value,
+                    submitted: false,
+                    _subscription,
+                }
+            }
+        });
+        slot.update(cx, |slot, cx| {
+            if !busy && (slot.last_synced != value || slot.submitted) {
+                slot.last_synced = value.clone();
+                slot.submitted = false;
+                slot.input
+                    .update(cx, |input, cx| input.set_value(value, window, cx));
+            }
+        });
+        Input::new(&slot.read(cx).input)
+            .control(cx)
+            .w(px(NUMBER_WIDTH))
+            .disabled(disabled || busy)
+    })
+}
+
+fn userscript_field(ctx: &SectionContext) -> Control {
+    let store = ctx.store();
+    let label = ctx.t("apiServiceCopyScript");
+    let copied = ctx.t("apiServiceScriptCopied");
+    Control::custom(move |disabled, _, _, cx: &mut App| {
+        let snapshot = store.read(cx);
+        let port = snapshot.gateway().port;
+        let token = snapshot
+            .transient("gateway_user_token")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
+        let busy = snapshot.is_busy("gateway") || snapshot.is_busy("gatewayToken");
+        let token_ready = !snapshot.gateway_token_needs_reveal()
+            && (!snapshot.gateway().user_token_configured
+                || snapshot.transient("gateway_user_token").is_some());
+        let copied = copied.clone();
+        button(
+            "api-copy-userscript",
+            label.clone(),
+            ButtonVariant::Secondary,
+            cx,
+        )
+        .disabled(disabled || busy || !token_ready)
+        .on_click(
+            move |_, window, cx| match userscript::generate(port, &token) {
+                Ok(script) => {
+                    cx.write_to_clipboard(ClipboardItem::new_string(script));
+                    window.push_notification(Notification::success(copied.clone()), cx);
+                }
+                Err(error) => {
+                    window.push_notification(Notification::error(error.to_string()), cx);
+                }
+            },
+        )
+    })
 }
 
 #[derive(Clone, Copy)]

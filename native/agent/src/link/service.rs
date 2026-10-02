@@ -449,7 +449,7 @@ pub struct LinkService {
     state: Arc<Mutex<AgentState>>,
     store: Arc<StateStore>,
     tasks: Arc<dyn LinkTaskCreator>,
-    bound: SocketAddr,
+    bound: StdMutex<SocketAddr>,
     server_mode: bool,
     trusted_proxies: Vec<IpAddr>,
     manager: OnceLock<Arc<LinkManager>>,
@@ -473,7 +473,7 @@ impl LinkService {
             state: parts.state,
             store: parts.store,
             tasks: parts.tasks,
-            bound: parts.bound,
+            bound: StdMutex::new(parts.bound),
             server_mode: parts.server_mode,
             trusted_proxies: trusted_proxies_from_env(),
             manager: OnceLock::new(),
@@ -482,6 +482,24 @@ impl LinkService {
             requests: StdMutex::new(Vec::new()),
             code_generation: AtomicU64::new(0),
         })
+    }
+
+    /// 刷新已验证成功的网关监听端口；保留 IP、身份、配对与可达范围。
+    ///
+    /// 启动前只记录最新地址，不等待 daemon 或互联初始化。广告更新失败时保留旧地址；
+    /// 传入旧地址可用于网关事务回滚。
+    pub async fn update_bound(&self, bound: SocketAddr) -> Result<(), LinkOpError> {
+        let mut current = lock(&self.bound);
+        let mut expected = *current;
+        expected.set_port(bound.port());
+        if expected != bound {
+            return Err(LinkOpError::Invalid("bound"));
+        }
+        if let Some(manager) = self.manager.get() {
+            manager.update_api_port(bound.port())?;
+        }
+        *current = bound;
+        Ok(())
     }
 
     /// 加载（或首次生成）本机身份并启动互联。必须在 legacy 迁移完成后调用：迁移可能
@@ -513,9 +531,10 @@ impl LinkService {
             }),
             app_version: Some(fluxdown_protocol::APP_VERSION.to_owned()),
         };
+        let bound = *lock(&self.bound);
         let options = LinkOptions {
-            api_port: self.bound.port(),
-            reachable: !self.bound.ip().is_loopback(),
+            api_port: bound.port(),
+            reachable: !bound.ip().is_loopback(),
             advertise: mdns_enabled(),
         };
         let (tx, rx) = mpsc::channel::<LinkEngineEvent>(64);
@@ -529,8 +548,14 @@ impl LinkService {
             lan_reachable = options.reachable,
             "device link ready"
         );
-        if self.manager.set(manager).is_err() {
-            return Ok(());
+        {
+            // load 会等待状态存储；初始化期间重绑不能被它挡住。发布前在同一短锁下追上
+            // 最新端口，避免 update_bound 看见空 OnceLock 后初始化又发布旧端口。
+            let bound = lock(&self.bound);
+            manager.update_api_port(bound.port())?;
+            if self.manager.set(manager).is_err() {
+                return Ok(());
+            }
         }
         tokio::spawn(self.clone().pump(rx));
         self.started.notify_one();
@@ -760,7 +785,7 @@ impl LinkService {
             code,
             expires_at_unix_ms: now_unix_ms()
                 .saturating_add(i64::try_from(CODE_TTL_SECS * 1000).unwrap_or(120_000)),
-            addresses: lan_base_urls(self.bound),
+            addresses: lan_base_urls(*lock(&self.bound)),
             fingerprint: manager.fingerprint().to_owned(),
             device_name: manager.self_name().to_owned(),
         })

@@ -9,10 +9,10 @@ use std::time::Duration;
 use fluxdown_protocol::{
     AgentEvent, AgentPreferencesDto, AgentSnapshot, ApplicationErrorCode, ComponentStatusDto,
     ConnPolicySummaryDto, DaemonConfigPatch, DaemonConfigSnapshot, DaemonEvent,
-    DiagnosticsReportDto, GatewayPatchParams, GatewayStatusDto, PlatformIntegrationDto, PluginDto,
-    QueueDto, RpcErrorData, ServiceEvent, SettingOwner, ShellStatusDto, SiteAuthEntryDto,
-    SyncStatusDto, SystemProxyDto, UpdateCheckResultDto, WebhookDeliveryDto, method, setting_spec,
-    setting_value_kind, value_to_daemon_config,
+    DiagnosticsReportDto, ErrorReason, GatewayPatchParams, GatewayStatusDto,
+    PlatformIntegrationDto, PluginDto, QueueDto, RpcErrorData, ServiceEvent, SettingOwner,
+    ShellStatusDto, SiteAuthEntryDto, SyncStatusDto, SystemProxyDto, UpdateCheckResultDto,
+    WebhookDeliveryDto, method, setting_spec, setting_value_kind, value_to_daemon_config,
 };
 use gpui::{Context, SharedString};
 use serde_json::{Value, json};
@@ -34,33 +34,41 @@ pub enum SettingsErrorKind {
     Disconnected,
     Conflict,
     InvalidArgument,
+    GatewayPortInUse,
+    GatewayRestartFailed,
     Failed,
 }
 
 impl SettingsErrorKind {
     #[must_use]
     pub fn from_rpc(error: &RpcErrorData) -> Self {
-        match error.code {
-            ApplicationErrorCode::Unavailable => Self::Disconnected,
-            ApplicationErrorCode::Conflict => Self::Conflict,
-            ApplicationErrorCode::InvalidArgument => Self::InvalidArgument,
-            _ => Self::Failed,
+        match error.reason {
+            Some(ErrorReason::GatewayPortInUse) => Self::GatewayPortInUse,
+            Some(ErrorReason::GatewayRestartFailed) => Self::GatewayRestartFailed,
+            _ => match error.code {
+                ApplicationErrorCode::Unavailable => Self::Disconnected,
+                ApplicationErrorCode::Conflict => Self::Conflict,
+                ApplicationErrorCode::InvalidArgument => Self::InvalidArgument,
+                _ => Self::Failed,
+            },
         }
     }
 
-    /// 对应 `assets/i18n` 的既有键。
+    /// 对应 `assets/i18n` 的错误说明键。
     #[must_use]
     pub fn i18n_key(self) -> &'static str {
         match self {
             Self::Disconnected => "localServiceDisconnected",
             Self::Conflict => "localServiceConflict",
             Self::InvalidArgument => "localServiceInvalidArgument",
+            Self::GatewayPortInUse => "apiServicePortInUse",
+            Self::GatewayRestartFailed => "apiServiceRestartFailed",
             Self::Failed => "localServiceActionFailed",
         }
     }
 }
 
-/// RPC 错误的本地化说明（agent 端口不透传服务端 message，只按错误码归类）。
+/// RPC 错误的本地化说明（不透传服务端 message，优先按原因、再按错误码归类）。
 #[must_use]
 pub(crate) fn rpc_error_text(
     translator: &fluxdown_ui_i18n::Translator,
@@ -706,41 +714,38 @@ impl SettingsStore {
     // ───────────────────────── 网关 ─────────────────────────
 
     pub fn patch_gateway(&mut self, patch: GatewayPatchParams, cx: &mut Context<Self>) {
+        if self.is_busy("gateway") {
+            return;
+        }
         if self.stale {
             self.set_error(SettingsErrorKind::Disconnected, "", cx);
             return;
         }
-        if let Some(value) = patch.takeover_enabled {
-            self.gateway.takeover_enabled = value;
-        }
-        if let Some(value) = patch.jsonrpc_enabled {
-            self.gateway.jsonrpc_enabled = value;
-        }
-        if let Some(value) = patch.api_enabled {
-            self.gateway.api_enabled = value;
-        }
-        if let Some(value) = patch.mcp_enabled {
-            self.gateway.mcp_enabled = value;
-        }
-        if let Some(value) = patch.cors_enabled {
-            self.gateway.cors_enabled = value;
-        }
-        if let Some(value) = patch.lan_enabled {
-            self.gateway.lan_enabled = value;
-        }
-        let params = serde_json::to_value(patch).unwrap_or_else(|_| json!({}));
+        let port_changed = patch.port.is_some_and(|port| port != self.gateway.port);
+        let params = match serde_json::to_value(patch) {
+            Ok(params) => params,
+            Err(_) => {
+                self.set_error(SettingsErrorKind::Failed, "", cx);
+                return;
+            }
+        };
         self.call_with(
             "gateway",
             method::AGENT_GATEWAY_PATCH,
             params,
             cx,
-            |this, result, cx| {
-                if let Ok(value) = result
-                    && let Ok(gateway) = serde_json::from_value::<GatewayStatusDto>(value)
-                {
-                    this.gateway = gateway;
-                    this.reveal_gateway_token(cx);
-                    cx.notify();
+            move |this, result, cx| {
+                if let Ok(value) = result {
+                    match serde_json::from_value::<GatewayStatusDto>(value) {
+                        Ok(gateway) => {
+                            this.gateway = gateway;
+                            this.reveal_gateway_token(cx);
+                            if port_changed {
+                                this.last_notice = Some("apiServiceRestarted");
+                            }
+                        }
+                        Err(_) => this.set_error(SettingsErrorKind::Failed, "", cx),
+                    }
                 }
             },
         );
@@ -1213,7 +1218,7 @@ mod tests {
 
     use serde_json::json;
 
-    use super::{SettingsStore, preference_is_synced};
+    use super::{SettingsErrorKind, SettingsStore, preference_is_synced};
     use crate::port::{PortFuture, SettingsPort};
 
     struct NullPort;
@@ -1225,6 +1230,30 @@ mod tests {
             _params: serde_json::Value,
         ) -> PortFuture<serde_json::Value> {
             Box::pin(async { Ok(serde_json::Value::Null) })
+        }
+    }
+
+    #[test]
+    fn gateway_failure_reason_takes_precedence_over_error_code() {
+        use fluxdown_protocol::{ApplicationErrorCode, ErrorReason, RpcErrorData};
+
+        for (reason, expected) in [
+            (
+                ErrorReason::GatewayPortInUse,
+                SettingsErrorKind::GatewayPortInUse,
+            ),
+            (
+                ErrorReason::GatewayRestartFailed,
+                SettingsErrorKind::GatewayRestartFailed,
+            ),
+        ] {
+            for code in [
+                ApplicationErrorCode::Conflict,
+                ApplicationErrorCode::Unavailable,
+            ] {
+                let error = RpcErrorData::new(code, false).with_reason(reason);
+                assert_eq!(SettingsErrorKind::from_rpc(&error), expected);
+            }
         }
     }
 

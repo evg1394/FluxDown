@@ -143,28 +143,9 @@ pub async fn wait_until_stopped(rpc_url: &str, timeout: Duration) {
     }
 }
 
-fn agent_socket_target(rpc_url: &str) -> Result<String, BootstrapError> {
-    let uri = rpc_url
-        .parse::<tokio_tungstenite::tungstenite::http::Uri>()
-        .map_err(|error| BootstrapError::Probe(error.to_string()))?;
-    let authority = uri
-        .authority()
-        .ok_or_else(|| BootstrapError::Probe("agent URL has no authority".to_owned()))?;
-    let port = authority
-        .port_u16()
-        .unwrap_or_else(|| match uri.scheme_str() {
-            Some("wss") | Some("https") => 443,
-            _ => 80,
-        });
-    let host = authority
-        .host()
-        .trim_start_matches('[')
-        .trim_end_matches(']');
-    if host.parse::<std::net::Ipv6Addr>().is_ok() {
-        Ok(format!("[{host}]:{port}"))
-    } else {
-        Ok(format!("{host}:{port}"))
-    }
+fn agent_socket_target(rpc_url: &str) -> Result<std::net::SocketAddr, BootstrapError> {
+    crate::agent_endpoint::socket_target(rpc_url)
+        .map_err(|error| BootstrapError::Probe(error.to_string()))
 }
 /// macOS 打包布局中 agent 所在的辅助 bundle（相对外层 `Contents/`）；与
 /// `fluxdown_agent::platform` 的布局约定及 `scripts/package_gpui_macos.sh` 保持一致。
@@ -247,11 +228,20 @@ mod tests {
     use super::{agent_socket_target, connect_listener};
 
     #[test]
-    fn listener_probe_formats_ipv6_authority_once() {
+    fn listener_probe_uses_loopback_without_dns_and_accepts_ipv6() {
+        assert_eq!(
+            agent_socket_target("ws://localhost:17800/rpc").expect("localhost target"),
+            "127.0.0.1:17800"
+                .parse::<std::net::SocketAddr>()
+                .expect("IPv4 address")
+        );
         assert_eq!(
             agent_socket_target("ws://[::1]:17800/rpc").expect("IPv6 target"),
             "[::1]:17800"
+                .parse::<std::net::SocketAddr>()
+                .expect("IPv6 address")
         );
+        assert!(agent_socket_target("ws://192.0.2.1:17800/rpc").is_err());
     }
 
     /// 冷启动时 agent 先绑定端口、装配完才开始 accept：已绑定但尚未 accept 的端口必须算「在监听」，

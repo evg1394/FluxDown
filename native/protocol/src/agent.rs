@@ -506,7 +506,7 @@ pub struct RemoteCommandParams {
 }
 
 /// UI Gateway 运行状态；永远不携带 token 文本。
-#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct GatewayStatusDto {
@@ -516,12 +516,31 @@ pub struct GatewayStatusDto {
     pub mcp_enabled: bool,
     pub cors_enabled: bool,
     pub user_token_configured: bool,
-    /// 当前监听端口（只读；由启动环境决定）。
+    /// 当前已验证可用的实际监听端口；修改失败时保持原值。
     #[serde(default = "default_gateway_port")]
     pub port: u16,
+    /// server 模式或环境固定监听地址时为 false。
+    #[serde(default = "default_true")]
+    pub port_editable: bool,
     /// 是否对局域网开放兼容 API；修改后下次 agent 启动生效。
     #[serde(default)]
     pub lan_enabled: bool,
+}
+
+impl Default for GatewayStatusDto {
+    fn default() -> Self {
+        Self {
+            takeover_enabled: false,
+            jsonrpc_enabled: false,
+            api_enabled: false,
+            mcp_enabled: false,
+            cors_enabled: false,
+            user_token_configured: false,
+            port: default_gateway_port(),
+            port_editable: true,
+            lan_enabled: false,
+        }
+    }
 }
 
 fn default_gateway_port() -> u16 {
@@ -543,6 +562,8 @@ pub struct GatewayPatchParams {
     pub mcp_enabled: Option<bool>,
     pub cors_enabled: Option<bool>,
     pub lan_enabled: Option<bool>,
+    /// 1024..=65535；验证新 API/RPC 服务可用后立即切换，固定监听模式拒绝修改。
+    pub port: Option<u16>,
     /// `Some("")` 清除用户 token；省略则保持。
     pub user_token: Option<String>,
     /// `true` 生成新的随机用户 token（优先于 `user_token`）。

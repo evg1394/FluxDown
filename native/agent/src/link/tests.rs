@@ -129,6 +129,7 @@ struct Node {
     service: Arc<LinkService>,
     events: AgentEventHub,
     state: Arc<Mutex<AgentState>>,
+    store: Arc<StateStore>,
     tasks: Arc<RecordingTasks>,
     addr: SocketAddr,
     dir: PathBuf,
@@ -183,7 +184,7 @@ impl Node {
         let service = LinkService::new(LinkServiceParts {
             events: events.clone(),
             state: state.clone(),
-            store,
+            store: store.clone(),
             tasks: tasks.clone(),
             bound: addr,
             server_mode: false,
@@ -207,6 +208,7 @@ impl Node {
             service,
             events,
             state,
+            store,
             tasks,
             addr,
             dir,
@@ -274,6 +276,49 @@ async fn pair(responder: &Node, initiator: &Node) {
             .then_some(())
     })
     .await;
+}
+
+#[tokio::test]
+async fn bound_update_during_start_does_not_wait_for_readiness_or_expand_reachability() {
+    let node = Node::start("port-rebind-start").await;
+    let service = LinkService::new(LinkServiceParts {
+        events: node.events.clone(),
+        state: node.state.clone(),
+        store: node.store.clone(),
+        tasks: node.tasks.clone(),
+        bound: node.addr,
+        server_mode: false,
+    });
+    let locked_state = node.state.lock().await;
+    let startup = service.start();
+    tokio::pin!(startup);
+    tokio::select! {
+        result = &mut startup => panic!("startup completed with its state locked: {result:?}"),
+        () = tokio::task::yield_now() => {}
+    }
+    let mut rebound = node.addr;
+    rebound.set_port(17801);
+    tokio::time::timeout(Duration::from_secs(1), service.update_bound(rebound))
+        .await
+        .expect("a bound update must not wait for link startup")
+        .unwrap();
+    drop(locked_state);
+    startup.await.unwrap();
+    let code = service.pairing_code().await.unwrap();
+    assert_eq!(code.fingerprint, node.fingerprint());
+    assert!(
+        code.addresses.is_empty(),
+        "loopback must stay private after rebinding"
+    );
+    assert!(matches!(
+        service.update_bound("0.0.0.0:17801".parse().unwrap()).await,
+        Err(LinkOpError::Invalid("bound"))
+    ));
+    service.update_bound(node.addr).await.unwrap();
+    assert_eq!(
+        service.api_ping_info().unwrap().fingerprint,
+        node.fingerprint()
+    );
 }
 
 /// 裸 TCP「反代」：对任何请求回固定的 HTTP 响应，并记录首行请求行。

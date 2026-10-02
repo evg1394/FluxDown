@@ -331,50 +331,193 @@ impl StateStore {
         self.write_snapshot(generation, &bytes).await
     }
 
+    /// 发布桌面 Gateway 的当前端点；与 bearer 同目录，不携带任何凭据。
+    /// 在已验证的运行期切换与启动时调用；相同内容不重复写盘。
+    pub(crate) async fn save_gateway_endpoint(
+        &self,
+        directory: &Path,
+        bound: std::net::SocketAddr,
+    ) -> Result<(), StateError> {
+        #[derive(Serialize)]
+        #[serde(rename_all = "camelCase")]
+        struct GatewayEndpoint {
+            rpc_url: String,
+        }
+
+        let path = directory.join("gateway-endpoint.json");
+        let rpc_address = gateway_client_address(bound);
+        let bytes = serde_json::to_vec(&GatewayEndpoint {
+            rpc_url: format!("ws://{rpc_address}/rpc"),
+        })?;
+        match tokio::fs::read(&path).await {
+            Ok(current) if current == bytes => return Ok(()),
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(StateError::Io(error)),
+        }
+        tokio::fs::create_dir_all(directory).await?;
+        self.write_atomic(&path, ".gateway-endpoint", &bytes).await
+    }
+
+    /// 状态锁由调用方持有。两个私有文件都落定前，不提交 listener 或发布 GatewayChanged。
+    /// 保留原始文件内容，也覆盖 rename 成功但父目录 fsync 失败的回滚路径。
+    pub(crate) async fn save_gateway_change(
+        &self,
+        state: &AgentState,
+        directory: &Path,
+        bound: std::net::SocketAddr,
+    ) -> Result<(), StateError> {
+        let endpoint_path = directory.join("gateway-endpoint.json");
+        let old_state = read_optional_file(&self.state_path).await?;
+        let old_endpoint = read_optional_file(&endpoint_path).await?;
+        let result = async {
+            self.save_gateway_endpoint(directory, bound).await?;
+            self.save(state).await
+        }
+        .await;
+        if let Err(error) = result {
+            let endpoint_rollback = self
+                .restore_gateway_file(&endpoint_path, ".gateway-endpoint", old_endpoint.as_deref())
+                .await;
+            let state_rollback = self
+                .restore_gateway_file(&self.state_path, ".agent-state", old_state.as_deref())
+                .await;
+            let mut first_rollback_error = None;
+            for rollback in [endpoint_rollback, state_rollback] {
+                if let Err(rollback) = rollback {
+                    tracing::error!(error = %error, rollback = %rollback, "gateway persistence rollback failed");
+                    if first_rollback_error.is_none() {
+                        first_rollback_error = Some(rollback);
+                    }
+                }
+            }
+            if let Some(rollback) = first_rollback_error {
+                return Err(StateError::Io(std::io::Error::other(format!(
+                    "{error}; gateway rollback failed: {rollback}"
+                ))));
+            }
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    async fn restore_gateway_file(
+        &self,
+        path: &Path,
+        prefix: &str,
+        previous: Option<&[u8]>,
+    ) -> Result<(), StateError> {
+        if read_optional_file(path).await?.as_deref() == previous {
+            return Ok(());
+        }
+        if path == self.state_path {
+            // A newer rollback generation also fences already-serialized stale snapshots.
+            let generation = self.generation.fetch_add(1, Ordering::SeqCst);
+            let mut written = self.written.lock().await;
+            match previous {
+                Some(bytes) => self.write_atomic(path, prefix, bytes).await?,
+                None => remove_optional_file(path).await?,
+            }
+            *written = generation;
+        } else {
+            match previous {
+                Some(bytes) => self.write_atomic(path, prefix, bytes).await?,
+                None => remove_optional_file(path).await?,
+            }
+        }
+        Ok(())
+    }
+
     async fn write_snapshot(&self, generation: u64, bytes: &[u8]) -> Result<(), StateError> {
         let mut written = self.written.lock().await;
         if generation < *written {
             // 更新的快照已经落盘。
             return Ok(());
         }
-        let temp = self
-            .data_dir
-            .join(format!(".agent-state.{}.tmp", Uuid::new_v4()));
-        let result = self.write_temp_then_rename(&temp, bytes).await;
-        if result.is_err() {
-            // 创建临时文件前失败或 rename 后 fsync 失败时，临时路径可能本就不存在。
-            if let Err(error) = tokio::fs::remove_file(&temp).await
-                && error.kind() != std::io::ErrorKind::NotFound
-            {
-                tracing::warn!(path = %temp.display(), error = %error, "could not remove failed agent state temp file");
-            }
-        } else {
+        let result = self
+            .write_atomic(&self.state_path, ".agent-state", bytes)
+            .await;
+        if result.is_ok() {
             *written = generation;
         }
         result
     }
 
-    async fn write_temp_then_rename(&self, temp: &Path, bytes: &[u8]) -> Result<(), StateError> {
+    async fn write_atomic(
+        &self,
+        destination: &Path,
+        prefix: &str,
+        bytes: &[u8],
+    ) -> Result<(), StateError> {
+        let directory = destination.parent().unwrap_or(&self.data_dir);
+        let temp = directory.join(format!("{prefix}.{}.tmp", Uuid::new_v4()));
+        let result = self.write_temp_then_rename(&temp, destination, bytes).await;
+        if result.is_err() {
+            // 创建临时文件前失败或 rename 后 fsync 失败时，临时路径可能本就不存在。
+            if let Err(error) = tokio::fs::remove_file(&temp).await
+                && error.kind() != std::io::ErrorKind::NotFound
+            {
+                tracing::warn!(path = %temp.display(), error = %error, "could not remove failed agent atomic file");
+            }
+        }
+        result
+    }
+
+    async fn write_temp_then_rename(
+        &self,
+        temp: &Path,
+        destination: &Path,
+        bytes: &[u8],
+    ) -> Result<(), StateError> {
         let mut file = tokio::fs::OpenOptions::new()
             .create_new(true)
             .write(true)
             .open(temp)
             .await?;
         set_private_file_permissions(temp).await?;
-        if !self.acl_dir_ready {
+        if !self.acl_dir_ready || temp.parent() != Some(self.data_dir.as_path()) {
             apply_windows_acl(temp).await?;
         }
         file.write_all(bytes).await?;
         file.sync_all().await?;
         drop(file);
-        tokio::fs::rename(temp, &self.state_path).await?;
-        sync_parent(&self.data_dir).await?;
+        tokio::fs::rename(temp, destination).await?;
+        sync_parent(destination.parent().unwrap_or(&self.data_dir)).await?;
         Ok(())
     }
 
     #[must_use]
     pub fn data_dir(&self) -> &Path {
         &self.data_dir
+    }
+}
+
+/// Only wildcard binds need a loopback substitution; specific LAN and IPv6 addresses stay intact.
+pub(crate) fn gateway_client_address(bound: std::net::SocketAddr) -> std::net::SocketAddr {
+    let ip = match bound.ip() {
+        std::net::IpAddr::V4(ip) if ip.is_unspecified() => std::net::Ipv4Addr::LOCALHOST.into(),
+        std::net::IpAddr::V6(ip) if ip.is_unspecified() => std::net::Ipv6Addr::LOCALHOST.into(),
+        ip => ip,
+    };
+    std::net::SocketAddr::new(ip, bound.port())
+}
+
+async fn read_optional_file(path: &Path) -> Result<Option<Vec<u8>>, StateError> {
+    match tokio::fs::read(path).await {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(StateError::Io(error)),
+    }
+}
+
+async fn remove_optional_file(path: &Path) -> Result<(), StateError> {
+    match tokio::fs::remove_file(path).await {
+        Ok(()) => {
+            sync_parent(path.parent().unwrap_or_else(|| Path::new("."))).await?;
+            Ok(())
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(StateError::Io(error)),
     }
 }
 
@@ -398,7 +541,7 @@ async fn remove_stale_temp_files(dir: &Path) {
         };
         let name = entry.file_name().to_string_lossy().into_owned();
         // 清理时已消失的文件已达成目的；保留其他失败的诊断。
-        if name.starts_with(".agent-state.")
+        if (name.starts_with(".agent-state.") || name.starts_with(".gateway-endpoint."))
             && name.ends_with(".tmp")
             && let Err(error) = tokio::fs::remove_file(entry.path()).await
             && error.kind() != std::io::ErrorKind::NotFound
@@ -633,6 +776,115 @@ mod tests {
         }
         assert!(state.sync_stash.len() <= super::SYNC_STASH_LIMIT);
     }
+
+    #[tokio::test]
+    async fn gateway_endpoint_is_private_credential_free_and_only_rewritten_on_change() {
+        let dir = temp_dir("gateway_endpoint");
+        let store = StateStore::open(dir.clone()).await.expect("open store");
+        // 显式 bearer 覆盖目录与 agent 状态目录可以不同。
+        let endpoint_dir = dir.join("bearer-location");
+        tokio::fs::create_dir(&endpoint_dir)
+            .await
+            .expect("create external bearer directory");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            tokio::fs::set_permissions(&endpoint_dir, std::fs::Permissions::from_mode(0o755))
+                .await
+                .expect("set external directory permissions");
+        }
+        let bound = "0.0.0.0:17999".parse().expect("LAN bind");
+        store
+            .save_gateway_endpoint(&endpoint_dir, bound)
+            .await
+            .expect("publish endpoint");
+        let path = endpoint_dir.join("gateway-endpoint.json");
+        let first = tokio::fs::read(&path).await.expect("read endpoint");
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&first).expect("endpoint JSON"),
+            serde_json::json!({ "rpcUrl": "ws://127.0.0.1:17999/rpc" })
+        );
+        let metadata = tokio::fs::metadata(&path).await.expect("endpoint metadata");
+        store
+            .save_gateway_endpoint(&endpoint_dir, bound)
+            .await
+            .expect("publish identical endpoint");
+        let unchanged = tokio::fs::metadata(&path)
+            .await
+            .expect("unchanged metadata");
+        assert_eq!(
+            metadata.modified().expect("first modification time"),
+            unchanged.modified().expect("unchanged modification time")
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{MetadataExt, PermissionsExt};
+            assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
+            assert_eq!(
+                metadata.ino(),
+                unchanged.ino(),
+                "identical endpoint must not be replaced"
+            );
+            assert_eq!(
+                tokio::fs::metadata(&endpoint_dir)
+                    .await
+                    .expect("external directory metadata")
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o755,
+                "endpoint publication must not chmod an external bearer parent"
+            );
+        }
+        store
+            .save_gateway_endpoint(&endpoint_dir, "[::1]:18001".parse().expect("IPv6 loopback"))
+            .await
+            .expect("publish changed endpoint");
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(
+                &tokio::fs::read(&path).await.expect("read changed endpoint")
+            )
+            .expect("changed endpoint JSON"),
+            serde_json::json!({ "rpcUrl": "ws://[::1]:18001/rpc" })
+        );
+        let temps: Vec<_> = std::fs::read_dir(&endpoint_dir)
+            .expect("list endpoint directory")
+            .map(|entry| entry.expect("read endpoint directory entry").file_name())
+            .filter(|name| name.to_string_lossy().ends_with(".tmp"))
+            .collect();
+        assert!(
+            temps.is_empty(),
+            "endpoint atomic writes must not leak temporary files"
+        );
+        drop(store);
+        if let Err(error) = tokio::fs::remove_dir_all(&dir).await {
+            tracing::warn!(path = %dir.display(), error = %error, "remove endpoint test directory");
+        }
+    }
+
+    #[tokio::test]
+    async fn gateway_endpoint_io_failure_is_reported_without_replacing_the_destination() {
+        let dir = temp_dir("gateway_endpoint_failure");
+        let store = StateStore::open(dir.clone()).await.expect("open store");
+        let path = dir.join("gateway-endpoint.json");
+        tokio::fs::create_dir(&path)
+            .await
+            .expect("block endpoint destination");
+        let error = store
+            .save_gateway_endpoint(&dir, "127.0.0.1:18001".parse().expect("loopback bind"))
+            .await
+            .expect_err("endpoint failure must propagate");
+        assert!(matches!(error, StateError::Io(_)));
+        assert!(
+            path.is_dir(),
+            "failed endpoint write must preserve the destination"
+        );
+        drop(store);
+        if let Err(error) = tokio::fs::remove_dir_all(&dir).await {
+            tracing::warn!(path = %dir.display(), error = %error, "remove failed endpoint directory");
+        }
+    }
+
     #[tokio::test]
     async fn failed_atomic_rename_removes_temp_and_does_not_report_a_saved_snapshot() {
         let dir = temp_dir("state_failed_rename");
