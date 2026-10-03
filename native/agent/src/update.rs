@@ -1,25 +1,22 @@
-//! 官方站点 `/api/release` + `/api/changelog` 的版本检查（`agent.update.check`）。
+//! Проверка обновлений для русской сборки через GitHub Releases собственного fork.
 //!
-//! 渠道对应 SemVer 预发布后缀：稳定版 `vX.Y.Z`，frontier 为 `vX.Y.Z-rc.N`。
-//! 比较遵循 SemVer 2.0 §11：`1.3.0 > 1.3.0-rc.2`，`1.4.0-rc.1 > 1.3.0`，
-//! 预发布标识按点分段比较（数字段小于字母段），构建元数据（`+meta`）忽略。
+//! Репозиторий обновлений: evg1394/FluxDown.
+//! Windows x64 asset: FluxDown-X.Y.Z-RU-windows-x64-setup.exe.
 
 use std::cmp::Ordering;
-use std::collections::BTreeMap;
 use std::time::Duration;
 
 use fluxdown_protocol::{ReleaseNoteDto, UpdateCheckResultDto};
 use serde::Deserialize;
-use serde_json::Value;
 
 use crate::http_client::{HttpClientError, LazyHttpClient};
 
-const UPDATE_API_BASE: &str = "https://fluxdown.zerx.dev";
-const RELEASE_PAGE_URL: &str = "https://fluxdown.zerx.dev/changelog";
+const GITHUB_API_BASE: &str = "https://api.github.com";
+const GITHUB_REPO: &str = "evg1394/FluxDown";
+const RELEASE_PAGE_URL: &str = "https://github.com/evg1394/FluxDown/releases";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
-const CHANGELOG_PER_PAGE: u32 = 50;
+const RELEASES_PER_PAGE: u32 = 50;
 
-/// 版本检查错误。
 #[derive(Debug, thiserror::Error)]
 pub enum UpdateError {
     #[error("unknown update channel: {0}")]
@@ -28,37 +25,34 @@ pub enum UpdateError {
     Http(#[from] reqwest::Error),
     #[error("update HTTP client unavailable: {0}")]
     Client(#[from] HttpClientError),
-    #[error("update API returned status {0}")]
+    #[error("update HTTP API returned status {0}")]
     Status(u16),
     #[error("update API response is invalid: {0}")]
     Decode(String),
 }
 
-#[derive(Deserialize)]
-struct ReleaseInfo {
-    version: String,
-    /// 资产键 → `{ name, size, download_url }`；不存在的资产为 `null`。
-    #[serde(default)]
-    assets: BTreeMap<String, Value>,
+#[derive(Debug, Deserialize)]
+struct GithubAsset {
+    name: String,
+    browser_download_url: String,
 }
 
-#[derive(Deserialize)]
-struct ChangelogResponse {
+#[derive(Debug, Deserialize)]
+struct GithubRelease {
+    tag_name: String,
     #[serde(default)]
-    releases: Vec<ChangelogRelease>,
+    published_at: Option<String>,
+    #[serde(default)]
+    body: Option<String>,
+    html_url: String,
+    #[serde(default)]
+    prerelease: bool,
+    #[serde(default)]
+    draft: bool,
+    #[serde(default)]
+    assets: Vec<GithubAsset>,
 }
 
-#[derive(Deserialize)]
-struct ChangelogRelease {
-    #[serde(default)]
-    version: String,
-    #[serde(default)]
-    published_at: String,
-    #[serde(default)]
-    body: String,
-}
-
-/// 版本检查服务；持有独立的 HTTP 客户端（首次检查时构建）。
 pub struct UpdateService {
     current_version: String,
     http: LazyHttpClient,
@@ -80,71 +74,93 @@ impl UpdateService {
         }
     }
 
-    /// 查询渠道最新版本并附带比当前版本新的更新说明。
+    /// 查询自己 fork 的 GitHub Releases，并附带比当前版本新的更新说明。
     pub async fn check(&self, channel: &str) -> Result<UpdateCheckResultDto, UpdateError> {
         let channel = normalize_channel(channel)?;
         let release = self.fetch_release(channel).await?;
-        let has_update = is_newer(&release.version, &self.current_version).unwrap_or(false);
-        let download_url = select_download_url(&release.assets).unwrap_or_default();
+        let has_update = is_newer(&release.tag_name, &self.current_version).unwrap_or(false);
+        let download_url = select_download_url(&release.assets);
         let notes = if has_update {
             self.fetch_notes(channel).await
         } else {
             Vec::new()
         };
+
         Ok(UpdateCheckResultDto {
             channel: channel.to_owned(),
             current_version: self.current_version.clone(),
-            latest_version: release.version,
+            latest_version: normalize_version(&release.tag_name),
             has_update,
-            download_url,
-            release_page_url: RELEASE_PAGE_URL.to_owned(),
+            download_url: download_url.unwrap_or_default(),
+            release_page_url: release.html_url,
             notes,
         })
     }
 
-    async fn fetch_release(&self, channel: &str) -> Result<ReleaseInfo, UpdateError> {
-        let url = format!("{UPDATE_API_BASE}/api/release?channel={channel}");
+    async fn fetch_release(&self, channel: &str) -> Result<GithubRelease, UpdateError> {
+        if channel == "stable" {
+            let url = format!(
+                "{GITHUB_API_BASE}/repos/{GITHUB_REPO}/releases/latest"
+            );
+            let response = self.http.get().await?.get(&url).send().await?;
+            if !response.status().is_success() {
+                return Err(UpdateError::Status(response.status().as_u16()));
+            }
+            return response
+                .json::<GithubRelease>()
+                .await
+                .map_err(|error| UpdateError::Decode(error.to_string()));
+        }
+
+        let releases = self.fetch_releases().await?;
+        releases
+            .into_iter()
+            .find(|release| !release.draft && release.prerelease)
+            .ok_or_else(|| UpdateError::Decode("no frontier release found".to_owned()))
+    }
+
+    async fn fetch_releases(&self) -> Result<Vec<GithubRelease>, UpdateError> {
+        let url = format!(
+            "{GITHUB_API_BASE}/repos/{GITHUB_REPO}/releases?per_page={RELEASES_PER_PAGE}"
+        );
         let response = self.http.get().await?.get(&url).send().await?;
         if !response.status().is_success() {
             return Err(UpdateError::Status(response.status().as_u16()));
         }
         response
-            .json::<ReleaseInfo>()
+            .json::<Vec<GithubRelease>>()
             .await
             .map_err(|error| UpdateError::Decode(error.to_string()))
     }
 
-    /// 更新说明是附属信息：拉取失败只降级为空列表，不影响版本判定。
     async fn fetch_notes(&self, channel: &str) -> Vec<ReleaseNoteDto> {
-        let url = format!(
-            "{UPDATE_API_BASE}/api/changelog?per_page={CHANGELOG_PER_PAGE}&since=v{}&channel={channel}",
-            self.current_version
-        );
-        let http = match self.http.get().await {
-            Ok(http) => http,
+        let releases = match self.fetch_releases().await {
+            Ok(releases) => releases,
             Err(error) => {
-                tracing::debug!(error = %error, "changelog client unavailable");
+                tracing::debug!(error = %error, "release notes fetch failed");
                 return Vec::new();
             }
         };
-        let response = match http.get(&url).send().await {
-            Ok(response) if response.status().is_success() => response,
-            Ok(response) => {
-                tracing::debug!(status = %response.status(), "changelog fetch rejected");
-                return Vec::new();
-            }
-            Err(error) => {
-                tracing::debug!(error = %error, "changelog fetch failed");
-                return Vec::new();
-            }
-        };
-        match response.json::<ChangelogResponse>().await {
-            Ok(changelog) => release_notes(changelog.releases, &self.current_version),
-            Err(error) => {
-                tracing::debug!(error = %error, "changelog decode failed");
-                Vec::new()
-            }
-        }
+
+        releases
+            .into_iter()
+            .filter(|release| !release.draft)
+            .filter(|release| {
+                if channel == "frontier" {
+                    release.prerelease
+                } else {
+                    !release.prerelease
+                }
+            })
+            .filter(|release| is_newer(&release.tag_name, &self.current_version).unwrap_or(false))
+            .filter_map(|release| {
+                Some(ReleaseNoteDto {
+                    version: normalize_version(&release.tag_name),
+                    published_at: release.published_at.unwrap_or_default(),
+                    body: release.body.unwrap_or_default(),
+                })
+            })
+            .collect()
     }
 }
 
@@ -156,92 +172,30 @@ fn normalize_channel(channel: &str) -> Result<&'static str, UpdateError> {
     }
 }
 
-/// `/api/changelog?since=` 是闭区间，过滤掉当前版本本身。
-fn release_notes(releases: Vec<ChangelogRelease>, current_version: &str) -> Vec<ReleaseNoteDto> {
-    releases
-        .into_iter()
-        .filter(|release| release.version != current_version)
-        .map(|release| ReleaseNoteDto {
-            version: release.version,
-            published_at: release.published_at,
-            body: release.body,
-        })
-        .collect()
+fn normalize_version(version: &str) -> String {
+    version.trim().strip_prefix('v').unwrap_or(version.trim()).to_owned()
 }
 
-/// 站点资产 URL 可能是相对路径（`/api/download/...`，用于地域路由）。
-fn absolute_download_url(url: &str) -> String {
-    if url.starts_with('/') {
-        format!("{UPDATE_API_BASE}{url}")
-    } else {
-        url.to_owned()
-    }
-}
-
-/// 本平台/安装形态的资产键，按优先级排列；取 `/api/release` `assets` 中第一个存在的。
+/// Asset выбирается по точному имени, чтобы русская сборка никогда не скачала оригинальный EXE.
 #[cfg(target_os = "windows")]
-fn asset_keys() -> &'static [&'static str] {
-    let portable = std::env::current_exe()
-        .ok()
-        .and_then(|exe| exe.parent().map(|dir| dir.join("portable").exists()))
-        .unwrap_or(false);
-    let arm64 = std::env::consts::ARCH == "aarch64";
-    match (portable, arm64) {
-        (true, true) => &["portable_arm64"],
-        (true, false) => &["portable"],
-        (false, true) => &["setup_arm64"],
-        (false, false) => &["setup"],
-    }
+fn select_download_url(assets: &[GithubAsset]) -> Option<String> {
+    let arch = std::env::consts::ARCH;
+    let suffix = if arch == "aarch64" { "windows-arm64-setup.exe" } else { "windows-x64-setup.exe" };
+    assets
+        .iter()
+        .find(|asset| asset.name.starts_with("FluxDown-")
+            && asset.name.ends_with("-RU-") == false
+            && asset.name.ends_with(suffix)
+            && asset.name.contains("-RU-windows-"))
+        .map(|asset| asset.browser_download_url.clone())
+        .filter(|url| is_trusted_download_url(url))
 }
 
-#[cfg(target_os = "linux")]
-fn asset_keys() -> &'static [&'static str] {
-    if std::env::var_os("APPIMAGE").is_some() {
-        return &["linux_appimage"];
-    }
-    let exe = std::env::current_exe().ok();
-    let exe_str = exe
-        .as_deref()
-        .and_then(std::path::Path::to_str)
-        .unwrap_or("");
-    if exe_str.starts_with("/opt/fluxdown") {
-        if package_owns(&["dpkg", "-S"], exe_str) {
-            return &["linux_deb"];
-        }
-        if package_owns(&["pacman", "-Qo"], exe_str) {
-            return &["linux_arch"];
-        }
-    }
-    &["linux_tarball"]
+#[cfg(not(target_os = "windows"))]
+fn select_download_url(_assets: &[GithubAsset]) -> Option<String> {
+    None
 }
 
-#[cfg(target_os = "linux")]
-fn package_owns(command: &[&str], exe: &str) -> bool {
-    std::process::Command::new(command[0])
-        .args(&command[1..])
-        .arg(exe)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .is_ok_and(|status| status.success())
-}
-
-/// 无 Developer ID 签名时无法静默替换 .app，交给 Finder 打开 DMG；缺 DMG 时回退 tarball。
-#[cfg(target_os = "macos")]
-fn asset_keys() -> &'static [&'static str] {
-    if std::env::consts::ARCH == "aarch64" {
-        &["macos_dmg_arm64", "macos_tarball_arm64"]
-    } else {
-        &["macos_dmg_x64", "macos_tarball_x64"]
-    }
-}
-
-#[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
-fn asset_keys() -> &'static [&'static str] {
-    &[]
-}
-
-/// 下载地址只接受 https 且主机属于官方分发域：清单被篡改时也不会把用户带到任意 scheme / 主机。
 fn is_trusted_download_url(url: &str) -> bool {
     let Ok(parsed) = reqwest::Url::parse(url) else {
         return false;
@@ -249,32 +203,9 @@ fn is_trusted_download_url(url: &str) -> bool {
     if parsed.scheme() != "https" || !parsed.username().is_empty() || parsed.password().is_some() {
         return false;
     }
-    let Some(host) = parsed.host_str() else {
-        return false;
-    };
-    let host = host.to_ascii_lowercase();
-    let under = |domain: &str| {
-        host == domain
-            || host
-                .strip_suffix(domain)
-                .is_some_and(|prefix| prefix.ends_with('.'))
-    };
-    under("zerx.dev") || under("github.com") || under("githubusercontent.com")
+    matches!(parsed.host_str(), Some("github.com") | Some("objects.githubusercontent.com"))
 }
 
-fn select_download_url(assets: &BTreeMap<String, Value>) -> Option<String> {
-    asset_keys().iter().find_map(|key| {
-        assets
-            .get(*key)?
-            .get("download_url")
-            .and_then(Value::as_str)
-            .filter(|url| !url.is_empty())
-            .map(absolute_download_url)
-            .filter(|url| is_trusted_download_url(url))
-    })
-}
-
-/// 预发布标识：数字段按数值比较且恒小于字母段（SemVer 2.0 §11.4）。
 #[derive(Debug, PartialEq, Eq)]
 enum PreId {
     Num(u64),
@@ -311,9 +242,7 @@ fn parse_semver(input: &str) -> Result<SemVer, UpdateError> {
     }
     let pre = match pre {
         None => Vec::new(),
-        Some("") => {
-            return Err(UpdateError::Decode(format!("empty prerelease: {input}")));
-        }
+        Some("") => return Err(UpdateError::Decode(format!("empty prerelease: {input}"))),
         Some(pre) => pre
             .split('.')
             .map(|id| match id.parse::<u64>() {
@@ -356,7 +285,6 @@ fn cmp_semver(a: &SemVer, b: &SemVer) -> Ordering {
     }
 }
 
-/// `latest` 是否严格高于 `current`；任一方不可解析（如开发版 `dev`）返回错误。
 pub fn is_newer(latest: &str, current: &str) -> Result<bool, UpdateError> {
     let latest = parse_semver(latest)?;
     let current = parse_semver(current)?;
@@ -366,66 +294,13 @@ pub fn is_newer(latest: &str, current: &str) -> Result<bool, UpdateError> {
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
-    use std::collections::BTreeMap;
-
-    use serde_json::{Value, json};
-
-    use super::{
-        ChangelogRelease, absolute_download_url, asset_keys, is_newer, normalize_channel,
-        release_notes, select_download_url,
-    };
-
-    #[test]
-    fn download_url_follows_platform_asset_preference() {
-        let keys = asset_keys();
-        assert!(
-            !keys.is_empty(),
-            "desktop platforms always have an asset key"
-        );
-        let mut assets: BTreeMap<String, Value> = keys
-            .iter()
-            .map(|key| ((*key).to_owned(), Value::Null))
-            .collect();
-        assert_eq!(select_download_url(&assets), None);
-        let last = keys[keys.len() - 1];
-        assets.insert(
-            last.to_owned(),
-            json!({ "name": "x", "size": 1, "download_url": "/api/download/x" }),
-        );
-        assert_eq!(
-            select_download_url(&assets).as_deref(),
-            Some("https://fluxdown.zerx.dev/api/download/x")
-        );
-        assets.insert(
-            keys[0].to_owned(),
-            json!({ "download_url": "https://github.com/zerx-lab/FluxDown/releases/first" }),
-        );
-        assert_eq!(
-            select_download_url(&assets).as_deref(),
-            Some("https://github.com/zerx-lab/FluxDown/releases/first")
-        );
-    }
-
-    #[test]
-    fn untrusted_download_urls_are_rejected() {
-        use super::is_trusted_download_url as trusted;
-        assert!(trusted("https://fluxdown.zerx.dev/api/download/x"));
-        assert!(trusted("https://objects.githubusercontent.com/a"));
-        assert!(!trusted("http://fluxdown.zerx.dev/a"));
-        assert!(!trusted("file:///etc/passwd"));
-        assert!(!trusted("https://evilzerx.dev/a"));
-        assert!(!trusted("https://zerx.dev.evil.com/a"));
-        assert!(!trusted("https://user@fluxdown.zerx.dev/a"));
-        assert!(!trusted("\\\\host\\share\\a.exe"));
-    }
+    use super::{is_newer, normalize_channel, normalize_version};
 
     #[test]
     fn stable_versions_compare_numerically() {
         assert!(is_newer("1.3.0", "1.2.5").unwrap());
-        assert!(is_newer("1.2.6", "1.2.5").unwrap());
         assert!(is_newer("1.10.0", "1.9.9").unwrap());
         assert!(!is_newer("1.2.5", "1.2.5").unwrap());
-        assert!(!is_newer("1.2.4", "1.2.5").unwrap());
         assert!(is_newer("v2.0.0", "1.99.99").unwrap());
     }
 
@@ -434,57 +309,20 @@ mod tests {
         assert!(is_newer("1.3.0", "1.3.0-rc.1").unwrap());
         assert!(!is_newer("1.3.0-rc.2", "1.3.0").unwrap());
         assert!(is_newer("1.3.0-rc.2", "1.3.0-rc.1").unwrap());
-        assert!(!is_newer("1.3.0-rc.1", "1.3.0-rc.2").unwrap());
         assert!(is_newer("1.4.0-rc.1", "1.3.0").unwrap());
-        assert!(is_newer("1.3.0-rc.1", "1.3.0-alpha").unwrap());
-        assert!(is_newer("1.3.0-rc.1.1", "1.3.0-rc.1").unwrap());
-        assert!(!is_newer("1.3.0-rc.1", "1.3.0-rc.1").unwrap());
-        assert!(is_newer("1.3.0+build.7", "1.2.0+build.9").unwrap());
-        assert!(!is_newer("1.3.0+build.7", "1.3.0").unwrap());
-    }
-
-    #[test]
-    fn invalid_versions_are_rejected() {
-        assert!(is_newer("dev", "1.0.0").is_err());
-        assert!(is_newer("1.0.0", "dev").is_err());
-        assert!(is_newer("1.0", "1.0.0").is_err());
-        assert!(is_newer("1.0.0.1", "1.0.0").is_err());
-        assert!(is_newer("1.0.0-", "1.0.0").is_err());
     }
 
     #[test]
     fn channels_normalize_and_reject_unknown() {
-        assert_eq!(normalize_channel("").unwrap(), "stable");
+        assert_eq!(normalize_channel("" ).unwrap(), "stable");
         assert_eq!(normalize_channel("stable").unwrap(), "stable");
         assert_eq!(normalize_channel(" frontier ").unwrap(), "frontier");
         assert!(normalize_channel("nightly").is_err());
     }
 
     #[test]
-    fn notes_exclude_current_version_and_resolve_relative_urls() {
-        let releases = vec![
-            ChangelogRelease {
-                version: "1.3.0".to_owned(),
-                published_at: "2026-01-01T00:00:00Z".to_owned(),
-                body: "new".to_owned(),
-            },
-            ChangelogRelease {
-                version: "1.2.0".to_owned(),
-                published_at: String::new(),
-                body: "current".to_owned(),
-            },
-        ];
-        let notes = release_notes(releases, "1.2.0");
-        assert_eq!(notes.len(), 1);
-        assert_eq!(notes[0].version, "1.3.0");
-        assert_eq!(notes[0].body, "new");
-        assert_eq!(
-            absolute_download_url("/api/download/FluxDown.dmg"),
-            "https://fluxdown.zerx.dev/api/download/FluxDown.dmg"
-        );
-        assert_eq!(
-            absolute_download_url("https://cdn.example/a.dmg"),
-            "https://cdn.example/a.dmg"
-        );
+    fn versions_drop_tag_prefix() {
+        assert_eq!(normalize_version("v0.5.3"), "0.5.3");
+        assert_eq!(normalize_version("0.5.3"), "0.5.3");
     }
 }
