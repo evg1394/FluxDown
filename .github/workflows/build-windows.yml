@@ -175,7 +175,7 @@ jobs:
           path: build/installer/FluxDown-*-RU-windows-x64-setup.exe
           if-no-files-found: error
 
-            - name: Create or update GitHub Release
+      - name: Create or update GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ steps.version.outputs.VERSION }}
