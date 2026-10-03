@@ -158,12 +158,17 @@ jobs:
             throw "Inno Setup did not produce an installer"
           }
 
-          $installer = "build\installer\FluxDown-$env:VERSION-RU-windows-x64-setup.exe"
+          $installerName = "FluxDown-$env:VERSION-RU-windows-x64-setup.exe"
 
           Rename-Item `
-            $generated.FullName `
-            $installer `
+            -LiteralPath $generated.FullName `
+            -NewName $installerName `
             -Force
+
+          $installer = Join-Path "build\installer" $installerName
+
+          Write-Host "Installer created:"
+          Get-Item $installer
 
           Write-Host "Installer created:"
           Get-Item $installer
