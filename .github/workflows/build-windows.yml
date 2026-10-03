@@ -1,10 +1,20 @@
-name: Build Windows
+```yaml
+name: Build Windows Release
 
 on:
+  push:
+    tags:
+      - "v*"
+
   workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to build, e.g. v0.5.3"
+        required: true
+        type: string
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build:
@@ -16,8 +26,33 @@ jobs:
       CARGO_NET_RETRY: "10"
 
     steps:
+      - name: Determine version
+        id: version
+        shell: pwsh
+        run: |
+          if ("${{ github.event_name }}" -eq "workflow_dispatch") {
+            $tag = "${{ inputs.tag }}"
+          } else {
+            $tag = "${{ github.ref_name }}"
+          }
+
+          if ($tag -notmatch '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$') {
+            throw "Invalid version tag: $tag"
+          }
+
+          $version = $tag.Substring(1)
+
+          "TAG=$tag" >> $env:GITHUB_OUTPUT
+          "VERSION=$version" >> $env:GITHUB_OUTPUT
+
+          Write-Host "Tag: $tag"
+          Write-Host "Version: $version"
+
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ steps.version.outputs.TAG }}
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
@@ -55,9 +90,13 @@ jobs:
             "fluxdownd",
             "fluxdown_nmh") {
 
-            Copy-Item `
-              "target\x86_64-pc-windows-msvc\release\$bin.exe" `
-              $stage
+            $source = "target\x86_64-pc-windows-msvc\release\$bin.exe"
+
+            if (-not (Test-Path $source)) {
+              throw "Binary not found: $source"
+            }
+
+            Copy-Item $source $stage
           }
 
           $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
@@ -103,18 +142,53 @@ jobs:
 
       - name: Build installer
         shell: pwsh
+        env:
+          VERSION: ${{ steps.version.outputs.VERSION }}
         run: |
           New-Item -ItemType Directory -Force -Path "build\installer" | Out-Null
 
           iscc `
-            /DMyAppVersion=0.0.0 `
+            /DMyAppVersion=$env:VERSION `
             /DMyAppArch=x64 `
             "/DMySourceDir=$PWD\build\gpui\windows-x64" `
             installer\windows\setup.iss
 
-      - name: Upload installer
+          $generated = Get-ChildItem "build\installer\FluxDown-*.exe" | Select-Object -First 1
+
+          if (-not $generated) {
+            throw "Inno Setup did not produce an installer"
+          }
+
+          $installer = "build\installer\FluxDown-$env:VERSION-RU-windows-x64-setup.exe"
+
+          Rename-Item `
+            $generated.FullName `
+            $installer `
+            -Force
+
+          Write-Host "Installer created:"
+          Get-Item $installer
+
+      - name: Upload Actions artifact
         uses: actions/upload-artifact@v4
         with:
-          name: FluxDown-Windows-x64-installer
-          path: build/installer/FluxDown-*-setup.exe
+          name: FluxDown-Windows-x64-${{ steps.version.outputs.VERSION }}-RU
+          path: build/installer/FluxDown-*-RU-windows-x64-setup.exe
           if-no-files-found: error
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.VERSION }}
+          TAG: ${{ steps.version.outputs.TAG }}
+        shell: pwsh
+        run: |
+          $installer = "build\installer\FluxDown-$env:VERSION-RU-windows-x64-setup.exe"
+
+          gh release create $env:TAG `
+            $installer `
+            --repo "${{ github.repository }}" `
+            --title "FluxDown $env:VERSION RU" `
+            --generate-notes `
+            --latest
+```
