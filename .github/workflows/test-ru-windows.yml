@@ -1,0 +1,107 @@
+name: Test RU Windows Build
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'native/**'
+      - 'crates/**'
+      - 'installer/windows/**'
+      - '.github/workflows/test-ru-windows.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Test RU Windows x64
+    runs-on: windows-latest
+    env:
+      CARGO_HTTP_MULTIPLEXING: "false"
+      CARGO_NET_RETRY: "10"
+      FLUXDOWN_APP_VERSION: "0.5.3"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: gpui-windows-x64-test
+          cache-on-failure: true
+
+      - name: Build FluxDown
+        shell: bash
+        run: |
+          cargo build --locked --release \
+            --target x86_64-pc-windows-msvc \
+            -p fluxdown_ui_app \
+            -p fluxdown_agent \
+            -p fluxdown_daemon \
+            -p fluxdown_nmh \
+            --features fluxdown_agent/desktop \
+            --bins
+
+      - name: Prepare application
+        shell: pwsh
+        run: |
+          $stage = "build\gpui\windows-x64"
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+
+          foreach ($bin in "fluxdown-desktop", "fluxdown-agent", "fluxdownd", "fluxdown_nmh") {
+            $source = "target\x86_64-pc-windows-msvc\release\$bin.exe"
+            if (-not (Test-Path $source)) { throw "Binary not found: $source" }
+            Copy-Item $source $stage
+          }
+
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vsRoot = & $vswhere -latest -products * -property installationPath
+          if (-not $vsRoot) { throw "Visual Studio installation not found" }
+
+          $crtDir = Get-ChildItem "$vsRoot\VC\Redist\MSVC\*\x64\Microsoft.VC1*.CRT" -Directory |
+            Sort-Object FullName | Select-Object -Last 1
+          if (-not $crtDir) { throw "MSVC CRT not found" }
+
+          Copy-Item "$($crtDir.FullName)\msvcp140*.dll", "$($crtDir.FullName)\vcruntime140*.dll" $stage -Force
+
+      - name: Install Inno Setup
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "C:\Program Files (x86)\Inno Setup 6\ISCC.exe")) {
+            choco install innosetup -y --no-progress
+          }
+          echo "C:\Program Files (x86)\Inno Setup 6" >> $env:GITHUB_PATH
+
+      - name: Install Inno Setup language
+        shell: pwsh
+        run: |
+          Copy-Item "installer\windows\ChineseSimplified.isl" "C:\Program Files (x86)\Inno Setup 6\Languages\ChineseSimplified.isl" -Force
+
+      - name: Build installer
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path "build\installer" | Out-Null
+          iscc /DMyAppVersion=$env:FLUXDOWN_APP_VERSION /DMyAppArch=x64 "/DMySourceDir=$PWD\build\gpui\windows-x64" installer\windows\setup.iss
+
+          $generated = Get-ChildItem "build\installer\FluxDown-*.exe" | Select-Object -First 1
+          if (-not $generated) { throw "Inno Setup did not produce an installer" }
+
+          $installerName = "FluxDown-$env:FLUXDOWN_APP_VERSION-RU-windows-x64-setup.exe"
+          Rename-Item -LiteralPath $generated.FullName -NewName $installerName -Force
+          Get-Item (Join-Path "build\installer" $installerName)
+
+      - name: Upload test installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: FluxDown-Windows-x64-0.5.3-RU-test
+          path: build/installer/FluxDown-0.5.3-RU-windows-x64-setup.exe
+          if-no-files-found: error
