@@ -7,4 +7,5 @@ mod models;
 
 pub use api::CloudApi;
 pub use auth::CloudAuthService;
+pub(crate) use client::RequestEpoch;
 pub use client::{CloudClient, CloudError};

@@ -1,7 +1,7 @@
 /**
  * 下载页客户端逻辑(由 download.astro 的 <script> 引入,仅在存在 [data-dl-root] 时运行)。
  *
- * - 拉取 /api/release(?channel=frontier),把 [data-asset] 行改写为 /api/download 链接;
+ * - 拉取 /api/release(?channel=frontier),默认使用 GitHub 直链,显式提供 OSS 备用链接;
  *   失败时保留服务端渲染的 GitHub Releases 回退链接并显示错误条。
  * - 识别访客 OS / CPU 架构,决定首屏主按钮;`D` 键在本页直接触发主按钮。
  * - 复制按钮、邮件订阅表单。
@@ -10,6 +10,7 @@ import { download } from "@/i18n/messages/download";
 import type { Lang } from "@/i18n/config";
 import { formatSize, pickPath, versionAnchor, type ReleaseAsset, type ReleaseInfo } from "@/lib/release-format";
 import { withBase } from "@/lib/base";
+import { assetDownloadUrl } from "@/lib/download-source";
 
 type Channel = "stable" | "frontier";
 type Os = "windows" | "macos" | "linux" | "android" | "ios";
@@ -116,8 +117,26 @@ function init(root: HTMLElement) {
     for (const row of $$<HTMLAnchorElement>("[data-asset]")) {
       const asset = pickPath(data, row.dataset.asset!) as ReleaseAsset | null | undefined;
       row.hidden = !asset;
-      if (!asset) continue;
-      row.href = asset.download_url;
+      let backup = row.nextElementSibling as HTMLAnchorElement | null;
+      if (!backup?.hasAttribute("data-asset-backup")) {
+        backup = document.createElement("a");
+        backup.dataset.assetBackup = "";
+        backup.className = "link self-start text-[12px]";
+        backup.textContent = t.source.backup;
+        backup.target = "_blank";
+        backup.rel = "noopener nofollow";
+        row.after(backup);
+      }
+      backup.hidden = !asset;
+      if (!asset) {
+        backup.removeAttribute("href");
+        continue;
+      }
+      backup.href = assetDownloadUrl(asset, "oss");
+      backup.title = `${t.source.backup}: ${asset.name}`;
+      row.href = assetDownloadUrl(asset, "github");
+      row.target = "_blank";
+      row.rel = "noopener nofollow";
       row.title = asset.name;
       row.querySelector("[data-size]")!.textContent = formatSize(asset.size);
     }
@@ -135,6 +154,10 @@ function init(root: HTMLElement) {
   }
 
   function resetAssets() {
+    $$<HTMLAnchorElement>("[data-asset-backup]").forEach((el) => {
+      el.hidden = true;
+      el.removeAttribute("href");
+    });
     for (const row of $$<HTMLAnchorElement>("[data-asset]")) {
       row.hidden = false;
       row.href = row.dataset.fallback ?? row.href;
@@ -231,20 +254,36 @@ function init(root: HTMLElement) {
     const osName = os ? t.os[os] : null;
 
     if (status) status.textContent = !detected ? t.hero.detecting : osName && pick.asset ? pick.label : t.hero.choose;
+    const primaryBackup = $<HTMLAnchorElement>("[data-primary-backup]")!;
+    primaryBackup.hidden = !pick.asset;
     if (pick.asset) {
-      primary.href = pick.asset.download_url;
+      primary.href = assetDownloadUrl(pick.asset, "github");
+      primary.target = "_blank";
+      primary.rel = "noopener nofollow";
+      primaryBackup.href = assetDownloadUrl(pick.asset, "oss");
       primary.title = pick.asset.name;
       primaryLabel.textContent = pick.label;
     } else {
       primary.href = os === "android" ? "#android" : "#desktop";
+      primary.removeAttribute("target");
+      primaryBackup.removeAttribute("href");
       primary.removeAttribute("title");
       primaryLabel.textContent =
         osName && root.dataset.state !== "loading" && (os === "ios" || release) ? t.hero.noBuild(osName) : t.hero.allPlatforms;
     }
+    const altBackup = $<HTMLAnchorElement>("[data-alt-backup]")!;
     altLink.hidden = !pick.alt;
+    altBackup.hidden = !pick.alt;
     if (pick.alt) {
-      altLink.href = pick.alt.asset.download_url;
+      altLink.href = assetDownloadUrl(pick.alt.asset, "github");
+      altLink.target = "_blank";
+      altLink.rel = "noopener nofollow";
       altLink.textContent = t.hero.alt(pick.alt.label);
+      altBackup.href = assetDownloadUrl(pick.alt.asset, "oss");
+      altBackup.textContent = `${t.source.backup} · ${pick.alt.label}`;
+    } else {
+      altLink.removeAttribute("href");
+      altBackup.removeAttribute("href");
     }
 
     const showAsset = pick.asset ?? null;

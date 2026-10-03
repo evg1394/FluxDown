@@ -38,6 +38,8 @@
 
 ## 下载引擎（`native/engine`）
 
+- 平台存储 FFI（`disk_space.rs`、`segment_coordinator.rs`、`bt_sparse.rs`、`bt_downloader.rs`）保留实际分配/并发扩容、大卷宽度和饱和计算语义，不机械替换成 fs2；具体锁定版本差异见 `rule://no-unsafe-in-rust`。空间出参仅成功后读取，fadvise 直接错误码显式记录；Windows 属性读取走安全元数据，错误不能被当作 sparse 标记，测试区分磁盘占用与逻辑长度。
+
 ### 6 种协议（分发 = `download_manager::do_start_task`/`do_resume_task` 内单条 if/else 链，每臂 `catch_unwind`）
 
 | 协议 | 判定谓词 | 入口 | 文件 |
@@ -84,7 +86,7 @@
 - `proxy_config.rs`：无/系统（Windows 注册表）/手动/**自动**（`ProxyMode::Auto`）；HTTP/HTTPS/SOCKS4/5；`test_proxy_connection` 测延迟。
 - `auto_proxy.rs` + `path_scheduler.rs` + `cdn/node_pool.rs`：`ProxyMode::Auto` 是**多路径调度**，没有「采样→一次性热切换」状态机。直连（SYS + 多 CDN 钉定节点）、手动代理、系统代理（同端点去重）都是同一 `NodePool` 的路径；探索即真实分段下载（字节写入文件、零丢弃）。租借规则（`path_scheduler` 纯判据）：冷路径只在 ≥1MiB 的工作上分 1 条探索连接（coordinator 额外放出至多 1 个探索 worker）；失败只降排序不降速率估计（连续 3 次才踢）；单连接估计低于最优一半的路径出竞争集；竞争集内按 cap 分散、按 score 择优；开放式首段/plain GET 只留起飞路径。在途连接按完成时间判据（剩余/本连接速率 > 2×剩余/最优实证速率 + 1s；不设剩余字节下限——建连开销已在交接侧计入，下限会让极慢连接握住拆分最小片以下的尾部碎片拖尾；最优基准只认本任务窗口样本或完成租约，不认先验）在当前字节处抢占交接，整窗零字节即判停滞。代理路径错误归因路径本身（含 Range 失效/错位，翻译为 `CdnNodeFailed` 回收重派），validator 不一致（`VersionChanged` 或 206 路径的 `Other("validator mismatch")`）立即踢除该路径并记 NoSwitch；SYS 上的传输层失败在仍有其它路径存活时同样回收重派（每任务 8 次配额，耗尽后按原语义上抛）；交接窗口抑制 ramp 评估/收缩，用过备选路径的任务不学习域名连接上限/起步提示。跨任务先验 `route_health.rs`：每 (host, 路径) 的单连接速率对数折扣均值（半衰 12h，config `auto_route_health` v2，网络指纹 epoch——换网整表丢弃、**离线=unknown 不清表**），只用于起飞排序（代理先验须领先直连 1.5× 才以代理起飞）与备选路径初值，实测首窗即覆盖。云端只提供 CDN hints 排序先验，不参与路由决策、不新增遥测。failover **独立于通用重试配额**：手动代理、系统代理、本地直连在一个自动恢复周期内各尝试至多一次（先验更快的代理优先），三路均失败后只服从通用重试，杜绝 ping-pong。主导链路（窗口累计字节最多的路径）落 `tasks.auto_route` + `EngineEvent::TaskRouteChanged`（wire 标签不变：`direct[:sampled|:pinned|:failover]` / `proxy:{sampled,cached,failover}:{manual,system}`）。代理设置变更同点清 `route_health` + `domain_conn_caps` + failover 状态。
 - `multi_nic.rs`（config `multi_nic_enabled`，默认关，仅桌面 target 编译 `if-addrs`）：多网卡聚合下载。manager 只折算任务级输入（走代理/Auto 多路径 → `blocked_by_proxy`）；coordinator 起飞后后台 `prepare_links`（解析目标 → UDP connect 探主链路 → 枚举网卡 → 纯判据 `plan_links`），首个完整 ramp 窗口经 `NodePool::add_links` 挂入 `RoutePath::Link(ifindex)` 冷槽位，首连接不等待。规划拒绝：fake-IP（198.18/15，TUN 代理）、局域网/CGNAT 目标、主链路是隧道/点对点（防绕开 VPN）；额外链路排除隧道/虚拟网卡、与已选链路同子网或同 /64（同一路由器 = 同一上游）、目标不具备的地址族、5 分钟内被踢过的网卡（进程内记忆，键含本地地址）。出口绑定：Linux/macOS `interface`（SO_BINDTODEVICE/IP_BOUND_IF），Windows `local_address`（强主机模型，单地址族），链路 client 的 DNS 只返回该链路地址族。调度：链路之间按独立容量注水（容量 = 单连接估计 × 上窗连接数，新租约给「容量/(在途+1)」最高者，≥5% 总容量的空闲链路保底 1 条），不走竞争集；链路最后一条连接只在停滞时抢占；链路路径不写 `route_health` 先验、计入 `alternates_used`（不学域名连接上限）。事件：`TaskCdnEvent` kind `links`/`links_off`（原因码 `multi_nic::off_reason`），节点标签 `NIC:<网卡名>`；单节点池无 sink 时事件暂存，由 `Multipath::poll_links` 每窗转发。`native/server` 不接线（废弃路径），生产宿主为 hub 与 daemon；开关在 Flutter 与 GPUI（`crates/settings` 下载页「连接与性能」，`SettingsRow::explain` 点击「?」出说明对话框）设置页均已提供。
-- `disk_space.rs`：跨平台余量查询（HLS remux/DASH mux ENOSPC 预检）。
+- `disk_space.rs`：跨平台余量查询（HLS remux/DASH mux ENOSPC 预检）；Unix 原始块数与块大小经 `Into<u64>` 无损扩展后饱和相乘，兼容不同 ABI 的字段宽度，避免同类型强转触发 Clippy。
 - `proc.rs`：`no_console_window` —— **每个 console 子进程 spawn 都必须包裹**（ffmpeg/ffprobe/yt-dlp/tar/探版），防 Windows 闪窗。
 - `data_dir.rs`：数据目录解析（Windows 便携 `<exe>/portable_data` via `portable` 标记 vs 安装 `%LOCALAPPDATA%`；Linux XDG；macOS App Support；Android files dir）+ 旧版迁移。**Dart 侧 `services/platform_utils.dart` 的 KNOWN_ITEMS 必须与此同步。**
 - `logger.rs`：全局文件日志宏 `log_info!`/`log_error!`（`#[macro_export]`，`$crate` 前缀跨 crate 安全；每文件顶显式 `use`）。与 Dart `LogService` 写同一文件。

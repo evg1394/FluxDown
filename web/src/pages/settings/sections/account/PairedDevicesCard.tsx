@@ -31,12 +31,12 @@ function PairedRow({ device, disabled }: { device: LinkDeviceInfo; disabled: boo
 
   return (
     <div className="flex items-center gap-2 px-3 py-2 coarse:min-h-touch">
-      <span className={`size-2 shrink-0 rounded-full ${device.online ? 'bg-success' : 'bg-text-tertiary/50'}`} aria-hidden />
+      <span className={`size-2 shrink-0 rounded-full ${!disabled && device.online ? 'bg-success' : 'bg-text-tertiary/50'}`} aria-hidden />
       <div className="flex min-w-0 flex-1 flex-col gap-0.5">
         <div className="flex min-w-0 items-center gap-2">
           <span className="min-w-0 truncate text-sm font-medium text-foreground">{device.name}</span>
           <Badge>{t('deviceLocalTag')}</Badge>
-          <span className="text-xs text-muted-foreground">{device.online ? t('deviceOnline') : t('deviceOffline')}</span>
+          <span className="text-xs text-muted-foreground">{t(disabled ? 'devicePresenceUnknown' : device.online ? 'deviceOnline' : 'deviceOffline')}</span>
         </div>
         {meta ? <div className="truncate text-xs text-muted-foreground">{meta}</div> : null}
       </div>

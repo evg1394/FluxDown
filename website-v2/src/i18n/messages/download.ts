@@ -8,6 +8,10 @@ export const download = defineMessages({
       description:
         "Download the FluxDown desktop client for Windows, macOS and Linux — a native GPU-rendered app on a Rust download engine. Plus the headless server, CLI, Android build and browser extensions.",
     },
+    source: {
+      note: "Downloads use GitHub by default. If a download fails or is too slow, use the backup link for that file.",
+      backup: "Backup download",
+    },
     hero: {
       eyebrow: "Download",
       title: "The <em>native</em> download manager, on your machine",
@@ -159,6 +163,10 @@ export const download = defineMessages({
       title: "下载 FluxDown — Windows、macOS、Linux、服务器与命令行",
       description:
         "下载 FluxDown 桌面客户端(Windows / macOS / Linux):GPU 原生渲染的界面,Rust 下载引擎。另有无头服务器、命令行、Android 与浏览器扩展。",
+    },
+    source: {
+      note: "默认通过 GitHub 下载。无法下载或速度过慢时，请使用对应文件的备用下载链接。",
+      backup: "备用下载",
     },
     hero: {
       eyebrow: "下载",

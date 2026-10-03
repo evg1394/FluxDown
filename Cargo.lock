@@ -2800,6 +2800,7 @@ dependencies = [
  "async-trait",
  "axum",
  "base64 0.22.1",
+ "block2 0.6.2",
  "directories",
  "fluxdown_api",
  "fluxdown_link",
@@ -2816,6 +2817,7 @@ dependencies = [
  "objc2 0.6.4",
  "objc2-app-kit 0.3.2",
  "objc2-foundation 0.3.2",
+ "objc2-user-notifications",
  "regex",
  "reqwest 0.12.28",
  "serde",
@@ -2829,6 +2831,7 @@ dependencies = [
  "tracing-subscriber",
  "tray-icon",
  "uuid",
+ "windows 0.61.3",
  "windows-sys 0.59.0",
  "winreg",
 ]
@@ -2988,7 +2991,6 @@ version = "0.1.0"
 name = "fluxdown_nmh"
 version = "0.1.0"
 dependencies = [
- "libc",
  "serde",
  "serde_json",
  "winresource",

@@ -3,6 +3,7 @@
 import type {
   AgentPreferencesDto,
   AgentSessionDto,
+  CloudConnectionDto,
   CloudDevice,
   GatewayStatusDto,
   LinkDeviceInfo,
@@ -51,6 +52,8 @@ export interface AgentSnapshot {
   daemonConnected: boolean;
   session: AgentSessionDto | null;
   sync: SyncStatusDto;
+  /** 旧快照缺失时视为 disconnected。 */
+  cloudConnection?: CloudConnectionDto;
   preferences: AgentPreferencesDto;
   gateway: GatewayStatusDto;
   cloudDevices: CloudDevice[];
@@ -107,6 +110,7 @@ export type AgentEvent =
   | { type: 'sessionRevoked'; data: ErrorReason }
   | { type: 'sessionChanged'; data: AgentSessionDto | null }
   | { type: 'syncChanged'; data: SyncStatusDto }
+  | { type: 'cloudConnectionChanged'; data: CloudConnectionDto }
   | { type: 'preferencesChanged'; data: AgentPreferencesDto }
   | { type: 'gatewayChanged'; data: GatewayStatusDto }
   | { type: 'cloudDevicesChanged'; data: CloudDevice[] }

@@ -67,7 +67,7 @@
   /* 间距：GPUI spacing.* 与 Tailwind 刻度一一对应（1 = 4px）：
      xxs=0.5(2) xs=1(4) sm=2(8) md=3(12) lg=4(16) xl=6(24) xxl=8(32)。直接写 p-3、gap-2 即可。 */
 
-  --font-sans: var(--fx-typography-sans);
+  --font-sans: var(--fx-browser-font-sans, var(--fx-typography-sans));
   --font-mono: var(--fx-typography-mono);
 
   --text-caption: var(--fx-typography-caption-size);
@@ -137,6 +137,9 @@
 }
 @utility h-task-row {
   height: var(--fx-density-task-row);
+}
+@utility h-task-row-relaxed {
+  height: calc(var(--fx-density-task-row) * 1.5);
 }
 @utility h-task-row-compact {
   height: var(--fx-density-task-row-compact);

@@ -25,16 +25,26 @@ struct InFlight {
 
 impl Global for InFlight {}
 
+impl InFlight {
+    fn finish(&mut self) -> bool {
+        self.count = self.count.saturating_sub(1);
+        self.count == 0 && std::mem::take(&mut self.quit_pending)
+    }
+
+    fn request_quit(&mut self, open_windows: usize) -> bool {
+        // defer 执行前可能收到新捕获、托盘唤起或提交结果打开的进度 / 错误窗口。
+        self.quit_pending = open_windows == 0 && self.count > 0;
+        open_windows == 0 && self.count == 0
+    }
+}
+
 /// 登记一个关窗后仍须完成的请求；返回的任务完成时解除登记（期间推迟的退出随之执行）。
 pub fn keep_alive<R: 'static>(cx: &mut App, task: Task<R>) -> Task<R> {
     cx.default_global::<InFlight>().count += 1;
     cx.spawn(async move |cx| {
         let output = task.await;
         cx.update(|cx| {
-            let in_flight = cx.default_global::<InFlight>();
-            in_flight.count = in_flight.count.saturating_sub(1);
-            let quit = in_flight.count == 0 && std::mem::take(&mut in_flight.quit_pending);
-            if quit && WindowRegistry::open_count(cx) == 0 {
+            if cx.default_global::<InFlight>().finish() {
                 quit_ui(cx);
             }
         });
@@ -79,9 +89,8 @@ pub fn quit_everything(cx: &mut App) {
 /// 外部捕获）先经 [`keep_alive`] 登记在途请求，登记了就等它们结束再退出。
 pub fn quit_ui(cx: &mut App) {
     cx.defer(|cx| {
-        let in_flight = cx.default_global::<InFlight>();
-        if in_flight.count > 0 {
-            in_flight.quit_pending = true;
+        let open_windows = WindowRegistry::open_count(cx);
+        if !cx.default_global::<InFlight>().request_quit(open_windows) {
             return;
         }
         let desktop = Desktop::global_mut(cx);
@@ -119,4 +128,57 @@ pub fn shutdown_request_on_app_quit(
             .client
             .call::<Value, Value>(method::SYSTEM_SHUTDOWN, None),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::InFlight;
+
+    #[test]
+    fn last_window_waits_for_every_submission_then_exits() {
+        let mut requests = InFlight {
+            count: 2,
+            quit_pending: false,
+        };
+        assert!(!requests.request_quit(0));
+        assert!(!requests.finish());
+        assert!(requests.finish());
+        assert!(requests.request_quit(0));
+    }
+
+    #[test]
+    fn reopened_window_cancels_deferred_exit_until_it_closes() {
+        let mut requests = InFlight {
+            count: 1,
+            quit_pending: false,
+        };
+        assert!(!requests.request_quit(0));
+        assert!(requests.finish());
+        // 提交完成后、defer 执行前，进度窗 / 新捕获 / 主窗口打开。
+        assert!(!requests.request_quit(1));
+        assert!(!requests.quit_pending);
+        assert!(requests.request_quit(0));
+    }
+
+    #[test]
+    fn window_opened_while_submitting_stays_alive_after_completion() {
+        let mut requests = InFlight {
+            count: 1,
+            quit_pending: false,
+        };
+        assert!(!requests.request_quit(0));
+        assert!(!requests.request_quit(1));
+        assert!(!requests.finish());
+        assert!(requests.request_quit(0));
+    }
+
+    #[test]
+    fn request_finished_before_close_does_not_leave_a_headless_process() {
+        let mut requests = InFlight {
+            count: 1,
+            quit_pending: false,
+        };
+        assert!(!requests.finish());
+        assert!(requests.request_quit(0));
+    }
 }

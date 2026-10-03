@@ -60,6 +60,7 @@ interface ReleaseAsset {
   name: string;
   size: number;
   download_url: string;
+  github_download_url: string;
 }
 
 interface FilteredRelease {
@@ -177,6 +178,7 @@ async function getCachedReleases(
         .map((a) => ({
           name: a.name,
           size: a.size,
+          github_download_url: a.browser_download_url,
           // 通过我们自己的代理端点下载，携带 tag 参数定位到对应版本
           download_url: withBase(`/api/download/${encodeURIComponent(a.name)}?tag=${encodeURIComponent(r.tag_name)}`),
         }));

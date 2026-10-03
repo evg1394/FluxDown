@@ -108,15 +108,25 @@ pub fn new_download_context_from_snapshot(snapshot: &AgentSnapshot) -> NewDownlo
         &snapshot.preferences.values,
         &snapshot.daemon.queues,
         None,
-        new_download_targets(&snapshot.cloud_devices, &snapshot.linked_devices),
+        new_download_targets(
+            &snapshot.cloud_devices,
+            &snapshot.linked_devices,
+            snapshot.cloud_connection.state == fluxdown_protocol::CloudConnectionState::Connected,
+            true,
+        ),
     )
 }
 
 /// 「下载到」候选设备（云账号其他设备 + 已配对设备；名册里的本机、重复 id 已剔除，同名
 /// 设备已追加短码）。
 #[must_use]
-pub fn new_download_targets(cloud: &[CloudDevice], linked: &[LinkDeviceInfo]) -> Vec<DeviceEntry> {
-    other_devices(cloud, linked)
+pub fn new_download_targets(
+    cloud: &[CloudDevice],
+    linked: &[LinkDeviceInfo],
+    cloud_current: bool,
+    service_current: bool,
+) -> Vec<DeviceEntry> {
+    other_devices(cloud, linked, cloud_current, service_current)
 }
 
 /// 与 Dart 一致：偏好 `remember_last_save_dir` 开启且有记录时沿用上次目录，否则用全局
@@ -666,10 +676,10 @@ impl NewDownloadView {
     }
 
     fn target_label(&self, entry: &DeviceEntry) -> SharedString {
-        let status = if entry.online {
-            &self.strings.device_online
-        } else {
-            &self.strings.device_offline
+        let status = match entry.online {
+            Some(true) => &self.strings.device_online,
+            Some(false) => &self.strings.device_offline,
+            None => &self.strings.device_presence_unknown,
         };
         match entry.kind {
             DeviceKind::Cloud => SharedString::from(format!("{} · {status}", entry.label)),
@@ -975,7 +985,7 @@ impl NewDownloadView {
             NewDownloadSubmission::Remote(RemoteSubmission {
                 target: entry.target(),
                 device_label: entry.label.clone(),
-                target_offline: entry.kind == DeviceKind::Cloud && !entry.online,
+                target_offline: entry.kind == DeviceKind::Cloud && entry.online == Some(false),
                 items,
                 save_dir,
                 captures,
@@ -1319,9 +1329,12 @@ impl NewDownloadView {
             None => self.strings.download_to_hint.clone(),
             Some(entry) => {
                 let offline = match (entry.online, entry.kind) {
-                    (true, _) => None,
-                    (false, DeviceKind::Cloud) => Some(&self.strings.target_offline_hint),
-                    (false, DeviceKind::Paired) => Some(&self.strings.target_paired_offline_hint),
+                    (Some(true), _) => None,
+                    (Some(false), DeviceKind::Cloud) => Some(&self.strings.target_offline_hint),
+                    (Some(false), DeviceKind::Paired) => {
+                        Some(&self.strings.target_paired_offline_hint)
+                    }
+                    (None, _) => Some(&self.strings.device_presence_unknown),
                 };
                 match offline {
                     Some(offline) => SharedString::from(format!(

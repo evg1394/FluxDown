@@ -4,7 +4,7 @@
 
 ## Blocker（打断）
 - crate 边界破坏：engine/api/server 引入 rinf 或 Dart 依赖
-- 非测试 Rust 代码出现 unwrap/expect/unsafe/通配导入
+- 非测试 Rust 代码出现 unwrap/expect/通配导入；任意项目 Rust 代码（含测试/脚本）出现未经准入或违反边界条件的 unsafe。符合 `rule://no-unsafe-in-rust` 的必要平台 FFI 不因关键字本身误报；安全接口接管任意裸指针、缺 SAFETY、跨线程释放受限资源、初始化失败仍继续均属 Blocker。禁止关闭 unsafe_op_in_unsafe_fn / undocumented_unsafe_blocks 消音。
 - 任意 Rust 代码出现 `todo!` / `unimplemented!`、静默丢弃 `Result` / `Future`，或通过忽错 lint 的 `allow` / 命令行降低 lint 等级绕过门禁（测试代码同样适用；见 `rule://no-ignored-errors-in-rust`）
 - 手编 `lib/src/bindings/` 生成物
 - SQL 绕过 `db.rs::Db` 或非 `$N` 占位符

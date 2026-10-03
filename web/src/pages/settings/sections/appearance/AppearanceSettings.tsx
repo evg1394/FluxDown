@@ -28,6 +28,7 @@ import {
 } from '../../../../theme'
 import type { AccentScheme, BuiltinThemeId, ThemePreference } from '../../../../theme'
 import { Icon } from '../../../../ui'
+import { FontFamilyRow } from './FontFamilyRow'
 import { DropdownField, PrefDropdownRow, SettingsPage, SettingsRow, SettingsSection, setPref, usePrefString, useSettingsReadOnly } from '../../kit'
 
 /** `UI_SCALE_PERCENTS`（crates/theme）。 */
@@ -230,6 +231,7 @@ export function AppearanceSettings() {
         </SettingsRow>
       </SettingsSection>
       <SettingsSection title={t('settingsGroupInterface')}>
+        <FontFamilyRow />
         <UiScaleRow />
       </SettingsSection>
     </SettingsPage>

@@ -16,6 +16,7 @@ mod builtin;
 mod document;
 mod extended;
 mod flutter;
+mod fonts;
 mod manager;
 mod migrate;
 mod registry;
@@ -34,6 +35,7 @@ pub use document::{
 };
 pub use extended::*;
 pub use flutter::FLUTTER_COLOR_MAP;
+pub use fonts::{FONT_FAMILY_KEY, available_font_families};
 pub use gpui_base::{
     ColorTokens, RadiusTokens, SemanticThemeTokens, ShadowTokens, SpacingTokens, TextStyleToken,
     TypographyTokens,

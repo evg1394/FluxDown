@@ -1,244 +1,143 @@
 /**
- * GET /api/download/:filename?tag=v1.2.3&source=github
- *
- * Release 资产的下载路由（仓库已开源，asset 可公开直连）。
- * - 若提供 ?tag= 参数，则在对应 tag 的 release 中查找 asset
- * - 若不提供 tag，则在最新的正式 release 中查找 asset
- *
- * 路由策略（302 重定向，本服务不中转下载流量）：
- * - 优先阿里云 OSS：发布流水线把每个组件 release 的资产同步到
- *   `oss://<bucket>/<prefix>/<版本>/<组件>/<file>`（.github/actions/oss-upload）；bucket
- *   私有，本路由用预签名 HEAD 探测（60s 内存缓存 + 2.5s 超时）确认对象存在后，
- *   302 到 1 小时有效的预签名 GET URL。
- * - OSS 未配置 / 不可达 / 未持有该资产：302 到 GitHub 官方 CDN 直连。
- * - ?source=github 强制 GitHub 直连（调试/用户手动切换源）。
- *
- * 桌面 App 自升级同样经由本端点（/api/release 返回的 download_url 指向这里）。
- * OSS 与 GitHub CDN 均支持 Range（206）；App 的每个分段各自请求本端点拿到新鲜的
- * 302，预签名过期不影响分段升级下载。
+ * Release 下载入口（仅 302，不代理文件流量）。
+ * source=github：仅 GitHub；source=oss：仅已验证 OSS，不可用返回 503；
+ * 无 source / 未知 source：保留旧客户端 OSS 优先、GitHub 兜底行为。
+ * 官网 GitHub 默认策略由调用方显式传 source=github，不能改变旧客户端默认值。
  */
-
 import type { APIRoute } from "astro";
 import { GITHUB_TOKEN, GITHUB_REPO } from "astro:env/server";
 import { getCached, setCached } from "@/lib/api-cache";
 import { ossConfigured, presignOssUrl, releaseObjectKey } from "@/lib/oss";
+import { DownloadLookupCache } from "@/lib/download-cache";
+import { createOssProbe } from "@/lib/download-probe";
+import {
+  DownloadLookupError,
+  downloadRedirect,
+  downloadSource,
+  latestWithAsset,
+  isGitHubDownloadUrl,
+  mayProbeOss,
+  ossUnavailable,
+  transientGitHubStatus,
+  type DownloadRelease,
+} from "@/lib/download-policy";
 
 export const prerender = false;
 
-interface GitHubAsset {
-  name: string;
-  url: string;
-  size: number;
-  browser_download_url: string;
-}
-
-interface GitHubRelease {
-  tag_name: string;
-  draft: boolean;
-  prerelease: boolean;
-  assets: GitHubAsset[];
-}
-
-/** 仓库已公开：token 仅用于提高 GitHub API 速率限制，缺失时匿名访问。 */
 const GITHUB_HEADERS: Record<string, string> = {
   Accept: "application/vnd.github+json",
   "X-GitHub-Api-Version": "2022-11-28",
   ...(GITHUB_TOKEN ? { Authorization: `Bearer ${GITHUB_TOKEN}` } : {}),
 };
+const ossHasAsset = createOssProbe((key) => presignOssUrl("HEAD", key, 60));
 
-// ── OSS 探测缓存：命中缓存 1h；未命中/不可达/大小不符 60s 后重探 ──
-// 补发（同 tag 重新打包）会覆盖 GitHub 资产，而 OSS 上传失败时旧对象仍在，
-// 所以「存在」必须连同大小一并核对，缓存键也带上期望大小。
-const ossProbeCache = new Map<string, { until: number; present: boolean }>();
-const OSS_PROBE_HIT_TTL = 60 * 60 * 1000;
-const OSS_PROBE_MISS_TTL = 60 * 1000;
-/** 预签名下载 URL 有效期（秒）。 */
-const OSS_URL_TTL_SEC = 60 * 60;
+function releaseCache(): DownloadLookupCache<DownloadRelease[]> {
+  const key = "download:lookup-cache:v2";
+  let cache = getCached<DownloadLookupCache<DownloadRelease[]>>(key, Infinity);
+  if (!cache) {
+    cache = new DownloadLookupCache<DownloadRelease[]>();
+    setCached(key, cache);
+  }
+  return cache;
+}
 
-/** OSS 是否持有与 GitHub 资产大小一致的对象（预签名 HEAD，带缓存与 2.5s 超时）；任何失败视为未持有。 */
-async function ossHasAsset(key: string, expectedSize: number): Promise<boolean> {
-  const now = Date.now();
-  const cacheKey = `${key}#${expectedSize}`;
-  const cached = ossProbeCache.get(cacheKey);
-  if (cached && now < cached.until) return cached.present;
-  let present = false;
+async function loadReleases(tag: string): Promise<DownloadRelease[]> {
+  let response: Response;
   try {
-    const res = await fetch(presignOssUrl("HEAD", key, 60), {
-      method: "HEAD",
-      signal: AbortSignal.timeout(2500),
-    });
-    const len = Number(res.headers.get("content-length"));
-    present = res.ok && Number.isFinite(len) && len === expectedSize;
+    response = await fetch(
+      `https://api.github.com/repos/${GITHUB_REPO}/releases${
+        tag ? `/tags/${encodeURIComponent(tag)}` : "?per_page=30"
+      }`,
+      { headers: GITHUB_HEADERS, signal: AbortSignal.timeout(8000) },
+    );
   } catch {
-    // OSS 不可达 → false，调用方回退 GitHub
+    throw new DownloadLookupError("GitHub API network failure or timeout", true);
   }
-  ossProbeCache.set(cacheKey, {
-    until: now + (present ? OSS_PROBE_HIT_TTL : OSS_PROBE_MISS_TTL),
-    present,
-  });
-  return present;
-}
-
-// ── GitHub release 查询缓存：下载与自更新每个分段都会打到本路由，不能每次回源 ──
-const RELEASE_CACHE_TTL = 2 * 60 * 1000;
-const GITHUB_TIMEOUT_MS = 8000;
-const inflight = new Map<string, Promise<unknown>>();
-
-/** 成功结果缓存（webhook 的 bustApiCaches 会清掉）并合并并发回源；失败不缓存。 */
-async function cachedLookup<T>(key: string, load: () => Promise<T>): Promise<T> {
-  const hit = getCached<{ v: T }>(key, RELEASE_CACHE_TTL);
-  if (hit) return hit.v;
-  let p = inflight.get(key) as Promise<T> | undefined;
-  if (!p) {
-    p = load()
-      .then((v) => {
-        setCached(key, { v });
-        return v;
-      })
-      .finally(() => inflight.delete(key));
-    inflight.set(key, p);
+  if (tag && response.status === 404) return [];
+  if (!response.ok) {
+    throw new DownloadLookupError(
+      `GitHub API error ${response.status}`,
+      transientGitHubStatus(response.status, response.headers),
+    );
   }
-  return p;
+  let body: string;
+  try {
+    // fetch 在响应头到达时就完成；同一 8s signal 也覆盖后续读体。
+    body = await response.text();
+  } catch {
+    throw new DownloadLookupError("GitHub API response body interrupted or timed out", true);
+  }
+  // 读体与解析分开：完整响应中的 JSON/结构异常不能触发旧数据兜底。
+  const data: unknown = JSON.parse(body);
+  const releases = tag ? [data] : data;
+  if (!Array.isArray(releases) || !releases.every(isRelease)) {
+    throw new DownloadLookupError("Invalid GitHub release metadata", false);
+  }
+  if (tag && releases[0]?.tag_name !== tag) {
+    throw new DownloadLookupError("GitHub release tag mismatch", false);
+  }
+  return releases;
 }
 
-/**
- * 通过 tag 名称获取指定 release。
- * GitHub API: GET /repos/{owner}/{repo}/releases/tags/{tag}
- */
-function fetchReleaseByTag(tag: string): Promise<GitHubRelease | null> {
-  return cachedLookup(`download:tag:${tag}`, async () => {
-    const res = await fetch(
-      `https://api.github.com/repos/${GITHUB_REPO}/releases/tags/${encodeURIComponent(tag)}`,
-      { headers: GITHUB_HEADERS, signal: AbortSignal.timeout(GITHUB_TIMEOUT_MS) },
-    );
-
-    if (res.status === 404) return null;
-
-    if (!res.ok) {
-      throw new Error(`GitHub API error ${res.status}: ${await res.text()}`);
-    }
-
-    return (await res.json()) as GitHubRelease;
-  });
+function isRelease(value: unknown): value is DownloadRelease {
+  if (!value || typeof value !== "object") return false;
+  const r = value as DownloadRelease;
+  return typeof r.tag_name === "string" && typeof r.draft === "boolean" &&
+    typeof r.prerelease === "boolean" && Array.isArray(r.assets) &&
+    r.assets.every((a) => a && typeof a.name === "string" &&
+      Number.isSafeInteger(a.size) && a.size >= 0 &&
+      typeof a.browser_download_url === "string" &&
+      isGitHubDownloadUrl(a.browser_download_url, GITHUB_REPO));
 }
 
-/**
- * 获取包含指定 asset 的最新正式 release（非 draft、非 prerelease）。
- * 统一 vX.Y.Z release 与历史组件 release（extension-v* / server-v* …）并存，
- * 列表首个 release 不一定包含请求的文件，须按 asset 名定位。
- */
-async function fetchLatestReleaseWithAsset(
-  filename: string,
-): Promise<GitHubRelease | null> {
-  const releases = await cachedLookup("download:releases", async () => {
-    const res = await fetch(
-      `https://api.github.com/repos/${GITHUB_REPO}/releases?per_page=30`,
-      { headers: GITHUB_HEADERS, signal: AbortSignal.timeout(GITHUB_TIMEOUT_MS) },
-    );
-
-    if (!res.ok) {
-      throw new Error(`GitHub API error ${res.status}: ${await res.text()}`);
-    }
-
-    return (await res.json()) as GitHubRelease[];
-  });
-  return (
-    releases.find(
-      (r) =>
-        !r.draft &&
-        !r.prerelease &&
-        r.assets.some((a) => a.name === filename),
-    ) ?? null
-  );
-}
-
-/** 302 到最终下载地址；X-Download-Source 标记来源便于观测。 */
-function redirectTo(location: string, source: string): Response {
-  return new Response(null, {
-    status: 302,
-    headers: {
-      Location: location,
-      "Cache-Control": "private, no-cache",
-      "X-Download-Source": source,
-    },
+function jsonError(status: number, error: string): Response {
+  return new Response(JSON.stringify({ error }), {
+    status,
+    headers: { "Content-Type": "application/json", "Cache-Control": "no-store" },
   });
 }
 
 export const GET: APIRoute = async ({ params, url }) => {
   const { filename } = params;
-
-  if (!filename) {
-    return new Response(JSON.stringify({ error: "Missing filename" }), {
-      status: 400,
-      headers: { "Content-Type": "application/json" },
-    });
-  }
-
+  if (!filename) return jsonError(400, "Missing filename");
   const tag = url.searchParams.get("tag")?.trim() || "";
+  const source = downloadSource(url.searchParams.get("source"));
 
   try {
-    // ── 1. 定位目标 Release ──
-    let release: GitHubRelease | null;
-
-    if (tag) {
-      release = await fetchReleaseByTag(tag);
-      if (!release) {
-        return new Response(
-          JSON.stringify({ error: `Release "${tag}" not found` }),
-          { status: 404, headers: { "Content-Type": "application/json" } },
-        );
-      }
-      // 仅拒绝草稿。预发布（预览版）资产允许经显式 ?tag= 下载：官网页面
-      // 从不暴露预发布 tag（无 tag 的"最新"路径见下方仍只认正式版），只有
-      // /api/release?channel=frontier 才会把预览 tag 交给客户端更新通道。
-      if (release.draft) {
-        return new Response(
-          JSON.stringify({
-            error: `Release "${tag}" is a draft`,
-          }),
-          { status: 403, headers: { "Content-Type": "application/json" } },
-        );
-      }
-    } else {
-      release = await fetchLatestReleaseWithAsset(filename);
-      if (!release) {
-        return new Response(
-          JSON.stringify({
-            error: `No published release contains asset "${filename}"`,
-          }),
-          { status: 404, headers: { "Content-Type": "application/json" } },
-        );
-      }
-    }
-
-    // ── 2. 在 release 中查找对应 asset ──
-    const asset = release.assets.find((a) => a.name === filename);
-
-    if (!asset) {
-      return new Response(
-        JSON.stringify({
-          error: `Asset "${filename}" not found in release "${release.tag_name}"`,
-        }),
-        { status: 404, headers: { "Content-Type": "application/json" } },
-      );
-    }
-
-    // 仓库已公开，browser_download_url 无需 token 签名即可直连
-    const githubUrl = asset.browser_download_url;
-
-    // ── 3. 优先 OSS，缺失/不可达回退 GitHub；?source=github 强制直连 ──
-    if (url.searchParams.get("source") !== "github" && ossConfigured) {
-      const key = releaseObjectKey(release.tag_name, filename);
-      if (await ossHasAsset(key, asset.size)) {
-        return redirectTo(presignOssUrl("GET", key, OSS_URL_TTL_SEC), "oss");
-      }
-    }
-
-    return redirectTo(githubUrl, "github");
-  } catch (err) {
-    return new Response(
-      JSON.stringify({ error: "Download failed", detail: String(err) }),
-      { status: 500, headers: { "Content-Type": "application/json" } },
+    const { value: releases, stale } = await releaseCache().lookup(
+      tag ? `tag:${tag}` : "releases", () => loadReleases(tag),
     );
+    const release = tag ? releases[0] : latestWithAsset(releases, filename);
+    if (!release) {
+      return jsonError(404, tag ? `Release "${tag}" not found` :
+        `No published release contains asset "${filename}"`);
+    }
+    // 显式 tag 允许预发布，任何来源都禁止草稿。
+    if (release.draft) return jsonError(403, `Release "${tag}" is a draft`);
+    const asset = release.assets.find((a) => a.name === filename);
+    if (!asset) {
+      return jsonError(404, `Asset "${filename}" not found in release "${release.tag_name}"`);
+    }
+
+    // 只有 GitHub 新鲜元数据确认的 tag + asset 才有资格获得 OSS 签名。
+    // 过期缓存只允许 GitHub 公共 URL：撤回/转草稿后由 GitHub 自身拒绝访问。
+    if (mayProbeOss(source, ossConfigured, stale)) {
+      const key = releaseObjectKey(release.tag_name, asset.name);
+      if (await ossHasAsset(key, asset.size)) {
+        try {
+          return downloadRedirect(presignOssUrl("GET", key, 3600), "oss");
+        } catch {
+          // 签名失败同样遵循强制 OSS 的 503 / 旧客户端的 GitHub 兜底策略。
+        }
+      }
+    }
+    if (source === "oss") return ossUnavailable();
+    return downloadRedirect(asset.browser_download_url, "github", stale);
+  } catch (error) {
+    if (source === "oss") return ossUnavailable();
+    if (error instanceof DownloadLookupError && error.transient) {
+      return jsonError(503, error.message);
+    }
+    return jsonError(500, "Download metadata lookup failed");
   }
 };

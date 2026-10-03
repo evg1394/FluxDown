@@ -1,10 +1,7 @@
-//! 账号与安全分组：分组标题 + 邮箱只读行。
-//!
-//! Flutter 侧可点邮箱打开修改邮箱对话框（`/me/email` 多步验证）；本能力尚未
-//! 暴露对应端口方法，故此处保持只读展示，见交付报告的协议缺口清单。
+//! 账号与安全分组：邮箱展示与双邮箱验证的变更入口。
 
 use fluxdown_protocol::AgentSessionDto;
-use fluxdown_ui_components::card;
+use fluxdown_ui_components::{ButtonVariant, button, card};
 use fluxdown_ui_i18n::Translator;
 use fluxdown_ui_theme::SemanticThemeTokens;
 use gpui::{Context, FontWeight, IntoElement, ParentElement, Styled, div};
@@ -17,6 +14,7 @@ pub(crate) fn render(
     translator: &Translator,
     tokens: &SemanticThemeTokens,
     session: &AgentSessionDto,
+    disabled: bool,
     cx: &mut Context<AccountView>,
 ) -> impl IntoElement {
     let heading = t(translator, "accountSecurityGroup");
@@ -44,9 +42,28 @@ pub(crate) fn render(
                             .child(email_label),
                     )
                     .child(
-                        div()
-                            .text_color(tokens.colors.muted_foreground)
-                            .child(session.user.email.clone()),
+                        h_flex()
+                            .min_w_0()
+                            .gap(tokens.spacing.sm)
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_color(tokens.colors.muted_foreground)
+                                    .child(session.user.email.clone()),
+                            )
+                            .child(
+                                button(
+                                    "account-email-edit",
+                                    t(translator, "accountEmailChangeTitle"),
+                                    ButtonVariant::Secondary,
+                                    cx,
+                                )
+                                .disabled(disabled)
+                                .on_click(cx.listener(
+                                    |view, _, window, cx| view.open_email_edit(window, cx),
+                                )),
+                            ),
                     ),
             ),
         )

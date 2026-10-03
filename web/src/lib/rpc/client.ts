@@ -112,10 +112,10 @@ class RpcConnection {
   /** 手动立即重试（用户点「重试」）；服务已退出（stopped）时也允许重新拉起。 */
   retryNow(): void {
     if (this.token === '') return
-    if (this.ws && this.ws.readyState <= WebSocket.OPEN) return
+    if (this.ws?.readyState === WebSocket.OPEN && this.helloDone && !this.syncing && this.cursor !== null) return
+    this.teardown()
     this.wanted = true
     this.attempt = 0
-    this.clearRetry()
     this.open()
   }
 
@@ -215,11 +215,9 @@ class RpcConnection {
         return
       }
     }
-    // 其他失败：断开走重连流程。
-    this.ws?.close(4000, 'handshake-failed')
-    if (this.ws === null || this.ws.readyState === WebSocket.CLOSED) {
-      this.scheduleRetry(errorMessage(error))
-    }
+    // 请求已失败，不等待 WebSocket 关闭握手才退出当前连接。
+    this.teardown()
+    this.scheduleRetry(errorMessage(error))
   }
 
   /** 拉取快照并回放缓冲事件。 */
@@ -227,7 +225,7 @@ class RpcConnection {
     this.syncing = true
     this.buffered = []
     this.cursor = null
-    setConnection({ phase: this.everReady ? 'ready' : 'syncing' })
+    setConnection({ phase: 'syncing' })
     const snapshot = await this.request<Snapshot>('system.snapshot', undefined, DEFAULT_TIMEOUT_MS, true)
     if (generation !== this.generation) return
     if (snapshot.body.role !== 'agent') throw new Error('unexpected snapshot role')
@@ -310,6 +308,8 @@ class RpcConnection {
 
   private async onClose(generation: number, event: CloseEvent, opened: boolean): Promise<void> {
     this.ws = null
+    // 先隔离该连接的异步握手/快照 continuation，再拒绝在途请求。
+    generation = ++this.generation
     this.stopPing()
     this.helloDone = false
     this.syncing = false
@@ -338,10 +338,7 @@ class RpcConnection {
   }
 
   private fatal(phase: 'unauthorized' | 'setupRequired' | 'stopped' | 'incompatible', message: string): void {
-    this.clearRetry()
-    this.generation += 1
-    this.ws?.close(1000, 'client-fatal')
-    this.ws = null
+    this.teardown()
     this.wanted = false
     setConnection({ phase, nextRetryAt: null, lastError: message })
   }

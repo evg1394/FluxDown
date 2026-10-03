@@ -70,11 +70,24 @@ describe('目标列表', () => {
         cloud({ deviceId: 'x', platform: 'weird', pathStyle: 'posix' }),
       ],
       linked,
+      { cloud: true, local: true },
     )
     expect(targets.map((target) => target.value)).toEqual(['cloud:pc', 'cloud:x', 'link:fp'])
     expect([targets[0]?.pathStyle, targets[0]?.defaultSaveDir, targets[0]?.online]).toEqual(['windows', 'C:\\Dl', true])
     expect(targets[1]?.pathStyle).toBe('posix')
     expect([targets[2]?.pathStyle, targets[2]?.defaultSaveDir]).toEqual(['posix', '/sdcard'])
+  })
+
+  test('cloud disconnection hides stale presence without hiding dispatch targets or LAN presence', () => {
+    const linked: LinkDeviceInfo[] = [
+      { fingerprint: 'fp', name: 'Phone', online: true, pairedAt: 0, lastSeenAt: 0 },
+    ]
+    const cloudDevices = [cloud({ isOnline: true })]
+    const targets = buildRemoteTargets(cloudDevices, linked, { cloud: false, local: true })
+    expect(targets.map((target) => target.online)).toEqual([null, true])
+    expect(targets.map((target) => target.value)).toEqual(['cloud:dev', 'link:fp'])
+    expect(buildRemoteTargets(cloudDevices, linked, { cloud: false, local: false }).map((target) => target.online))
+      .toEqual([null, null])
   })
 
   test('汇总成功 / 失败条数', () => {

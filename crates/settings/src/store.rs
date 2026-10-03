@@ -1375,6 +1375,7 @@ mod tests {
         // 侧栏设备区显隐、窗口边界是设备本地偏好，不得随账号同步到其他设备。
         assert!(!preference_is_synced("ui.show_sidebar_devices"));
         assert!(!preference_is_synced("desktop.window.main"));
+        assert!(!preference_is_synced(fluxdown_ui_theme::FONT_FAMILY_KEY));
         assert!(!preference_is_synced("unknown.key"));
         // 同步目录内的键（含自定义分类与带每机属性的 BT / ED2K 开关）走同步链路，
         // 由「在此设备同步的范围」按需设为本机专属。

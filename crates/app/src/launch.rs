@@ -16,6 +16,8 @@ pub struct LaunchOptions {
     pub minimized: bool,
     /// 由 agent 为待确认的捕获 / 选择请求拉起：不开主窗口，只开确认窗口。
     pub capture_only: bool,
+    /// 直接打开或聚焦设置窗口，不打开主窗口。
+    pub settings: bool,
     /// 仅唤起已有 UI；绝不新建 UI 或启动本机后台服务。
     pub activate_existing: bool,
     /// 需要交给 agent 的外部链接。
@@ -35,6 +37,7 @@ impl LaunchOptions {
             match arg.as_str() {
                 "--minimized" | "--start-minimized" => options.minimized = true,
                 "--capture" => options.capture_only = true,
+                "--settings" => options.settings = true,
                 "--activate-existing" => options.activate_existing = true,
                 "--progress-task" => {
                     options.progress_task = args.next().filter(|task_id| !task_id.is_empty());
@@ -56,6 +59,7 @@ impl LaunchOptions {
     pub fn is_plain(&self) -> bool {
         !self.minimized
             && !self.capture_only
+            && !self.settings
             && !self.activate_existing
             && self.urls.is_empty()
             && self.torrent_files.is_empty()
@@ -181,6 +185,7 @@ mod tests {
         for arg in [
             "--minimized",
             "--capture",
+            "--settings",
             "--activate-existing",
             "magnet:?xt=urn:btih:abc",
         ] {

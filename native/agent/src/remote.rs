@@ -10,16 +10,18 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use fluxdown_protocol::{
-    AgentEvent, CloudDevice, CreateTaskRequest, DaemonCreateTaskParams, DaemonEvent, ErrorReason,
-    RemoteCommandAction, RemoteCommandParams, RemoteDispatchParams, RemoteDispatchResult,
-    RemoteTaskDto, RemoteTaskStatus, RpcErrorData, ServiceEvent, WsServerMsg,
+    AgentEvent, CloudConnectionDto, CloudConnectionState, CloudDevice, CreateTaskRequest,
+    DaemonCreateTaskParams, DaemonEvent, ErrorReason, RemoteCommandAction, RemoteCommandParams,
+    RemoteDispatchParams, RemoteDispatchResult, RemoteTaskDto, RemoteTaskStatus, RpcErrorData,
+    ServiceEvent, WsServerMsg,
 };
 use futures_util::StreamExt;
 use serde_json::{Value, json};
-use tokio::sync::{Mutex, broadcast};
+use tokio::sync::{Mutex, Notify, broadcast, mpsc};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -32,6 +34,7 @@ use crate::state::{AgentState, StateStore};
 const MISSING_GRACE_ROUNDS: u8 = 3;
 const SSE_STABLE: Duration = Duration::from_secs(60);
 const SSE_IDLE_TIMEOUT: Duration = Duration::from_secs(75);
+const SSE_CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
 const REPORT_INTERVAL: Duration = Duration::from_secs(1);
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
 /// 周期性重试接单：daemon 暂时不可用时任务保持 pending，就绪后自动接上。
@@ -47,6 +50,9 @@ const RESYNC_PAUSE: Duration = Duration::from_secs(1);
 const CONFIRMED_COMMAND_CAPACITY: usize = 512;
 /// SSE 单行上限；超过说明流已损坏。
 const MAX_SSE_LINE_BYTES: usize = 1024 * 1024;
+// Preserve the existing per-event wire limit, but cap queued payloads at 16 MiB.
+// Backpressure retains non-replayable commands instead of dropping them for a resync.
+const SSE_QUEUE_CAPACITY: usize = 16;
 /// 失败上报里的错误文本上限。
 const MAX_REPORTED_ERROR_CHARS: usize = 512;
 
@@ -54,6 +60,8 @@ const MAX_REPORTED_ERROR_CHARS: usize = 512;
 #[derive(Debug, Eq, PartialEq)]
 enum SseEnd {
     Cancelled,
+    // Internal business-loop signal: its sender closed and all accepted events were applied.
+    Drained,
     /// 云端广播滞后：需要重新全量拉取后重连。
     Resync,
     /// 登录会话已结束（登出 / 撤销）。
@@ -106,6 +114,9 @@ pub struct RemoteTaskService {
     state: Arc<Mutex<AgentState>>,
     store: Arc<StateStore>,
     sse_idle_timeout: Duration,
+    sse_connect_timeout: Duration,
+    heartbeat_interval: Duration,
+    reconnect: Notify,
     runtime: Mutex<Runtime>,
 }
 
@@ -125,6 +136,9 @@ impl RemoteTaskService {
             state,
             store,
             sse_idle_timeout: SSE_IDLE_TIMEOUT,
+            sse_connect_timeout: SSE_CONNECT_TIMEOUT,
+            heartbeat_interval: HEARTBEAT_INTERVAL,
+            reconnect: Notify::new(),
             runtime: Mutex::new(Runtime::default()),
         }
     }
@@ -132,144 +146,444 @@ impl RemoteTaskService {
     pub async fn run(self: Arc<Self>, cancel: CancellationToken) {
         let mut retry_attempt = 0_usize;
         let (mut session_events, _) = self.events.subscribe_and_snapshot();
+        let mut session_changes = self.cloud.session_changes();
         loop {
+            session_changes.borrow_and_update();
             if cancel.is_cancelled() {
-                return;
+                break;
             }
-            if !self.cloud.is_authenticated().await {
+            let epoch = self.cloud.request_epoch();
+            let Ok(state) = self.cloud.lock_epoch(epoch).await else {
+                retry_attempt = 0;
+                continue;
+            };
+            let authenticated = state.credentials.as_ref().is_some_and(|credentials| {
+                !credentials.access_token.is_empty() && !credentials.refresh_token.is_empty()
+            });
+            let uid = state
+                .credentials
+                .as_ref()
+                .and_then(|credentials| credentials.session.as_ref())
+                .map(|session| session.user.id.clone());
+            let device_id = state.device_id.clone();
+            if !authenticated {
+                self.connection(CloudConnectionState::Disconnected, None);
                 *self.runtime.lock().await = Runtime::default();
-                // 未登录：最多等 30s，或在 `SessionChanged(Some)`（登录成功）时立即醒来，
-                // 让设备名册 / 远程任务在登录后马上就位，而不是等下一轮。
+                drop(state);
                 tokio::select! {
-                    _ = cancel.cancelled() => return,
+                    _ = cancel.cancelled() => break,
                     _ = tokio::time::sleep(Duration::from_secs(30)) => {},
                     _ = wait_for_session(&mut session_events) => {},
+                    changed = session_changes.changed() => {
+                        if changed.is_err() { break; }
+                    },
+                    _ = self.reconnect.notified() => {},
                 }
                 continue;
             }
-            if let Err(error) = self.refresh_snapshot().await {
-                tracing::warn!(error = %error, "remote task snapshot refresh failed");
-                let delay = RETRY_DELAYS[retry_attempt.min(RETRY_DELAYS.len() - 1)];
-                retry_attempt = retry_attempt.saturating_add(1);
-                tokio::select! {
-                    _ = cancel.cancelled() => return,
-                    _ = tokio::time::sleep(delay) => {},
-                }
+            self.connection(
+                if retry_attempt == 0 {
+                    CloudConnectionState::Connecting
+                } else {
+                    CloudConnectionState::Reconnecting
+                },
+                None,
+            );
+            drop(state);
+            let connected_at = Instant::now();
+            // 外层监督覆盖请求响应头、业务 await 与退避；退出即丢弃所有借用 future，
+            // 不遗留跨账号回写的 detached task。
+            let attempt = async {
+                let response = tokio::time::timeout(
+                    self.sse_connect_timeout,
+                    self.cloud.at_epoch(epoch).remote_events(&device_id),
+                )
+                .await
+                .map_err(|_| {
+                    RemoteError::Protocol("remote SSE response headers timeout".to_owned())
+                })??;
+                let (mut events, _) = self.events.subscribe_and_snapshot();
+                self.consume_events_epoch(response, &cancel, &mut events, epoch)
+                    .await
+            };
+            let result = tokio::select! {
+                biased;
+                _ = cancel.cancelled() => break,
+                changed = session_changes.changed() => {
+                    if changed.is_err() { break; }
+                    *self.runtime.lock().await = Runtime::default();
+                    // 会话失效可能由被取消的 HTTP/流处理自己触发；完成最新状态的落盘，
+                    // 不让取消停在 clear_session 的临时文件写入中途。
+                    if let Err(error) = self.store.persist(&self.state).await {
+                        tracing::error!(error = %format!("{error:#}"), "persisting changed remote session failed");
+                    }
+                    retry_attempt = 0;
+                    continue;
+                },
+                _ = self.session_ended(&mut session_events, uid.as_deref(), epoch) => {
+                    *self.runtime.lock().await = Runtime::default();
+                    retry_attempt = 0;
+                    continue;
+                },
+                _ = self.reconnect.notified() => {
+                    retry_attempt = 0;
+                    continue;
+                },
+                result = attempt => result,
+            };
+            let Ok(state) = self.cloud.lock_epoch(epoch).await else {
+                retry_attempt = 0;
                 continue;
-            }
-            // 受信任设备名册随会话建立即刻投影（启动带凭证 / 登录），UI 不需要手动「重试」。
-            if let Err(error) = self.refresh_devices().await {
-                tracing::warn!(error = %error, "cloud device roster refresh failed");
-            }
-            self.rebuild_bindings().await;
-            self.accept_pending_dispatches().await;
-            let device_id = self.local_device_id().await;
-            match self.cloud.remote_events(&device_id).await {
-                Ok(response) => {
-                    let connected_at = std::time::Instant::now();
-                    if let Err(error) = self.cloud.ping_presence().await {
-                        tracing::warn!(error = %error, "initial remote presence heartbeat failed");
-                    }
-                    match self
-                        .consume_events(response, &cancel, &mut session_events)
-                        .await
-                    {
-                        Ok(SseEnd::Cancelled) => return,
-                        Ok(SseEnd::SessionEnded) => continue,
-                        Ok(SseEnd::Resync) => {
-                            tracing::info!("remote task SSE asked for resync; reloading snapshot");
-                            tokio::select! {
-                                _ = cancel.cancelled() => return,
-                                _ = tokio::time::sleep(RESYNC_PAUSE) => {},
-                            }
-                            continue;
-                        }
-                        Err(error) => {
-                            tracing::warn!(error = %error, "remote task SSE disconnected");
-                            // 只有连接稳定存活过才清退避；秒断的 SSE 继续按档位放慢重连。
-                            if connected_at.elapsed() >= SSE_STABLE {
-                                retry_attempt = 0;
-                            }
-                        }
-                    }
+            };
+            let delay = match result {
+                Ok(SseEnd::Cancelled) => break,
+                Ok(SseEnd::SessionEnded) => continue,
+                Ok(SseEnd::Resync | SseEnd::Drained) => {
+                    self.connection(CloudConnectionState::Reconnecting, None);
+                    RESYNC_PAUSE
                 }
-                Err(error) => tracing::warn!(error = %error, "remote task SSE connect failed"),
-            }
-            let delay = RETRY_DELAYS[retry_attempt.min(RETRY_DELAYS.len() - 1)];
+                Err(error) => {
+                    tracing::warn!(error = %format!("{error:#}"), "remote task connection failed");
+                    self.connection(CloudConnectionState::Reconnecting, Some(&error));
+                    if connected_at.elapsed() >= SSE_STABLE {
+                        retry_attempt = 0;
+                    }
+                    RETRY_DELAYS[retry_attempt.min(RETRY_DELAYS.len() - 1)]
+                }
+            };
+            drop(state);
             retry_attempt = retry_attempt.saturating_add(1);
             tokio::select! {
-                _ = cancel.cancelled() => return,
+                _ = cancel.cancelled() => break,
+                changed = session_changes.changed() => {
+                    if changed.is_err() { break; }
+                    *self.runtime.lock().await = Runtime::default();
+                    retry_attempt = 0;
+                },
+                _ = self.session_ended(&mut session_events, uid.as_deref(), epoch) => {
+                    retry_attempt = 0;
+                },
+                _ = self.reconnect.notified() => { retry_attempt = 0; },
                 _ = tokio::time::sleep(delay) => {},
+            }
+        }
+        let _state = self.state.lock().await;
+        self.connection(CloudConnectionState::Disconnected, None);
+    }
+
+    pub fn request_reconnect(&self) {
+        self.reconnect.notify_one();
+    }
+
+    fn connection(&self, state: CloudConnectionState, error: Option<&RemoteError>) {
+        let connection = CloudConnectionDto {
+            state,
+            last_error: error.map(|error| format!("{error:#}")),
+            last_error_reason: error.map(|error| match error {
+                RemoteError::Cloud(error) => {
+                    error.reason().unwrap_or(ErrorReason::CloudUnreachable)
+                }
+                _ => ErrorReason::CloudUnreachable,
+            }),
+        };
+        let fluxdown_protocol::SnapshotBody::Agent(snapshot) = self.events.snapshot().body else {
+            return;
+        };
+        if snapshot.cloud_connection != connection {
+            self.events
+                .publish(AgentEvent::CloudConnectionChanged(connection));
+        }
+    }
+
+    async fn session_ended(
+        &self,
+        events: &mut broadcast::Receiver<fluxdown_protocol::EventFrame>,
+        uid: Option<&str>,
+        epoch: crate::cloud::RequestEpoch,
+    ) {
+        loop {
+            match events.recv().await {
+                Ok(frame) => {
+                    if self.observe_agent_event(&frame.event, uid, epoch).await {
+                        return;
+                    }
+                }
+                Err(broadcast::error::RecvError::Lagged(_)) => {
+                    let Ok(state) = self.cloud.lock_epoch(epoch).await else {
+                        return;
+                    };
+                    let current_uid = state
+                        .credentials
+                        .as_ref()
+                        .and_then(|credentials| credentials.session.as_ref())
+                        .map(|session| session.user.id.as_str());
+                    if current_uid != uid {
+                        return;
+                    }
+                }
+                Err(broadcast::error::RecvError::Closed) => return,
             }
         }
     }
 
+    #[cfg(test)]
     async fn consume_events(
         &self,
         response: reqwest::Response,
         cancel: &CancellationToken,
         agent_events: &mut broadcast::Receiver<fluxdown_protocol::EventFrame>,
     ) -> Result<SseEnd, RemoteError> {
-        let stream_uid = self.cloud.current_user_id().await;
+        self.consume_events_epoch(response, cancel, agent_events, self.cloud.request_epoch())
+            .await
+    }
+
+    async fn consume_events_epoch(
+        &self,
+        response: reqwest::Response,
+        cancel: &CancellationToken,
+        agent_events: &mut broadcast::Receiver<fluxdown_protocol::EventFrame>,
+        epoch: crate::cloud::RequestEpoch,
+    ) -> Result<SseEnd, RemoteError> {
+        let (sender, receiver) = mpsc::channel(SSE_QUEUE_CAPACITY);
+        let roster = Notify::new();
+        let presence_ready = Notify::new();
+        let transport_alive = AtomicBool::new(true);
+        let uid = self
+            .cloud
+            .lock_epoch(epoch)
+            .await?
+            .credentials
+            .as_ref()
+            .and_then(|credentials| credentials.session.as_ref())
+            .map(|session| session.user.id.clone());
+        let business =
+            self.business_loop(receiver, &roster, &presence_ready, epoch, &transport_alive);
+        tokio::pin!(business);
+        let stop_reading = CancellationToken::new();
+        let transport = async {
+            let reader = self.read_stream(response, sender, &roster, epoch, &stop_reading);
+            tokio::pin!(reader);
+            tokio::select! {
+                result = &mut reader => result,
+                result = self.heartbeat_loop(&roster, &presence_ready, epoch) => {
+                    transport_alive.store(false, Ordering::Relaxed);
+                    {
+                        let _state = self.cloud.lock_epoch(epoch).await?;
+                        self.connection(CloudConnectionState::Reconnecting, result.as_ref().err());
+                    }
+                    // Finish enqueueing the chunk already received, including a pending send.
+                    // The business future keeps running while the reader applies backpressure.
+                    stop_reading.cancel();
+                    match reader.await {
+                        Ok(SseEnd::SessionEnded) => Ok(SseEnd::SessionEnded),
+                        Ok(_) => result,
+                        Err(error) => Err(error),
+                    }
+                },
+            }
+        };
+        let transport_result = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => return Ok(SseEnd::Cancelled),
+            _ = self.session_ended(agent_events, uid.as_deref(), epoch) => return Ok(SseEnd::SessionEnded),
+            result = transport => result,
+            result = &mut business => return result,
+        };
+        if matches!(
+            transport_result,
+            Ok(SseEnd::Cancelled | SseEnd::SessionEnded)
+        ) {
+            return transport_result;
+        }
+        transport_alive.store(false, Ordering::Relaxed);
+        {
+            let _state = self.cloud.lock_epoch(epoch).await?;
+            self.connection(
+                CloudConnectionState::Reconnecting,
+                transport_result.as_ref().err(),
+            );
+        }
+        // Transport dropped its sender. Drain accepted commands in FIFO order;
+        // unlike task state, pause/resume and deleteFiles cannot be replayed by a snapshot.
+        tokio::select! {
+            biased;
+            _ = cancel.cancelled() => Ok(SseEnd::Cancelled),
+            _ = self.session_ended(agent_events, uid.as_deref(), epoch) => Ok(SseEnd::SessionEnded),
+            result = &mut business => match result {
+                Ok(SseEnd::Drained) => transport_result,
+                other => other,
+            },
+        }
+    }
+
+    async fn heartbeat_loop(
+        &self,
+        roster: &Notify,
+        ready: &Notify,
+        epoch: crate::cloud::RequestEpoch,
+    ) -> Result<SseEnd, RemoteError> {
+        let mut heartbeat = tokio::time::interval(self.heartbeat_interval);
+        heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            heartbeat.tick().await;
+            match self.cloud.at_epoch(epoch).ping_presence().await {
+                Err(error)
+                    if error.status == Some(409)
+                        && error.code.as_deref() == Some("presence_connection_missing") =>
+                {
+                    return Ok(SseEnd::Resync);
+                }
+                result => {
+                    result?;
+                }
+            }
+            ready.notify_one();
+            roster.notify_one();
+        }
+    }
+
+    async fn business_loop(
+        &self,
+        mut lines: mpsc::Receiver<Vec<u8>>,
+        roster: &Notify,
+        presence_ready: &Notify,
+        epoch: crate::cloud::RequestEpoch,
+        transport_alive: &AtomicBool,
+    ) -> Result<SseEnd, RemoteError> {
+        // 名册只在在线租约建立后抓取；首次成功前不把旧缓存标成实时连接。
+        let mut presence_established = false;
+        let mut snapshot_pending = true;
+        let mut roster_pending = true;
+        let mut retry = tokio::time::interval(ACCEPT_RETRY_INTERVAL);
+        let mut report = tokio::time::interval(REPORT_INTERVAL);
+        retry.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        report.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tokio::select! {
+                _ = presence_ready.notified(), if !presence_established && transport_alive.load(Ordering::Relaxed) => {
+                    presence_established = true;
+                    roster_pending = !self.refresh_connected_roster(epoch, transport_alive).await;
+                }
+                _ = retry.tick(), if transport_alive.load(Ordering::Relaxed) => {
+                    if roster_pending && presence_established {
+                        roster_pending = !self.refresh_connected_roster(epoch, transport_alive).await;
+                    }
+                    if snapshot_pending {
+                        match self.refresh_snapshot_epoch(epoch).await {
+                            Ok(_) => {
+                                snapshot_pending = false;
+                                self.rebuild_bindings(epoch).await;
+                            }
+                            Err(error) => tracing::warn!(error = %format!("{error:#}"), "remote task snapshot refresh failed; retry scheduled"),
+                        }
+                    }
+                    self.accept_pending_dispatches_epoch(epoch).await;
+                }
+                _ = roster.notified(), if presence_established && transport_alive.load(Ordering::Relaxed) => {
+                    roster_pending = !self.refresh_connected_roster(epoch, transport_alive).await;
+                }
+                _ = report.tick(), if transport_alive.load(Ordering::Relaxed) => {
+                    if let Err(error) = self.report_local_progress_epoch(epoch).await {
+                        tracing::warn!(error = %format!("{error:#}"), "remote progress report failed");
+                    }
+                }
+                line = lines.recv() => {
+                    let Some(line) = line else { return Ok(SseEnd::Drained); };
+                    if let Some(end) = self.handle_sse_line(&line, epoch).await {
+                        return Ok(end);
+                    }
+                }
+            }
+        }
+    }
+
+    async fn refresh_connected_roster(
+        &self,
+        epoch: crate::cloud::RequestEpoch,
+        transport_alive: &AtomicBool,
+    ) -> bool {
+        let result = self.refresh_devices_epoch(epoch).await;
+        let _state = match self.cloud.lock_epoch(epoch).await {
+            Ok(state) => state,
+            Err(error) => {
+                tracing::debug!(%error, "discarding stale roster connection status");
+                return false;
+            }
+        };
+        match result {
+            Ok(()) => {
+                if transport_alive.load(Ordering::Relaxed) {
+                    self.connection(CloudConnectionState::Connected, None);
+                }
+                true
+            }
+            Err(error) => {
+                tracing::warn!(error = %format!("{error:#}"), "cloud device roster refresh failed; retry scheduled");
+                self.connection(CloudConnectionState::Reconnecting, Some(&error));
+                false
+            }
+        }
+    }
+
+    async fn read_stream(
+        &self,
+        response: reqwest::Response,
+        sender: mpsc::Sender<Vec<u8>>,
+        roster: &Notify,
+        epoch: crate::cloud::RequestEpoch,
+        stop_reading: &CancellationToken,
+    ) -> Result<SseEnd, RemoteError> {
         let mut stream = response.bytes_stream();
         let mut buffer = Vec::<u8>::new();
-        let mut report_tick = tokio::time::interval(REPORT_INTERVAL);
-        let mut heartbeat = tokio::time::interval(HEARTBEAT_INTERVAL);
-        let mut accept_retry = tokio::time::interval(ACCEPT_RETRY_INTERVAL);
-        report_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        accept_retry.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        // 空闲看门狗：截止时间放在循环外，只有收到流数据才顺延；周期性定时器不会重置它，
-        // 半开连接（合盖唤醒 / NAT 静默断流）才能被识别。
+        // 空闲看门狗：周期性定时器不重置截止时间。主动等业务队列排空时暂停读流，
+        // 不把本机背压误报成网络静默；其间心跳与会话取消仍独立运行。
         let idle = tokio::time::sleep(self.sse_idle_timeout);
         tokio::pin!(idle);
         loop {
             tokio::select! {
-                _ = cancel.cancelled() => return Ok(SseEnd::Cancelled),
+                biased;
+                _ = stop_reading.cancelled() => return Ok(SseEnd::Resync),
                 () = &mut idle => {
                     return Err(RemoteError::Protocol("remote SSE idle timeout".to_owned()));
                 }
-                _ = report_tick.tick() => {
-                    if let Err(error) = self.report_local_progress().await {
-                        tracing::warn!(error = %error, "remote progress report failed");
-                    }
-                }
-                _ = accept_retry.tick() => {
-                    self.accept_pending_dispatches().await;
-                }
-                _ = heartbeat.tick() => {
-                    if let Err(error) = self.cloud.ping_presence().await {
-                        tracing::warn!(error = %error, "remote presence heartbeat failed");
-                    }
-                }
-                frame = agent_events.recv() => match frame {
-                    Ok(frame) => {
-                        if self.observe_agent_event(&frame.event, stream_uid.as_deref()).await {
-                            return Ok(SseEnd::SessionEnded);
-                        }
-                    }
-                    Err(broadcast::error::RecvError::Lagged(_)) => {
-                        if !self.cloud.is_authenticated().await {
-                            return Ok(SseEnd::SessionEnded);
-                        }
-                    }
-                    Err(broadcast::error::RecvError::Closed) => {
-                        return Err(RemoteError::Protocol("agent event hub closed".to_owned()));
-                    }
-                },
                 chunk = stream.next() => {
                     let chunk = chunk
                         .ok_or_else(|| RemoteError::Protocol("remote SSE disconnected".to_owned()))?
                         .map_err(|error| RemoteError::Protocol(format!("remote SSE read failed: {error:#}")))?;
                     idle.as_mut().reset(tokio::time::Instant::now() + self.sse_idle_timeout);
-                    buffer.extend_from_slice(&chunk);
-                    if buffer.len() > MAX_SSE_LINE_BYTES && !buffer.contains(&b'\n') {
-                        return Err(RemoteError::Protocol("remote SSE line too long".to_owned()));
-                    }
-                    while let Some(newline) = buffer.iter().position(|byte| *byte == b'\n') {
-                        let line = buffer.drain(..=newline).collect::<Vec<_>>();
-                        if let Some(end) = self.handle_sse_line(&line).await {
+                    // Copy only one bounded line, not the entire remaining transport chunk.
+                    for part in chunk.split_inclusive(|byte| *byte == b'\n') {
+                        if buffer.len().saturating_add(part.len()) > MAX_SSE_LINE_BYTES {
+                            return Err(RemoteError::Protocol("remote SSE line too long".to_owned()));
+                        }
+                        buffer.extend_from_slice(part);
+                        if !buffer.ends_with(b"\n") {
+                            continue;
+                        }
+                        let line = std::mem::take(&mut buffer);
+                        if let Some(payload) = line.strip_prefix(b"data:")
+                            && let Ok(event) = serde_json::from_slice::<Value>(payload)
+                            && matches!(event.get("type").and_then(Value::as_str), Some("presence" | "device.updated"))
+                        {
+                            roster.notify_one();
+                            continue;
+                        }
+                        if let Some(payload) = line.strip_prefix(b"data:")
+                            && let Ok(event) = serde_json::from_slice::<Value>(payload)
+                            && matches!(event.get("type").and_then(Value::as_str), Some("session.revoked"))
+                            && let Some(end) = self.apply_remote_event_epoch(event, epoch).await?
+                        {
                             return Ok(end);
+                        }
+                        if line.starts_with(b"data:") {
+                            // Pause reads while the bounded business queue drains. In particular,
+                            // pause/resume commands cannot be reconstructed by the task snapshot.
+                            // Heartbeat and session cancellation remain independently polled.
+                            if sender.send(line).await.is_err() {
+                                return Ok(SseEnd::Resync);
+                            }
+                            // Time spent intentionally applying backpressure is not network silence.
+                            idle.as_mut().reset(tokio::time::Instant::now() + self.sse_idle_timeout);
                         }
                     }
                 }
@@ -278,7 +592,15 @@ impl RemoteTaskService {
     }
 
     /// 观察 agent 事件：跟踪 daemon 任务的实时速度；返回 `true` 表示会话已结束或换成了别的账号。
-    async fn observe_agent_event(&self, event: &ServiceEvent, stream_uid: Option<&str>) -> bool {
+    async fn observe_agent_event(
+        &self,
+        event: &ServiceEvent,
+        stream_uid: Option<&str>,
+        epoch: crate::cloud::RequestEpoch,
+    ) -> bool {
+        let Ok(_state) = self.cloud.lock_epoch(epoch).await else {
+            return true;
+        };
         let ServiceEvent::Agent(event) = event else {
             return false;
         };
@@ -314,7 +636,11 @@ impl RemoteTaskService {
     }
 
     /// 单行 SSE 数据的容错处理：坏行 / 单个事件处理失败只记录，不拆整条流。
-    async fn handle_sse_line(&self, line: &[u8]) -> Option<SseEnd> {
+    async fn handle_sse_line(
+        &self,
+        line: &[u8],
+        epoch: crate::cloud::RequestEpoch,
+    ) -> Option<SseEnd> {
         let line = match std::str::from_utf8(line) {
             Ok(line) => line.trim(),
             Err(error) => {
@@ -335,7 +661,7 @@ impl RemoteTaskService {
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_owned();
-        match self.apply_remote_event(event).await {
+        match self.apply_remote_event_epoch(event, epoch).await {
             Ok(end) => end,
             Err(error) => {
                 tracing::warn!(event = %kind, error = %error, "remote SSE event handling failed");
@@ -344,7 +670,18 @@ impl RemoteTaskService {
         }
     }
 
+    #[cfg(test)]
     async fn apply_remote_event(&self, event: Value) -> Result<Option<SseEnd>, RemoteError> {
+        self.apply_remote_event_epoch(event, self.cloud.request_epoch())
+            .await
+    }
+
+    async fn apply_remote_event_epoch(
+        &self,
+        event: Value,
+        epoch: crate::cloud::RequestEpoch,
+    ) -> Result<Option<SseEnd>, RemoteError> {
+        drop(self.cloud.lock_epoch(epoch).await?);
         match event
             .get("type")
             .and_then(Value::as_str)
@@ -355,12 +692,12 @@ impl RemoteTaskService {
                 let canceled_here = task.status == RemoteTaskStatus::Canceled
                     && task.to_device == self.local_device_id().await;
                 let remote_id = task.id.clone();
-                self.upsert_task(task).await?;
+                self.upsert_task(task, epoch).await?;
                 if canceled_here {
-                    self.discard_local_task(&remote_id).await;
+                    self.discard_local_task_epoch(&remote_id, epoch).await;
                 }
-                self.rebuild_bindings().await;
-                self.accept_pending_dispatches().await;
+                self.rebuild_bindings(epoch).await;
+                self.accept_pending_dispatches_epoch(epoch).await;
             }
             "task.progress" => {
                 let items = event
@@ -370,7 +707,7 @@ impl RemoteTaskService {
                 // 进度只合并进内存投影，不落盘（约 1 次 / 秒）。
                 let mut tasks = self.tasks().await;
                 if apply_progress_items(&mut tasks, items) {
-                    self.replace_tasks(tasks, false).await?;
+                    self.replace_tasks(tasks, false, epoch).await?;
                 }
             }
             "task.command" => {
@@ -380,7 +717,7 @@ impl RemoteTaskService {
                     .unwrap_or_default();
                 if target == self.local_device_id().await {
                     let command = IncomingCommand::from_event(&event)?;
-                    self.execute_local_command(command).await?;
+                    self.execute_local_command(command, epoch).await?;
                 }
             }
             "task.removed" => {
@@ -390,13 +727,13 @@ impl RemoteTaskService {
                     let before = tasks.len();
                     tasks.retain(|task| task.id != id);
                     if tasks.len() != before {
-                        self.replace_tasks(tasks, true).await?;
+                        self.replace_tasks(tasks, true, epoch).await?;
                     }
-                    self.discard_local_task(id).await;
+                    self.discard_local_task_epoch(id, epoch).await;
                 }
             }
             "presence" | "device.updated" => {
-                if let Err(error) = self.refresh_devices().await {
+                if let Err(error) = self.refresh_devices_epoch(epoch).await {
                     tracing::warn!(error = %error, "cloud device roster refresh failed");
                 }
             }
@@ -411,7 +748,7 @@ impl RemoteTaskService {
                     } else {
                         ErrorReason::SessionExpired
                     };
-                    if let Err(error) = self.cloud.revoke_session(reason).await {
+                    if let Err(error) = self.cloud.revoke_session_epoch(reason, epoch).await {
                         tracing::warn!(error = %error, "clearing revoked session failed");
                     }
                 }
@@ -427,38 +764,60 @@ impl RemoteTaskService {
         &self,
         tasks: Vec<RemoteTaskDto>,
         persist: bool,
+        epoch: crate::cloud::RequestEpoch,
     ) -> Result<(), RemoteError> {
-        self.state.lock().await.remote_tasks.clone_from(&tasks);
+        {
+            let mut state = self.cloud.lock_epoch(epoch).await?;
+            state.remote_tasks.clone_from(&tasks);
+            self.events.publish(AgentEvent::RemoteTasksChanged(tasks));
+        }
         if persist {
             self.store.persist(&self.state).await?;
         }
-        self.events.publish(AgentEvent::RemoteTasksChanged(tasks));
         Ok(())
     }
 
-    async fn upsert_task(&self, task: RemoteTaskDto) -> Result<(), RemoteError> {
-        let mut tasks = self.tasks().await;
+    async fn upsert_task(
+        &self,
+        task: RemoteTaskDto,
+        epoch: crate::cloud::RequestEpoch,
+    ) -> Result<(), RemoteError> {
+        let mut state = self.cloud.lock_epoch(epoch).await?;
+        let tasks = &mut state.remote_tasks;
         if let Some(existing) = tasks.iter_mut().find(|existing| existing.id == task.id) {
             existing.clone_from(&task);
         } else {
             tasks.push(task);
         }
-        self.replace_tasks(tasks, true).await
+        self.events
+            .publish(AgentEvent::RemoteTasksChanged(tasks.clone()));
+        drop(state);
+        self.store.persist(&self.state).await?;
+        Ok(())
     }
 
-    async fn binding(&self, remote_id: &str) -> Option<String> {
-        self.state
-            .lock()
-            .await
+    async fn binding(
+        &self,
+        remote_id: &str,
+        epoch: crate::cloud::RequestEpoch,
+    ) -> Result<Option<String>, RemoteError> {
+        Ok(self
+            .cloud
+            .lock_epoch(epoch)
+            .await?
             .remote_bindings
             .get(remote_id)
-            .cloned()
+            .cloned())
     }
 
-    async fn set_binding(&self, remote_id: &str, local_id: &str) {
-        self.state
-            .lock()
-            .await
+    async fn set_binding(
+        &self,
+        remote_id: &str,
+        local_id: &str,
+        epoch: crate::cloud::RequestEpoch,
+    ) -> Result<(), RemoteError> {
+        let mut state = self.cloud.lock_epoch(epoch).await?;
+        state
             .remote_bindings
             .insert(remote_id.to_owned(), local_id.to_owned());
         self.runtime
@@ -466,40 +825,57 @@ impl RemoteTaskService {
             .await
             .bound_at
             .insert(remote_id.to_owned(), Instant::now());
+        drop(state);
         if let Err(error) = self.store.persist(&self.state).await {
             tracing::warn!(error = %error, "persisting remote task binding failed");
         }
+        Ok(())
     }
 
-    async fn remove_binding(&self, remote_id: &str) {
-        let removed = self
-            .state
-            .lock()
-            .await
-            .remote_bindings
-            .remove(remote_id)
-            .is_some();
-        self.runtime.lock().await.bound_at.remove(remote_id);
+    async fn remove_binding_epoch(&self, remote_id: &str, epoch: crate::cloud::RequestEpoch) {
+        let removed = {
+            let mut state = match self.cloud.lock_epoch(epoch).await {
+                Ok(state) => state,
+                Err(error) => {
+                    tracing::debug!(%error, "discarding stale binding removal");
+                    return;
+                }
+            };
+            let removed = state.remote_bindings.remove(remote_id).is_some();
+            self.runtime.lock().await.bound_at.remove(remote_id);
+            removed
+        };
         if removed && let Err(error) = self.store.persist(&self.state).await {
             tracing::warn!(error = %error, "persisting remote task binding removal failed");
         }
     }
 
     /// 已有绑定，或按 URL / 文件名重建出的绑定（未接单 / 已终态的任务不会被重建）。
-    async fn resolve_binding(&self, remote_id: &str) -> Option<String> {
-        if let Some(local_id) = self.binding(remote_id).await {
-            return Some(local_id);
+    async fn resolve_binding(
+        &self,
+        remote_id: &str,
+        epoch: crate::cloud::RequestEpoch,
+    ) -> Result<Option<String>, RemoteError> {
+        if let Some(local_id) = self.binding(remote_id, epoch).await? {
+            return Ok(Some(local_id));
         }
-        self.rebuild_bindings().await;
-        self.binding(remote_id).await
+        self.rebuild_bindings(epoch).await;
+        self.binding(remote_id, epoch).await
     }
 
     /// 云端已取消 / 删除本设备执行的任务：删除绑定的本机 daemon 任务并解除绑定。
     ///
     /// 保留已下载文件——目标离线期间发起端的 `deleteFiles` 选择送不到这里；本机已完成的任务不动。
     /// daemon 暂时不可用时保留绑定，由下一次状态上报（404 / 409）或快照对照重试。
-    async fn discard_local_task(&self, remote_id: &str) {
-        let Some(local_id) = self.binding(remote_id).await else {
+    async fn discard_local_task_epoch(&self, remote_id: &str, epoch: crate::cloud::RequestEpoch) {
+        let local_id = match self.cloud.lock_epoch(epoch).await {
+            Ok(state) => state.remote_bindings.get(remote_id).cloned(),
+            Err(error) => {
+                tracing::debug!(%error, "discarding stale local-task removal");
+                return;
+            }
+        };
+        let Some(local_id) = local_id else {
             return;
         };
         // daemon 状态 3 = 已完成。
@@ -515,6 +891,7 @@ impl RemoteTaskService {
                     fluxdown_protocol::method::DAEMON_TASK_DELETE,
                     &local_id,
                     false,
+                    epoch,
                 )
                 .await
             {
@@ -525,10 +902,10 @@ impl RemoteTaskService {
                 tracing::warn!(task = %remote_id, error = ?error, "removing the local task of a canceled remote task failed");
             }
         }
-        self.remove_binding(remote_id).await;
+        self.remove_binding_epoch(remote_id, epoch).await;
     }
 
-    async fn rebuild_bindings(&self) {
+    async fn rebuild_bindings(&self, epoch: crate::cloud::RequestEpoch) {
         let local_device = self.local_device_id().await;
         let Some(local_tasks) = daemon_tasks(&self.events) else {
             return;
@@ -536,7 +913,13 @@ impl RemoteTaskService {
         let remote_tasks = self.tasks().await;
         let mut newly_bound = Vec::new();
         {
-            let mut state = self.state.lock().await;
+            let mut state = match self.cloud.lock_epoch(epoch).await {
+                Ok(state) => state,
+                Err(error) => {
+                    tracing::debug!(%error, "discarding stale binding rebuild");
+                    return;
+                }
+            };
             let mut claimed = state
                 .remote_bindings
                 .values()
@@ -573,6 +956,13 @@ impl RemoteTaskService {
             return;
         }
         {
+            let _state = match self.cloud.lock_epoch(epoch).await {
+                Ok(state) => state,
+                Err(error) => {
+                    tracing::debug!(%error, "discarding stale binding timestamps");
+                    return;
+                }
+            };
             let now = Instant::now();
             let mut runtime = self.runtime.lock().await;
             for remote_id in newly_bound {
@@ -585,7 +975,17 @@ impl RemoteTaskService {
     }
 
     /// 接单：逐条容错，任何一条失败都不影响后面的任务，也不中断 SSE。
+    #[cfg(test)]
     async fn accept_pending_dispatches(&self) {
+        self.accept_pending_dispatches_epoch(self.cloud.request_epoch())
+            .await;
+    }
+
+    async fn accept_pending_dispatches_epoch(&self, epoch: crate::cloud::RequestEpoch) {
+        if let Err(error) = self.cloud.lock_epoch(epoch).await {
+            tracing::debug!(%error, "discarding stale pending dispatches");
+            return;
+        }
         let local_device = self.local_device_id().await;
         let pending = self
             .tasks()
@@ -596,16 +996,21 @@ impl RemoteTaskService {
             })
             .collect::<Vec<_>>();
         for task in pending {
-            if self.binding(&task.id).await.is_some() {
-                continue;
+            match self.binding(&task.id, epoch).await {
+                Ok(Some(_)) => continue,
+                Ok(None) => {}
+                Err(error) => {
+                    tracing::debug!(%error, "discarding stale dispatch binding lookup");
+                    return;
+                }
             }
-            self.accept_one(&task).await;
+            self.accept_one(&task, epoch).await;
         }
     }
 
-    async fn accept_one(&self, task: &RemoteTaskDto) {
+    async fn accept_one(&self, task: &RemoteTaskDto, epoch: crate::cloud::RequestEpoch) {
         if task.url.trim().is_empty() {
-            self.report_accept_failure(task, "dispatched task has no URL")
+            self.report_accept_failure_epoch(task, "dispatched task has no URL", epoch)
                 .await;
             return;
         }
@@ -622,19 +1027,31 @@ impl RemoteTaskService {
                 "dispatched save directory is not usable on this device; using the default directory"
             );
         }
-        let created =
-            create_with_directory_fallback(requested_dir, |dir| self.create_local_task(task, dir))
-                .await;
+        let created = create_with_directory_fallback(requested_dir, |dir| {
+            self.create_local_task(task, dir, epoch)
+        })
+        .await;
         match created {
             Ok(local_id) => {
                 // 先持久化绑定再上报：上报失败 / 进程重启都不会重复建任务。
-                self.set_binding(&task.id, &local_id).await;
+                if let Err(error) = self.set_binding(&task.id, &local_id, epoch).await {
+                    tracing::debug!(%error, "discarding stale accepted binding");
+                    return;
+                }
                 match self
                     .cloud
+                    .at_epoch(epoch)
                     .report_remote_status(&task.id, &json!({"status": "accepted"}))
                     .await
                 {
                     Ok(_) => {
+                        let _state = match self.cloud.lock_epoch(epoch).await {
+                            Ok(state) => state,
+                            Err(error) => {
+                                tracing::debug!(%error, "discarding stale accepted status");
+                                return;
+                            }
+                        };
                         self.runtime
                             .lock()
                             .await
@@ -644,11 +1061,11 @@ impl RemoteTaskService {
                     // 接单期间记录已被删除：删除刚建的本机任务。
                     Err(error) if error.status == Some(404) => {
                         tracing::info!(task = %task.id, "accepted task no longer exists in FluxCloud");
-                        self.discard_local_task(&task.id).await;
+                        self.discard_local_task_epoch(&task.id, epoch).await;
                     }
                     // 接单期间已被取消。
                     Err(error) if error.status == Some(409) => {
-                        self.resolve_status_conflict(&task.id).await;
+                        self.resolve_status_conflict_epoch(&task.id, epoch).await;
                     }
                     // 其余失败：下一轮进度上报会带上真实状态。
                     Err(error) => {
@@ -662,7 +1079,8 @@ impl RemoteTaskService {
             }
             Err(failure) => {
                 tracing::warn!(task = %task.id, error = %failure.message, "accepting dispatched task failed");
-                self.report_accept_failure(task, &failure.message).await;
+                self.report_accept_failure_epoch(task, &failure.message, epoch)
+                    .await;
             }
         }
     }
@@ -671,7 +1089,17 @@ impl RemoteTaskService {
         &self,
         task: &RemoteTaskDto,
         save_dir: Option<String>,
+        epoch: crate::cloud::RequestEpoch,
     ) -> Result<String, CreateFailure> {
+        let _state = self
+            .cloud
+            .lock_epoch(epoch)
+            .await
+            .map_err(|error| CreateFailure {
+                transient: true,
+                message: error.to_string(),
+            })?;
+        drop(_state);
         let mut request = json!({ "url": task.url });
         let file_name = task.file_name.trim();
         if !file_name.is_empty() {
@@ -692,6 +1120,15 @@ impl RemoteTaskService {
         let request = serde_json::from_value::<CreateTaskRequest>(request).map_err(|error| {
             CreateFailure::permanent(format!("invalid dispatched task: {error}"))
         })?;
+        drop(
+            self.cloud
+                .lock_epoch(epoch)
+                .await
+                .map_err(|error| CreateFailure {
+                    transient: true,
+                    message: error.to_string(),
+                })?,
+        );
         let result = self
             .daemon
             .call_detailed::<DaemonCreateTaskParams, Value>(
@@ -718,14 +1155,33 @@ impl RemoteTaskService {
     }
 
     /// 接单失败：向云端上报 `failed` + 错误，让发起端看到原因而不是永远 pending。
+    #[cfg(test)]
     async fn report_accept_failure(&self, task: &RemoteTaskDto, message: &str) {
+        self.report_accept_failure_epoch(task, message, self.cloud.request_epoch())
+            .await;
+    }
+
+    async fn report_accept_failure_epoch(
+        &self,
+        task: &RemoteTaskDto,
+        message: &str,
+        epoch: crate::cloud::RequestEpoch,
+    ) {
         let error: String = message.chars().take(MAX_REPORTED_ERROR_CHARS).collect();
         match self
             .cloud
+            .at_epoch(epoch)
             .report_remote_status(&task.id, &json!({"status": "failed", "error": error}))
             .await
         {
             Ok(_) => {
+                let _state = match self.cloud.lock_epoch(epoch).await {
+                    Ok(state) => state,
+                    Err(error) => {
+                        tracing::debug!(%error, "discarding stale failure report");
+                        return;
+                    }
+                };
                 self.runtime
                     .lock()
                     .await
@@ -738,16 +1194,26 @@ impl RemoteTaskService {
         }
     }
 
+    #[cfg(test)]
     async fn report_local_progress(&self) -> Result<(), RemoteError> {
+        self.report_local_progress_epoch(self.cloud.request_epoch())
+            .await
+    }
+
+    async fn report_local_progress_epoch(
+        &self,
+        epoch: crate::cloud::RequestEpoch,
+    ) -> Result<(), RemoteError> {
         // daemon 冷启动时快照为空：此时判定「本机任务消失」会把仍在下载的任务误报为 failed。
         let Some(local_tasks) = daemon_tasks(&self.events) else {
             return Ok(());
         };
-        let bindings = self.state.lock().await.remote_bindings.clone();
+        let bindings = self.cloud.lock_epoch(epoch).await?.remote_bindings.clone();
         let mut progress = Vec::new();
         for (remote_id, local_id) in bindings {
             let Some(task) = local_tasks.iter().find(|task| task.task_id == local_id) else {
                 let expired = {
+                    let _state = self.cloud.lock_epoch(epoch).await?;
                     let mut runtime = self.runtime.lock().await;
                     let count = runtime
                         .local_missing_rounds
@@ -757,28 +1223,32 @@ impl RemoteTaskService {
                     *count >= MISSING_GRACE_ROUNDS
                 };
                 if expired {
-                    self.report_status_if_changed(
+                    self.report_status_epoch(
                         &remote_id,
                         RemoteTaskStatus::Failed,
                         Some("local task disappeared"),
                         None,
+                        epoch,
                     )
                     .await?;
-                    self.remove_binding(&remote_id).await;
+                    self.remove_binding_epoch(&remote_id, epoch).await;
                 }
                 continue;
             };
+            let state = self.cloud.lock_epoch(epoch).await?;
             self.runtime
                 .lock()
                 .await
                 .local_missing_rounds
                 .remove(&remote_id);
+            drop(state);
             let status = local_status(task.status);
-            self.report_status_if_changed(
+            self.report_status_epoch(
                 &remote_id,
                 status,
                 (!task.error_message.is_empty()).then_some(task.error_message.as_str()),
                 Some(task),
+                epoch,
             )
             .await?;
             if matches!(task.status, 1 | 5) {
@@ -800,18 +1270,33 @@ impl RemoteTaskService {
         }
         if !progress.is_empty() {
             self.cloud
+                .at_epoch(epoch)
                 .report_remote_progress(&json!({"items": progress}))
                 .await?;
         }
         Ok(())
     }
 
+    #[cfg(test)]
     async fn report_status_if_changed(
         &self,
         remote_id: &str,
         status: RemoteTaskStatus,
         error: Option<&str>,
         task: Option<&fluxdown_protocol::TaskDto>,
+    ) -> Result<(), RemoteError> {
+        let epoch = self.cloud.request_epoch();
+        self.report_status_epoch(remote_id, status, error, task, epoch)
+            .await
+    }
+
+    async fn report_status_epoch(
+        &self,
+        remote_id: &str,
+        status: RemoteTaskStatus,
+        error: Option<&str>,
+        task: Option<&fluxdown_protocol::TaskDto>,
+        epoch: crate::cloud::RequestEpoch,
     ) -> Result<(), RemoteError> {
         if self.runtime.lock().await.reported_statuses.get(remote_id) == Some(&status) {
             return Ok(());
@@ -822,32 +1307,39 @@ impl RemoteTaskService {
             "fileName": task.map(|task| task.file_name.clone()),
             "error": error,
         });
-        match self.cloud.report_remote_status(remote_id, &body).await {
+        match self
+            .cloud
+            .at_epoch(epoch)
+            .report_remote_status(remote_id, &body)
+            .await
+        {
             Ok(_) => {
+                let _state = self.cloud.lock_epoch(epoch).await?;
                 self.runtime
                     .lock()
                     .await
                     .reported_statuses
                     .insert(remote_id.to_owned(), status);
+                drop(_state);
                 if status.is_terminal() {
-                    self.remove_binding(remote_id).await;
+                    self.remove_binding_epoch(remote_id, epoch).await;
                 }
                 Ok(())
             }
             Err(error) if error.status == Some(409) => {
-                self.resolve_status_conflict(remote_id).await;
+                self.resolve_status_conflict_epoch(remote_id, epoch).await;
                 Ok(())
             }
             Err(error) if error.status == Some(404) => {
                 // 云端已删除该任务（离线期间被删除等）：删除本机任务并解除绑定。
                 tracing::info!(task = %remote_id, "remote task no longer exists in FluxCloud");
-                self.discard_local_task(remote_id).await;
+                self.discard_local_task_epoch(remote_id, epoch).await;
                 Ok(())
             }
             Err(error) if error.status == Some(403) => {
                 // 本设备不是它的目标：解除绑定，不再上报。
                 tracing::info!(task = %remote_id, "remote task no longer accepts reports from this device");
-                self.remove_binding(remote_id).await;
+                self.remove_binding_epoch(remote_id, epoch).await;
                 Ok(())
             }
             Err(error) => Err(RemoteError::Cloud(error)),
@@ -856,9 +1348,14 @@ impl RemoteTaskService {
 
     /// 上报状态遭遇 409：云端已经把任务终态化（例如被发起端取消）。云端为 `canceled` 或记录已
     /// 不存在时删除本机任务（保留已下载文件），其余终态只解除绑定。
-    async fn resolve_status_conflict(&self, remote_id: &str) {
-        if let Err(error) = self.refresh_snapshot().await {
+    async fn resolve_status_conflict_epoch(
+        &self,
+        remote_id: &str,
+        epoch: crate::cloud::RequestEpoch,
+    ) {
+        if let Err(error) = self.refresh_snapshot_epoch(epoch).await {
             tracing::warn!(task = %remote_id, error = %error, "refreshing tasks after a status conflict failed");
+            return;
         }
         let cloud_status = self
             .tasks()
@@ -867,11 +1364,18 @@ impl RemoteTaskService {
             .find(|task| task.id == remote_id)
             .map(|task| task.status);
         if matches!(cloud_status, Some(RemoteTaskStatus::Canceled) | None) {
-            self.discard_local_task(remote_id).await;
+            self.discard_local_task_epoch(remote_id, epoch).await;
         } else {
-            self.remove_binding(remote_id).await;
+            self.remove_binding_epoch(remote_id, epoch).await;
         }
         // 之后不再重复上报同一状态。
+        let _state = match self.cloud.lock_epoch(epoch).await {
+            Ok(state) => state,
+            Err(error) => {
+                tracing::debug!(%error, "discarding stale status conflict");
+                return;
+            }
+        };
         self.runtime.lock().await.reported_statuses.insert(
             remote_id.to_owned(),
             cloud_status.unwrap_or(RemoteTaskStatus::Canceled),
@@ -884,17 +1388,26 @@ impl RemoteTaskService {
     /// （记录已被删除；云端快照从不截断未终态任务）的，删除本机任务——目标离线期间被取消 / 删除的
     /// 任务在重连时收敛，不会继续在后台下载。
     pub async fn refresh_snapshot(&self) -> Result<Vec<RemoteTaskDto>, RemoteError> {
+        let epoch = self.cloud.request_epoch();
+        self.refresh_snapshot_epoch(epoch).await
+    }
+
+    async fn refresh_snapshot_epoch(
+        &self,
+        epoch: crate::cloud::RequestEpoch,
+    ) -> Result<Vec<RemoteTaskDto>, RemoteError> {
         let requested_at = Instant::now();
-        let value = self.cloud.remote_tasks().await?;
+        let value = self.cloud.at_epoch(epoch).remote_tasks().await?;
+        drop(self.cloud.lock_epoch(epoch).await?);
         let tasks = parse_task_list(&value);
-        let (stale, deleted) = self.stale_bindings(&tasks, requested_at).await;
+        let (stale, deleted) = self.stale_bindings(&tasks, requested_at, epoch).await?;
         for remote_id in &stale {
-            self.discard_local_task(remote_id).await;
+            self.discard_local_task_epoch(remote_id, epoch).await;
         }
-        let mut merged = self.apply_missing_grace(tasks).await;
+        let mut merged = self.apply_missing_grace_epoch(tasks, epoch).await?;
         merged.retain(|task| !deleted.contains(&task.id));
         let bound = {
-            let mut state = self.state.lock().await;
+            let mut state = self.cloud.lock_epoch(epoch).await?;
             state.remote_tasks.clone_from(&merged);
             // 已终态 / 已被云端删除的任务不再需要绑定；本机任务删除失败（daemon 暂不可用）的保留重试。
             let live = merged
@@ -912,14 +1425,17 @@ impl RemoteTaskService {
                 .cloned()
                 .collect::<HashSet<_>>()
         };
-        self.runtime
-            .lock()
-            .await
-            .bound_at
-            .retain(|remote_id, _| bound.contains(remote_id));
+        {
+            let _state = self.cloud.lock_epoch(epoch).await?;
+            self.runtime
+                .lock()
+                .await
+                .bound_at
+                .retain(|remote_id, _| bound.contains(remote_id));
+            self.events
+                .publish(AgentEvent::RemoteTasksChanged(merged.clone()));
+        }
         self.store.persist(&self.state).await?;
-        self.events
-            .publish(AgentEvent::RemoteTasksChanged(merged.clone()));
         Ok(merged)
     }
 
@@ -929,15 +1445,10 @@ impl RemoteTaskService {
         &self,
         snapshot: &[RemoteTaskDto],
         requested_at: Instant,
-    ) -> (Vec<String>, HashSet<String>) {
-        let bound = self
-            .state
-            .lock()
-            .await
-            .remote_bindings
-            .keys()
-            .cloned()
-            .collect::<Vec<_>>();
+        epoch: crate::cloud::RequestEpoch,
+    ) -> Result<(Vec<String>, HashSet<String>), RemoteError> {
+        let state = self.cloud.lock_epoch(epoch).await?;
+        let bound = state.remote_bindings.keys().cloned().collect::<Vec<_>>();
         let runtime = self.runtime.lock().await;
         let mut stale = Vec::new();
         let mut deleted = HashSet::new();
@@ -956,7 +1467,7 @@ impl RemoteTaskService {
                 None => {}
             }
         }
-        (stale, deleted)
+        Ok((stale, deleted))
     }
 
     pub async fn local_device_id(&self) -> String {
@@ -965,8 +1476,21 @@ impl RemoteTaskService {
 
     /// 拉取受信任设备名册并投影 `CloudDevicesChanged`（会话建立后与 presence 事件共用）。
     pub async fn refresh_devices(&self) -> Result<(), RemoteError> {
-        let value = self.cloud.devices(&self.local_device_id().await).await?;
+        let epoch = self.cloud.request_epoch();
+        self.refresh_devices_epoch(epoch).await
+    }
+
+    async fn refresh_devices_epoch(
+        &self,
+        epoch: crate::cloud::RequestEpoch,
+    ) -> Result<(), RemoteError> {
+        let value = self
+            .cloud
+            .at_epoch(epoch)
+            .devices(&self.local_device_id().await)
+            .await?;
         let devices = parse_device_list(&value);
+        let _state = self.cloud.lock_epoch(epoch).await?;
         self.events
             .publish(AgentEvent::CloudDevicesChanged(devices));
         Ok(())
@@ -983,6 +1507,7 @@ impl RemoteTaskService {
         &self,
         params: RemoteDispatchParams,
     ) -> Result<RemoteDispatchResult, RemoteError> {
+        let epoch = self.cloud.request_epoch();
         let local_device = self.local_device_id().await;
         if params.to_device == local_device {
             return Err(RemoteError::InvalidArgument {
@@ -1022,6 +1547,7 @@ impl RemoteTaskService {
             .map(str::to_owned);
         let value = self
             .cloud
+            .at_epoch(epoch)
             .dispatch_remote(&json!({
                 "deviceId": local_device,
                 "toDevice": params.to_device,
@@ -1033,7 +1559,21 @@ impl RemoteTaskService {
         let task_value = value.get("task").cloned().unwrap_or(value);
         let task = serde_json::from_value::<RemoteTaskDto>(task_value)?;
         // 立即进入投影：UI 不必等云端推送。
-        if let Err(error) = self.upsert_task(task.clone()).await {
+        {
+            let mut state = self.cloud.lock_epoch(epoch).await?;
+            if let Some(existing) = state
+                .remote_tasks
+                .iter_mut()
+                .find(|existing| existing.id == task.id)
+            {
+                existing.clone_from(&task);
+            } else {
+                state.remote_tasks.push(task.clone());
+            }
+            self.events
+                .publish(AgentEvent::RemoteTasksChanged(state.remote_tasks.clone()));
+        }
+        if let Err(error) = self.store.persist(&self.state).await {
             tracing::warn!(error = %error, "projecting the dispatched task failed");
         }
         Ok(RemoteDispatchResult { task })
@@ -1047,6 +1587,7 @@ impl RemoteTaskService {
     ///   持久态收敛本机任务。delete 成功后立即从投影移除该行。
     /// - `command_id` 缺省生成唯一值，同一动作可重复下发；相同 id 只执行一次。
     pub async fn command(&self, params: RemoteCommandParams) -> Result<(), RemoteError> {
+        let epoch = self.cloud.request_epoch();
         let command_id = params
             .command_id
             .clone()
@@ -1079,16 +1620,17 @@ impl RemoteTaskService {
         };
         match params.action {
             RemoteCommandAction::Pause | RemoteCommandAction::Resume if local_target => {
-                return self.execute_local_command(local_command).await;
+                return self.execute_local_command(local_command, epoch).await;
             }
             // 同一个 command id 已记入去重窗口：云端回显给本机的 `task.command` 不会再执行一次。
             RemoteCommandAction::Cancel | RemoteCommandAction::Delete if local_target => {
-                self.execute_local_command(local_command).await?;
+                self.execute_local_command(local_command, epoch).await?;
             }
             _ => {}
         }
         let sent = self
             .cloud
+            .at_epoch(epoch)
             .command_remote(
                 &task.id,
                 &json!({
@@ -1105,23 +1647,32 @@ impl RemoteTaskService {
                 if params.action == RemoteCommandAction::Delete && error.status == Some(404) => {}
             Err(error) => return Err(RemoteError::Cloud(error)),
         }
-        if params.action == RemoteCommandAction::Delete {
-            let mut tasks = self.tasks().await;
-            tasks.retain(|existing| existing.id != task.id);
-            self.replace_tasks(tasks, true).await?;
+        {
+            let mut state = self.cloud.lock_epoch(epoch).await?;
+            if params.action == RemoteCommandAction::Delete {
+                state.remote_tasks.retain(|existing| existing.id != task.id);
+                self.events
+                    .publish(AgentEvent::RemoteTasksChanged(state.remote_tasks.clone()));
+            }
+            self.runtime
+                .lock()
+                .await
+                .confirmed_commands
+                .insert(command_id);
         }
-        self.runtime
-            .lock()
-            .await
-            .confirmed_commands
-            .insert(command_id);
+        self.store.persist(&self.state).await?;
         Ok(())
     }
 
     /// 执行端：把命令映射到本机 daemon；命令 id 只在执行成功后记入去重窗口。
     /// cancel / delete 遇到没有本机任务的远程任务（尚未接单 / 已处理过）直接成功：
     /// 云端记录由指令发起方落库，这里没有要删的东西。
-    async fn execute_local_command(&self, command: IncomingCommand) -> Result<(), RemoteError> {
+    async fn execute_local_command(
+        &self,
+        command: IncomingCommand,
+        epoch: crate::cloud::RequestEpoch,
+    ) -> Result<(), RemoteError> {
+        drop(self.cloud.lock_epoch(epoch).await?);
         if self
             .runtime
             .lock()
@@ -1135,7 +1686,7 @@ impl RemoteTaskService {
             command.action,
             RemoteCommandAction::Cancel | RemoteCommandAction::Delete
         );
-        match self.resolve_binding(&command.task_id).await {
+        match self.resolve_binding(&command.task_id, epoch).await? {
             Some(local_id) => {
                 let (method, delete_files) = match command.action {
                     RemoteCommandAction::Pause => {
@@ -1152,18 +1703,19 @@ impl RemoteTaskService {
                         command.delete_files,
                     ),
                 };
-                self.daemon_task_call(method, &local_id, delete_files)
+                self.daemon_task_call(method, &local_id, delete_files, epoch)
                     .await
                     .map_err(RemoteError::Daemon)?;
                 if finalizes {
                     // 先解绑再上报：记录已被删除时上报得到 404，不会再去删一次本机任务。
-                    self.remove_binding(&command.task_id).await;
+                    self.remove_binding_epoch(&command.task_id, epoch).await;
                     if let Err(error) = self
-                        .report_status_if_changed(
+                        .report_status_epoch(
                             &command.task_id,
                             RemoteTaskStatus::Canceled,
                             None,
                             None,
+                            epoch,
                         )
                         .await
                     {
@@ -1181,6 +1733,7 @@ impl RemoteTaskService {
                 )));
             }
         }
+        let _state = self.cloud.lock_epoch(epoch).await?;
         self.runtime
             .lock()
             .await
@@ -1194,7 +1747,13 @@ impl RemoteTaskService {
         method: &str,
         local_id: &str,
         delete_files: bool,
+        epoch: crate::cloud::RequestEpoch,
     ) -> Result<Value, RpcErrorData> {
+        let _state = self.cloud.lock_epoch(epoch).await.map_err(|error| {
+            tracing::debug!(%error, "discarding stale daemon command");
+            RpcErrorData::new(fluxdown_protocol::ApplicationErrorCode::Unavailable, false)
+        })?;
+        drop(_state);
         let params = if method == fluxdown_protocol::method::DAEMON_TASK_DELETE {
             json!({ "taskId": local_id, "deleteFiles": delete_files })
         } else {
@@ -1223,8 +1782,13 @@ impl RemoteTaskService {
         score
     }
 
-    async fn apply_missing_grace(&self, incoming: Vec<RemoteTaskDto>) -> Vec<RemoteTaskDto> {
-        let previous = self.state.lock().await.remote_tasks.clone();
+    async fn apply_missing_grace_epoch(
+        &self,
+        incoming: Vec<RemoteTaskDto>,
+        epoch: crate::cloud::RequestEpoch,
+    ) -> Result<Vec<RemoteTaskDto>, RemoteError> {
+        let mut state = self.cloud.lock_epoch(epoch).await?;
+        let previous = state.remote_tasks.clone();
         let incoming_ids = incoming
             .iter()
             .map(|task| task.id.clone())
@@ -1249,12 +1813,11 @@ impl RemoteTaskService {
             }
         }
         if !expired.is_empty() {
-            let mut state = self.state.lock().await;
             for id in expired {
                 state.remote_bindings.remove(&id);
             }
         }
-        merged
+        Ok(merged)
     }
 }
 
@@ -1841,12 +2404,16 @@ mod tests {
         snapshots: AtomicUsize,
         events: AtomicUsize,
         presence: AtomicUsize,
+        rosters: AtomicUsize,
+        snapshot_ready: tokio::sync::Notify,
+        presence_ready: tokio::sync::Notify,
         commands: Mutex<Vec<Value>>,
         statuses: Mutex<Vec<(String, Value)>>,
     }
 
     async fn mock_remote_snapshot(State(state): State<Arc<RemoteMockState>>) -> impl IntoResponse {
         state.snapshots.fetch_add(1, Ordering::SeqCst);
+        state.snapshot_ready.notify_one();
         axum::Json(json!({"tasks": []}))
     }
 
@@ -1861,15 +2428,21 @@ mod tests {
             Some("Bearer access")
         );
         state.events.fetch_add(1, Ordering::SeqCst);
+        let body = Body::from_stream(futures_util::stream::once(async move {
+            state.snapshot_ready.notified().await;
+            state.presence_ready.notified().await;
+            Ok::<_, std::convert::Infallible>(axum::body::Bytes::from_static(b": end\n\n"))
+        }));
         (
             StatusCode::OK,
             [(header::CONTENT_TYPE, "text/event-stream")],
-            "data: {\"type\":\"noop\"}\n\n",
+            body,
         )
     }
 
     async fn mock_presence(State(state): State<Arc<RemoteMockState>>) -> impl IntoResponse {
         state.presence.fetch_add(1, Ordering::SeqCst);
+        state.presence_ready.notify_one();
         StatusCode::NO_CONTENT
     }
 
@@ -1893,6 +2466,59 @@ mod tests {
     }
 
     type DaemonCalls = Arc<Mutex<Vec<(String, Option<Value>)>>>;
+
+    #[tokio::test]
+    async fn ended_stream_epoch_cannot_commit_tasks_or_revoke_replacement_session() {
+        let harness = Harness::new("stale_stream_epoch", |app| app).await;
+        let epoch = harness.service.cloud.request_epoch();
+        let replacement = harness.state.lock().await.credentials.clone();
+        harness
+            .service
+            .cloud
+            .clear_session()
+            .await
+            .expect("end old stream");
+        let task: RemoteTaskDto =
+            serde_json::from_value(json!({"id": "new-account-task"})).expect("task");
+        {
+            let mut state = harness.state.lock().await;
+            state.credentials = replacement;
+            state.remote_tasks = vec![task.clone()];
+        }
+        harness
+            .service
+            .events
+            .publish(AgentEvent::RemoteTasksChanged(vec![task.clone()]));
+        for event in [
+            json!({"type": "task.dispatch", "id": "old-task"}),
+            json!({"type": "task.progress", "items": []}),
+            json!({"type": "task.removed", "taskId": "new-account-task"}),
+            json!({"type": "session.revoked"}),
+        ] {
+            assert!(
+                harness
+                    .service
+                    .apply_remote_event_epoch(event, epoch)
+                    .await
+                    .is_err()
+            );
+        }
+        // Even a decoded event paused immediately before its state-lock commit
+        // must be rejected, independently of the stream's outer cancellation.
+        assert!(harness.service.upsert_task(task, epoch).await.is_err());
+        assert!(
+            harness
+                .service
+                .replace_tasks(Vec::new(), true, epoch)
+                .await
+                .is_err()
+        );
+        let state = harness.state.lock().await;
+        assert!(state.credentials.is_some());
+        assert_eq!(state.remote_tasks[0].id, "new-account-task");
+        drop(state);
+        harness.finish().await;
+    }
 
     struct Harness {
         service: Arc<RemoteTaskService>,
@@ -1993,6 +2619,8 @@ mod tests {
             if let Some(idle_timeout) = idle_timeout {
                 service.sse_idle_timeout = idle_timeout;
             }
+            service.sse_connect_timeout = std::time::Duration::from_millis(500);
+            service.heartbeat_interval = std::time::Duration::from_millis(100);
             let service = Arc::new(service);
             Self {
                 service,
@@ -2066,6 +2694,516 @@ mod tests {
             [(header::CONTENT_TYPE, "text/event-stream")],
             body,
         )
+    }
+
+    async fn live_events(State(state): State<Arc<RemoteMockState>>) -> impl IntoResponse {
+        state.events.fetch_add(1, Ordering::SeqCst);
+        silent_events().await
+    }
+
+    async fn online_roster(State(state): State<Arc<RemoteMockState>>) -> impl IntoResponse {
+        state.rosters.fetch_add(1, Ordering::SeqCst);
+        axum::Json(json!({"devices": [{
+            "id": "d1", "deviceId": "device-1", "isCurrent": true,
+            "isOnline": state.presence.load(Ordering::SeqCst) > 0
+        }]}))
+    }
+
+    fn connection_state(service: &RemoteTaskService) -> fluxdown_protocol::CloudConnectionDto {
+        let fluxdown_protocol::SnapshotBody::Agent(snapshot) = service.events.snapshot().body
+        else {
+            panic!("agent snapshot");
+        };
+        snapshot.cloud_connection
+    }
+
+    async fn wait_until(mut condition: impl FnMut() -> bool) {
+        tokio::time::timeout(std::time::Duration::from_secs(8), async {
+            while !condition() {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("lifecycle condition");
+    }
+
+    #[tokio::test]
+    async fn snapshot_failure_does_not_block_sse_and_snapshot_recovers_without_reconnect() {
+        async fn snapshot(State(state): State<Arc<RemoteMockState>>) -> axum::response::Response {
+            if state.snapshots.fetch_add(1, Ordering::SeqCst) == 0 {
+                return StatusCode::SERVICE_UNAVAILABLE.into_response();
+            }
+            axum::Json(json!({"tasks": [{"id": "recovered", "url": "https://example.test/a", "status": "completed"}]})).into_response()
+        }
+        let harness = Harness::new("snapshot_recovery", |router| {
+            router
+                .route("/api/v1/tasks/events", get(live_events))
+                .route("/api/v1/tasks/remote", get(snapshot))
+                .route("/api/v1/tasks/presence", post(mock_presence))
+                .route("/api/v1/devices", get(online_roster))
+        })
+        .await;
+        let cancel = CancellationToken::new();
+        let worker = tokio::spawn(harness.service.clone().run(cancel.clone()));
+        wait_until(|| {
+            connection_state(&harness.service).state
+                == fluxdown_protocol::CloudConnectionState::Connected
+        })
+        .await;
+        wait_until(|| {
+            let fluxdown_protocol::SnapshotBody::Agent(snapshot) =
+                harness.service.events.snapshot().body
+            else {
+                return false;
+            };
+            snapshot
+                .remote_tasks
+                .iter()
+                .any(|task| task.id == "recovered")
+                && snapshot
+                    .cloud_devices
+                    .iter()
+                    .any(|device| device.is_current && device.is_online)
+        })
+        .await;
+        assert_eq!(harness.mock.events.load(Ordering::SeqCst), 1);
+        assert!(harness.mock.snapshots.load(Ordering::SeqCst) >= 2);
+        cancel.cancel();
+        worker.await.expect("worker joined");
+        assert_eq!(
+            connection_state(&harness.service).state,
+            fluxdown_protocol::CloudConnectionState::Disconnected
+        );
+        harness.finish().await;
+    }
+
+    #[tokio::test]
+    async fn slow_snapshot_does_not_block_heartbeat_or_logout_and_cannot_write_back() {
+        async fn blocked_snapshot(State(state): State<Arc<RemoteMockState>>) -> impl IntoResponse {
+            state.snapshots.fetch_add(1, Ordering::SeqCst);
+            state.snapshot_ready.notified().await;
+            axum::Json(
+                json!({"tasks": [{"id": "old-account", "url": "https://example.test/a", "status": "completed"}]}),
+            )
+        }
+        let harness = Harness::new("slow_business", |router| {
+            router
+                .route("/api/v1/tasks/events", get(live_events))
+                .route("/api/v1/tasks/remote", get(blocked_snapshot))
+                .route("/api/v1/tasks/presence", post(mock_presence))
+        })
+        .await;
+        let cancel = CancellationToken::new();
+        let worker = tokio::spawn(harness.service.clone().run(cancel.clone()));
+        wait_until(|| {
+            harness.mock.snapshots.load(Ordering::SeqCst) == 1
+                && harness.mock.presence.load(Ordering::SeqCst) >= 3
+        })
+        .await;
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            harness.service.cloud.clear_session(),
+        )
+        .await
+        .expect("bounded logout")
+        .expect("logout");
+        wait_until(|| {
+            connection_state(&harness.service).state
+                == fluxdown_protocol::CloudConnectionState::Disconnected
+        })
+        .await;
+        harness.mock.snapshot_ready.notify_one();
+        cancel.cancel();
+        tokio::time::timeout(std::time::Duration::from_secs(1), worker)
+            .await
+            .expect("bounded cancellation")
+            .expect("joined worker");
+        assert!(harness.service.tasks().await.is_empty());
+        let persisted = harness.store.load().await.expect("read persisted state");
+        assert!(persisted.credentials.is_none());
+        assert!(persisted.remote_tasks.is_empty());
+        harness.finish().await;
+    }
+
+    #[tokio::test]
+    async fn missing_response_headers_timeout_and_manual_retry_wakes_backoff() {
+        async fn no_headers(State(state): State<Arc<RemoteMockState>>) -> impl IntoResponse {
+            state.events.fetch_add(1, Ordering::SeqCst);
+            std::future::pending::<()>().await;
+            StatusCode::OK
+        }
+        let harness = Harness::new("headers_timeout", |router| {
+            router.route("/api/v1/tasks/events", get(no_headers))
+        })
+        .await;
+        let cancel = CancellationToken::new();
+        let worker = tokio::spawn(harness.service.clone().run(cancel.clone()));
+        wait_until(|| connection_state(&harness.service).last_error.is_some()).await;
+        assert_eq!(harness.mock.events.load(Ordering::SeqCst), 1);
+        assert_eq!(harness.mock.presence.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            connection_state(&harness.service).state,
+            fluxdown_protocol::CloudConnectionState::Reconnecting
+        );
+        assert!(
+            connection_state(&harness.service)
+                .last_error
+                .unwrap()
+                .contains("headers timeout")
+        );
+        harness.service.request_reconnect();
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while harness.mock.events.load(Ordering::SeqCst) < 2 {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("manual retry bypasses 5s backoff");
+        cancel.cancel();
+        tokio::time::timeout(std::time::Duration::from_secs(1), worker)
+            .await
+            .expect("cancel headers wait")
+            .expect("joined worker");
+        harness.finish().await;
+    }
+
+    #[tokio::test]
+    async fn missing_presence_connection_requests_resync_without_network_error() {
+        async fn missing_presence() -> impl IntoResponse {
+            (
+                StatusCode::CONFLICT,
+                axum::Json(json!({
+                    "code": "presence_connection_missing",
+                    "message": "Reconnect the task event stream"
+                })),
+            )
+        }
+        let harness = Harness::new("presence_missing", |router| {
+            router.route("/api/v1/tasks/presence", post(missing_presence))
+        })
+        .await;
+        let result = harness
+            .service
+            .heartbeat_loop(
+                &tokio::sync::Notify::new(),
+                &tokio::sync::Notify::new(),
+                harness.service.cloud.request_epoch(),
+            )
+            .await;
+        assert!(matches!(result, Ok(SseEnd::Resync)));
+        harness.finish().await;
+    }
+
+    #[tokio::test]
+    async fn full_event_queue_backpressures_without_discarding_commands() {
+        async fn burst() -> impl IntoResponse {
+            let mut payload = "data: {\"type\":\"ignored\"}\n\n".repeat(super::SSE_QUEUE_CAPACITY);
+            for action in ["pause", "resume", "delete"] {
+                payload.push_str(&format!(
+                    "data: {{\"type\":\"task.command\",\"action\":\"{action}\",\"taskId\":\"r1\",\"commandId\":\"{action}\",\"deleteFiles\":true}}\n\n"
+                ));
+            }
+            let stream = futures_util::StreamExt::chain(
+                futures_util::stream::once(async move {
+                    Ok::<_, std::convert::Infallible>(axum::body::Bytes::from(payload))
+                }),
+                futures_util::stream::pending(),
+            );
+            (
+                [(header::CONTENT_TYPE, "text/event-stream")],
+                Body::from_stream(stream),
+            )
+        }
+        let harness = Harness::new("queue_backpressure", |router| {
+            router.route("/api/v1/tasks/events", get(burst))
+        })
+        .await;
+        let response = harness
+            .service
+            .cloud
+            .remote_events("device-1")
+            .await
+            .expect("SSE");
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(super::SSE_QUEUE_CAPACITY);
+        let capacity = sender.clone();
+        let roster = tokio::sync::Notify::new();
+        let stop_reading = CancellationToken::new();
+        let mut reader = Box::pin(harness.service.read_stream(
+            response,
+            sender,
+            &roster,
+            harness.service.cloud.request_epoch(),
+            &stop_reading,
+        ));
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            tokio::select! {
+                result = &mut reader => panic!("queue overflow must not discard commands: {result:?}"),
+                () = async {
+                    while capacity.capacity() != 0 {
+                        tokio::task::yield_now().await;
+                    }
+                } => {}
+            }
+        }).await.expect("queue filled");
+        let max_queued_payload = receiver.len() * super::MAX_SSE_LINE_BYTES;
+        assert_eq!(max_queued_payload, 16 * 1024 * 1024);
+        // A failed heartbeat asks the reader to stop, but cannot drop its pending
+        // send or the remaining commands from the chunk it has already received.
+        stop_reading.cancel();
+        let mut reader_ended = false;
+        for index in 0..super::SSE_QUEUE_CAPACITY + 3 {
+            let line = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                loop {
+                    tokio::select! {
+                        result = &mut reader, if !reader_ended => {
+                            assert!(matches!(result, Ok(SseEnd::Resync)));
+                            reader_ended = true;
+                        }
+                        line = receiver.recv() => break line.expect("queued event"),
+                    }
+                }
+            })
+            .await
+            .expect("business queue drains");
+            if index >= super::SSE_QUEUE_CAPACITY {
+                let command: Value =
+                    serde_json::from_slice(&line[b"data:".len()..]).expect("command");
+                let action = ["pause", "resume", "delete"][index - super::SSE_QUEUE_CAPACITY];
+                assert_eq!(command["commandId"], action);
+                assert_eq!(command["action"], action);
+                assert_eq!(command["deleteFiles"], true);
+            }
+        }
+        if !reader_ended {
+            assert!(matches!(reader.as_mut().await, Ok(SseEnd::Resync)));
+        }
+        drop(reader);
+        drop(capacity);
+        drop(receiver);
+        harness.finish().await;
+    }
+
+    #[tokio::test]
+    async fn consume_drains_commands_before_resync_or_eof_from_the_same_chunk() {
+        for ending in ["", "data: {\"type\":\"resync\"}\n\n"] {
+            let mut payload = String::new();
+            for action in ["pause", "resume", "delete"] {
+                payload.push_str(&format!(
+                    "data: {{\"type\":\"task.command\",\"action\":\"{action}\",\"taskId\":\"r1\",\"toDevice\":\"device-1\",\"commandId\":\"{action}\",\"deleteFiles\":true}}\n\n"
+                ));
+            }
+            payload.push_str(ending);
+            let harness =
+                Harness::with_daemon("terminal_fifo", move |router| {
+                    command_mock(router)
+                    .route("/api/v1/tasks/events", get(move || {
+                        let payload = payload.clone();
+                        async move { ([(header::CONTENT_TYPE, "text/event-stream")], payload) }
+                    }))
+                    .route("/api/v1/tasks/presence", post(mock_presence))
+                })
+                .await;
+            seed_daemon_tasks(&harness, vec![local_task("l1", 1)]);
+            bind(&harness, "r1", "l1").await;
+            let response = harness
+                .service
+                .cloud
+                .remote_events("device-1")
+                .await
+                .expect("SSE");
+            let cancel = CancellationToken::new();
+            let (mut events, _) = harness.service.events.subscribe_and_snapshot();
+            let result = tokio::time::timeout(
+                std::time::Duration::from_secs(3),
+                harness
+                    .service
+                    .consume_events(response, &cancel, &mut events),
+            )
+            .await
+            .expect("accepted commands drain before reconnect");
+            if ending.is_empty() {
+                assert!(matches!(result, Err(RemoteError::Protocol(_))));
+            } else {
+                assert!(matches!(result, Ok(SseEnd::Resync)));
+            }
+            let calls = harness.daemon_calls.lock().await.clone();
+            let methods: Vec<_> = calls.iter().map(|(method, _)| method.as_str()).collect();
+            assert_eq!(
+                methods,
+                [
+                    fluxdown_protocol::method::DAEMON_TASK_PAUSE,
+                    fluxdown_protocol::method::DAEMON_TASK_RESUME,
+                    fluxdown_protocol::method::DAEMON_TASK_DELETE,
+                ]
+            );
+            assert_eq!(daemon_deletes(&harness).await, [("l1".to_owned(), true)]);
+            harness.finish().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn heartbeat_failure_tears_down_sse_and_projects_retryable_error() {
+        async fn rejected_presence(State(state): State<Arc<RemoteMockState>>) -> impl IntoResponse {
+            let round = state.presence.fetch_add(1, Ordering::SeqCst);
+            if round == 0 {
+                StatusCode::NO_CONTENT
+            } else {
+                state.presence_ready.notified().await;
+                StatusCode::CONFLICT
+            }
+        }
+        let harness = Harness::new("heartbeat_failure", |router| {
+            router
+                .route("/api/v1/tasks/events", get(live_events))
+                .route("/api/v1/tasks/presence", post(rejected_presence))
+                .route("/api/v1/tasks/remote", get(mock_remote_snapshot))
+                .route("/api/v1/devices", get(online_roster))
+        })
+        .await;
+        let cancel = CancellationToken::new();
+        let worker = tokio::spawn(harness.service.clone().run(cancel.clone()));
+        wait_until(|| {
+            connection_state(&harness.service).state
+                == fluxdown_protocol::CloudConnectionState::Connected
+        })
+        .await;
+        harness.mock.presence_ready.notify_one();
+        wait_until(|| {
+            connection_state(&harness.service).state
+                == fluxdown_protocol::CloudConnectionState::Reconnecting
+        })
+        .await;
+        assert_eq!(
+            connection_state(&harness.service).last_error_reason,
+            Some(fluxdown_protocol::ErrorReason::CloudUnreachable)
+        );
+        cancel.cancel();
+        worker.await.expect("joined worker");
+        harness.finish().await;
+    }
+
+    #[tokio::test]
+    async fn initial_roster_failure_retries_without_another_presence_event() {
+        async fn flaky_roster(
+            State(state): State<Arc<RemoteMockState>>,
+        ) -> axum::response::Response {
+            if state.rosters.fetch_add(1, Ordering::SeqCst) < 2 {
+                return StatusCode::SERVICE_UNAVAILABLE.into_response();
+            }
+            axum::Json(json!({"devices": [{"id": "d1", "deviceId": "device-1", "isCurrent": true, "isOnline": true}]})).into_response()
+        }
+        let mut harness = Harness::new("roster_retry", |router| {
+            router
+                .route("/api/v1/tasks/events", get(live_events))
+                .route("/api/v1/tasks/presence", post(mock_presence))
+                .route("/api/v1/tasks/remote", get(mock_remote_snapshot))
+                .route("/api/v1/devices", get(flaky_roster))
+        })
+        .await;
+        Arc::get_mut(&mut harness.service)
+            .expect("unshared service")
+            .heartbeat_interval = std::time::Duration::from_secs(60);
+        let cancel = CancellationToken::new();
+        let worker = tokio::spawn(harness.service.clone().run(cancel.clone()));
+        wait_until(|| harness.mock.rosters.load(Ordering::SeqCst) >= 2).await;
+        assert_ne!(
+            connection_state(&harness.service).state,
+            fluxdown_protocol::CloudConnectionState::Connected
+        );
+        wait_until(|| {
+            connection_state(&harness.service).state
+                == fluxdown_protocol::CloudConnectionState::Connected
+        })
+        .await;
+        assert_eq!(harness.mock.events.load(Ordering::SeqCst), 1);
+        assert_eq!(harness.mock.presence.load(Ordering::SeqCst), 1);
+        let fluxdown_protocol::SnapshotBody::Agent(snapshot) =
+            harness.service.events.snapshot().body
+        else {
+            panic!("agent snapshot");
+        };
+        assert!(snapshot.cloud_devices[0].is_online);
+        cancel.cancel();
+        worker.await.expect("joined worker");
+        harness.finish().await;
+    }
+
+    #[tokio::test]
+    async fn worker_revocation_cancels_the_stream_and_finishes_persisting_logout() {
+        async fn revoked_events() -> impl IntoResponse {
+            (
+                [(header::CONTENT_TYPE, "text/event-stream")],
+                "data: {\"type\":\"session.revoked\",\"deviceId\":\"device-1\"}\n\n",
+            )
+        }
+        let harness = Harness::new("worker_revocation", |router| {
+            router.route("/api/v1/tasks/events", get(revoked_events))
+        })
+        .await;
+        let (mut events, _) = harness.service.events.subscribe_and_snapshot();
+        let cancel = CancellationToken::new();
+        let worker = tokio::spawn(harness.service.clone().run(cancel.clone()));
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                let frame = events.recv().await.expect("agent event");
+                if matches!(frame.event, fluxdown_protocol::ServiceEvent::Agent(AgentEvent::SessionChanged(ref session)) if session.is_none()) {
+                    break;
+                }
+            }
+        }).await.expect("revocation disconnects");
+        assert!(harness.state.lock().await.credentials.is_none());
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while harness
+                .store
+                .load()
+                .await
+                .expect("persisted logout")
+                .credentials
+                .is_some()
+            {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("logout persisted after cancelling revoked scope");
+        cancel.cancel();
+        worker.await.expect("joined worker");
+        harness.finish().await;
+    }
+
+    #[tokio::test]
+    async fn idle_watchdog_still_expires_while_snapshot_business_is_blocked() {
+        async fn blocked_snapshot(State(state): State<Arc<RemoteMockState>>) -> impl IntoResponse {
+            state.snapshots.fetch_add(1, Ordering::SeqCst);
+            std::future::pending::<()>().await;
+            StatusCode::OK
+        }
+        let harness = Harness::with_idle_timeout(
+            "blocked_business_idle",
+            Some(std::time::Duration::from_millis(500)),
+            |router| {
+                router
+                    .route("/api/v1/tasks/events", get(live_events))
+                    .route("/api/v1/tasks/remote", get(blocked_snapshot))
+                    .route("/api/v1/tasks/presence", post(mock_presence))
+                    .route("/api/v1/devices", get(online_roster))
+            },
+        )
+        .await;
+        let cancel = CancellationToken::new();
+        let worker = tokio::spawn(harness.service.clone().run(cancel.clone()));
+        wait_until(|| {
+            connection_state(&harness.service)
+                .last_error
+                .as_deref()
+                .is_some_and(|error| error.contains("idle timeout"))
+        })
+        .await;
+        assert_eq!(harness.mock.snapshots.load(Ordering::SeqCst), 1);
+        assert!(harness.mock.presence.load(Ordering::SeqCst) > 1);
+        cancel.cancel();
+        worker.await.expect("joined worker");
+        harness.finish().await;
     }
 
     #[tokio::test]
@@ -2725,6 +3863,186 @@ mod tests {
                 ..
             })
         ));
+        harness.finish().await;
+    }
+
+    #[tokio::test]
+    async fn slow_daemon_response_does_not_block_logout_or_commit_to_replacement() {
+        let harness = Harness::with_daemon("slow_daemon_epoch", |router| router).await;
+        let epoch = harness.service.cloud.request_epoch();
+        let replacement = harness.state.lock().await.credentials.clone();
+        harness
+            .state
+            .lock()
+            .await
+            .remote_bindings
+            .insert("a-task".to_owned(), "local-a".to_owned());
+        // The recording daemon must acquire this mutex before replying.
+        let response_barrier = harness.daemon_calls.lock().await;
+        {
+            let command = harness.service.execute_local_command(
+                IncomingCommand {
+                    task_id: "a-task".to_owned(),
+                    action: RemoteCommandAction::Pause,
+                    command_id: "a-command".to_owned(),
+                    delete_files: false,
+                },
+                epoch,
+            );
+            tokio::pin!(command);
+            assert!(futures_util::poll!(&mut command).is_pending());
+            tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                harness.service.cloud.clear_session(),
+            )
+            .await
+            .expect("logout must not wait for daemon response")
+            .expect("logout");
+            {
+                let mut state = harness.state.lock().await;
+                state.credentials = replacement;
+                state
+                    .remote_bindings
+                    .insert("b-task".to_owned(), "local-b".to_owned());
+            }
+            drop(response_barrier);
+            assert!(
+                command.await.is_err(),
+                "old completion cannot commit command dedup"
+            );
+        }
+        assert!(
+            !harness
+                .service
+                .runtime
+                .lock()
+                .await
+                .confirmed_commands
+                .contains("a-command")
+        );
+        assert!(
+            harness
+                .state
+                .lock()
+                .await
+                .remote_bindings
+                .contains_key("b-task")
+        );
+        assert_eq!(
+            harness.daemon_calls.lock().await.len(),
+            1,
+            "already-issued local command may finish"
+        );
+        harness.finish().await;
+    }
+
+    #[tokio::test]
+    async fn stale_scope_rejects_both_streams_before_http() {
+        let harness = Harness::new("stale_stream_http", |router| {
+            router
+                .route("/api/v1/tasks/events", get(live_events))
+                .route("/api/v1/sync/events", get(live_events))
+        })
+        .await;
+        let epoch = harness.service.cloud.request_epoch();
+        let replacement = harness.state.lock().await.credentials.clone();
+        harness
+            .service
+            .cloud
+            .clear_session()
+            .await
+            .expect("logout A");
+        harness.state.lock().await.credentials = replacement;
+        let old = harness.service.cloud.at_epoch(epoch);
+        assert!(old.remote_events("device-1").await.is_err());
+        assert!(old.sync_events("device-1").await.is_err());
+        assert_eq!(harness.mock.events.load(Ordering::SeqCst), 0);
+        harness.finish().await;
+    }
+
+    #[tokio::test]
+    async fn stale_business_scope_and_post_commit_children_cannot_touch_replacement() {
+        let harness = Harness::with_daemon("stale_business", |router| {
+            router
+                .route("/api/v1/tasks/remote", get(mock_remote_snapshot))
+                .route("/api/v1/devices", get(online_roster))
+                .route("/api/v1/tasks/{id}/status", post(mock_status))
+        })
+        .await;
+        let epoch = harness.service.cloud.request_epoch();
+        let replacement = harness.state.lock().await.credentials.clone();
+        harness
+            .service
+            .cloud
+            .clear_session()
+            .await
+            .expect("logout A");
+        let pending = remote_task(json!({
+            "id":"b-pending", "toDevice":"device-1", "status":"pending",
+            "url":"https://example.com/b", "fileName":"b.bin"
+        }));
+        {
+            let mut state = harness.state.lock().await;
+            state.credentials = replacement;
+            state.remote_tasks = vec![pending.clone()];
+            state
+                .remote_bindings
+                .insert("b-bound".to_owned(), "local-b".to_owned());
+        }
+        let (_sender, lines) = tokio::sync::mpsc::channel(1);
+        let roster = tokio::sync::Notify::new();
+        let presence_ready = tokio::sync::Notify::new();
+        presence_ready.notify_one();
+        let transport_alive = std::sync::atomic::AtomicBool::new(true);
+        let business =
+            harness
+                .service
+                .business_loop(lines, &roster, &presence_ready, epoch, &transport_alive);
+        // Exercise the stale worker itself, not its outer select/cancellation guard.
+        match tokio::time::timeout(std::time::Duration::from_millis(500), business).await {
+            Ok(Err(_)) | Err(_) => {}
+            Ok(Ok(end)) => panic!("unexpected business exit: {end:?}"),
+        }
+        harness.service.rebuild_bindings(epoch).await;
+        harness.service.accept_pending_dispatches_epoch(epoch).await;
+        harness
+            .service
+            .resolve_status_conflict_epoch("b-bound", epoch)
+            .await;
+        harness
+            .service
+            .discard_local_task_epoch("b-bound", epoch)
+            .await;
+        assert!(
+            harness
+                .service
+                .create_local_task(&pending, None, epoch)
+                .await
+                .is_err()
+        );
+        assert!(
+            harness
+                .service
+                .report_local_progress_epoch(epoch)
+                .await
+                .is_err()
+                || harness.mock.statuses.lock().await.is_empty()
+        );
+        assert_eq!(harness.mock.rosters.load(Ordering::SeqCst), 0);
+        assert_eq!(harness.mock.snapshots.load(Ordering::SeqCst), 0);
+        assert!(harness.mock.statuses.lock().await.is_empty());
+        assert!(harness.daemon_calls.lock().await.is_empty());
+        assert_ne!(
+            connection_state(&harness.service).state,
+            fluxdown_protocol::CloudConnectionState::Connected
+        );
+        let state = harness.state.lock().await;
+        assert_eq!(state.remote_tasks[0].id, "b-pending");
+        assert_eq!(
+            state.remote_bindings.get("b-bound").map(String::as_str),
+            Some("local-b")
+        );
+        drop(state);
         harness.finish().await;
     }
 }

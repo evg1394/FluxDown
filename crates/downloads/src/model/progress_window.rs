@@ -4,10 +4,10 @@
 //! 「重新下载」。宿主在命令成功后以任务 ID 调用 [`ProgressWindowTracker::arm`]；队列调度、
 //! 启动自动恢复、RSS、静默捕获、批量操作都不经过 `arm`，因此不开窗。
 //!
-//! 窗口生命周期：任务进入活跃态开进度窗口；完成时已开的窗口切换为完成视图（按设置 / 本窗口
-//! 覆盖值决定是否保留），用户中途关掉进度窗口的任务完成时仍弹一次不抢焦点的完成窗口。
+//! 窗口生命周期：任务进入活跃态开进度窗口；完成时已开的窗口按当前全局设置切换为完成视图
+//! 或关闭，用户中途关掉进度窗口的任务完成时仍按该设置弹一次不抢焦点的完成窗口。
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashSet};
 
 use serde_json::Value;
 
@@ -68,8 +68,6 @@ pub struct ProgressWindowTracker {
     armed: HashSet<String>,
     /// 用户开始且尚未完成的任务：完成时据此弹完成窗口。
     user_started: HashSet<String>,
-    /// 单个窗口的「完成后显示完成窗口」覆盖值。
-    completion_override: HashMap<String, bool>,
 }
 
 impl ProgressWindowTracker {
@@ -85,24 +83,10 @@ impl ProgressWindowTracker {
         self.armed.contains(task_id)
     }
 
-    /// 该任务完成时是否显示完成视图（窗口覆盖值优先于全局设置）。
-    #[must_use]
-    pub fn show_completion(&self, task_id: &str, prefs: ProgressWindowPrefs) -> bool {
-        self.completion_override
-            .get(task_id)
-            .copied()
-            .unwrap_or(prefs.completion)
-    }
-
-    pub fn set_completion_override(&mut self, task_id: &str, value: bool) {
-        self.completion_override.insert(task_id.to_owned(), value);
-    }
-
     /// 任务被删除：丢弃全部相关状态（窗口由视图自行关闭）。
     pub fn forget(&mut self, task_id: &str) {
         self.armed.remove(task_id);
         self.user_started.remove(task_id);
-        self.completion_override.remove(task_id);
     }
 
     /// 任务状态更新。`window_open` = 该任务当前是否有进度 / 完成窗口。
@@ -124,7 +108,7 @@ impl ProgressWindowTracker {
             STATUS_COMPLETED => {
                 let armed = self.armed.remove(task_id);
                 let user_started = self.user_started.remove(task_id) || armed;
-                let show = self.show_completion(task_id, prefs);
+                let show = prefs.completion;
                 if window_open {
                     (!show).then_some(ProgressWindowEffect::Close)
                 } else {
@@ -183,9 +167,12 @@ mod tests {
 
         tracker.arm("b");
         tracker.observe("b", 1, false, ON);
-        tracker.set_completion_override("b", false);
+        let completion_off = ProgressWindowPrefs {
+            completion: false,
+            ..ON
+        };
         assert_eq!(
-            tracker.observe("b", 3, true, ON),
+            tracker.observe("b", 3, true, completion_off),
             Some(ProgressWindowEffect::Close)
         );
     }
@@ -241,6 +228,39 @@ mod tests {
         tracker.arm("t");
         tracker.observe("t", 4, false, ON);
         assert_eq!(tracker.observe("t", 1, false, ON), None);
+    }
+
+    #[test]
+    fn changing_completion_preference_applies_to_all_started_and_future_tasks() {
+        let mut tracker = ProgressWindowTracker::default();
+        for task in ["open", "closed"] {
+            tracker.arm(task);
+            tracker.observe(task, STATUS_DOWNLOADING, false, ON);
+        }
+        let off = ProgressWindowPrefs {
+            completion: false,
+            ..ON
+        };
+        assert_eq!(
+            tracker.observe("open", STATUS_COMPLETED, true, off),
+            Some(ProgressWindowEffect::Close),
+        );
+        assert_eq!(
+            tracker.observe("closed", STATUS_COMPLETED, false, off),
+            None
+        );
+        tracker.arm("future");
+        tracker.observe("future", STATUS_DOWNLOADING, false, off);
+        assert_eq!(
+            tracker.observe("future", STATUS_COMPLETED, false, off),
+            None
+        );
+        tracker.arm("reenabled");
+        tracker.observe("reenabled", STATUS_DOWNLOADING, false, off);
+        assert_eq!(
+            tracker.observe("reenabled", STATUS_COMPLETED, false, ON),
+            Some(ProgressWindowEffect::OpenCompletion),
+        );
     }
 
     #[test]

@@ -24,11 +24,9 @@
 //! - Linux：GTK 只能在主线程（tao 事件循环所在线程，拥有默认 `glib::MainContext`）调用；请求经
 //!   `MainContext::invoke` 投递到主线程执行，调用方限时等待回复。
 //!
-//! # 系统图像列表为何常驻不 Release
+//! # 系统图像列表生命周期
 //!
-//! Windows 的 `SHGetImageList` 返回进程级单例系统图像列表（IImageList），按档位各取一次后常驻
-//! （`LazyLock`）。windows-sys 不导出 `IUnknown` vtable，无法安全地 `Release`；系统也保证该列表
-//! 在进程生命周期内有效，所以不释放，只泄漏一个引用计数。
+//! Windows 工作线程惰性缓存最多三个 IImageList，在线程内释放，先于 CoUninitialize。
 
 use fluxdown_protocol::PlatformFileIconParams;
 
@@ -296,8 +294,12 @@ mod worker {
 
     use super::{IconRequest, PlatformError};
 
-    /// 在工作线程上把请求渲染成 PNG 字节。
-    pub(super) type RenderFn = fn(&IconRequest) -> Result<Vec<u8>, PlatformError>;
+    /// 字段按声明顺序析构：资源先释放，最后撤销线程初始化。
+    #[cfg(any(windows, test))]
+    pub(super) struct WorkerState<R, G> {
+        pub(super) resources: R,
+        pub(super) _guard: G,
+    }
 
     struct Job {
         request: IconRequest,
@@ -311,31 +313,47 @@ mod worker {
     impl IconWorker {
         /// 启动工作线程。`setup` 在线程内先执行一次，其返回值（如 COM 初始化守卫）在线程存活
         /// 期间一直持有；线程起不来时返回错误文案。
-        pub(super) fn spawn<G>(
-            setup: impl FnOnce() -> G + Send + 'static,
-            render: RenderFn,
+        pub(super) fn spawn<G: 'static>(
+            setup: impl FnOnce() -> Result<G, String> + Send + 'static,
+            render: fn(&mut G, &IconRequest) -> Result<Vec<u8>, PlatformError>,
         ) -> Result<Self, String> {
             let (jobs, inbox) = mpsc::channel::<Job>();
+            let (ready, initialized) = mpsc::sync_channel(1);
             thread::Builder::new()
                 .name("fluxdown-file-icon".to_owned())
                 .spawn(move || {
-                    let _guard = setup();
+                    let mut state = match setup() {
+                        Ok(state) => state,
+                        Err(error) => {
+                            if ready.send(Err(error)).is_err() {
+                                tracing::trace!("file icon startup caller dropped its receiver");
+                            }
+                            return;
+                        }
+                    };
+                    if ready.send(Ok(())).is_err() {
+                        return; // Caller gone: release state on this thread.
+                    }
                     for job in inbox {
                         // 渲染 panic 只让这一个请求失败，常驻线程继续服务后续请求。
-                        let result = catch_unwind(AssertUnwindSafe(|| render(&job.request)))
-                            .unwrap_or_else(|_| {
-                                Err(PlatformError::Failed(
-                                    "file icon renderer panicked".to_owned(),
-                                ))
-                            });
+                        let result =
+                            catch_unwind(AssertUnwindSafe(|| render(&mut state, &job.request)))
+                                .unwrap_or_else(|_| {
+                                    Err(PlatformError::Failed(
+                                        "file icon renderer panicked".to_owned(),
+                                    ))
+                                });
                         // 调用方超时或取消会丢弃接收端；工作线程继续处理其余请求。
                         if job.reply.send(result).is_err() {
                             tracing::trace!("file icon caller dropped its response receiver");
                         }
                     }
                 })
-                .map(|_| Self { jobs })
-                .map_err(|error| error.to_string())
+                .map_err(|error| error.to_string())?;
+            initialized
+                .recv()
+                .map_err(|_| "file icon worker stopped during setup".to_owned())??;
+            Ok(Self { jobs })
         }
     }
 
@@ -355,6 +373,97 @@ mod worker {
             .map_err(|_| stopped())?;
         answer.recv().map_err(|_| stopped())?
     }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::time::Duration;
+
+        fn request() -> IconRequest {
+            IconRequest {
+                extension: String::new(),
+                file: None,
+                size: 16,
+            }
+        }
+
+        #[test]
+        fn failed_setup_reaches_caller_without_rendering() {
+            static RENDERS: AtomicUsize = AtomicUsize::new(0);
+            let worker = IconWorker::spawn(
+                || Err::<(), _>("COM initialization rejected".to_owned()),
+                |_, _| {
+                    RENDERS.fetch_add(1, Ordering::SeqCst);
+                    Ok(vec![1])
+                },
+            );
+            let error = dispatch(&worker, request()).expect_err("setup must fail");
+            assert!(error.to_string().contains("COM initialization rejected"));
+            assert_eq!(RENDERS.load(Ordering::SeqCst), 0);
+        }
+
+        #[test]
+        fn worker_reuses_state_and_drops_resources_before_guard_on_owner_thread() {
+            struct Probe {
+                name: &'static str,
+                owner: thread::ThreadId,
+                events: mpsc::Sender<(&'static str, thread::ThreadId)>,
+                _local: std::rc::Rc<()>,
+            }
+            impl Drop for Probe {
+                fn drop(&mut self) {
+                    if let Err(error) = self.events.send((self.name, thread::current().id())) {
+                        eprintln!("test teardown receiver closed: {error}");
+                    }
+                }
+            }
+            let (events, received) = mpsc::channel();
+            let worker = IconWorker::spawn(
+                move || {
+                    let owner = thread::current().id();
+                    events.send(("setup", owner)).expect("test receiver live");
+                    Ok(WorkerState {
+                        resources: (
+                            Probe {
+                                name: "resources",
+                                owner,
+                                events: events.clone(),
+                                _local: std::rc::Rc::new(()),
+                            },
+                            0u8,
+                        ),
+                        _guard: Probe {
+                            name: "guard",
+                            owner,
+                            events,
+                            _local: std::rc::Rc::new(()),
+                        },
+                    })
+                },
+                |state, _| {
+                    assert_eq!(state.resources.0.owner, thread::current().id());
+                    state.resources.1 += 1;
+                    Ok(vec![state.resources.1])
+                },
+            );
+            assert_eq!(dispatch(&worker, request()).expect("first render"), [1]);
+            assert_eq!(dispatch(&worker, request()).expect("second render"), [2]);
+            drop(worker);
+            let timeout = Duration::from_secs(5);
+            let (name, owner) = received.recv_timeout(timeout).expect("setup event");
+            assert_eq!(name, "setup");
+            assert_ne!(owner, thread::current().id());
+            assert_eq!(
+                received.recv_timeout(timeout).expect("resources dropped"),
+                ("resources", owner)
+            );
+            assert_eq!(
+                received.recv_timeout(timeout).expect("guard dropped"),
+                ("guard", owner)
+            );
+        }
+    }
 }
 
 #[cfg(all(feature = "desktop", windows))]
@@ -365,6 +474,8 @@ mod windows {
     use std::ptr;
     use std::sync::LazyLock;
 
+    use ::windows::Win32::UI::Controls::{IImageList, ILD_TRANSPARENT};
+    use ::windows::Win32::UI::Shell::SHGetImageList;
     use image::imageops::{self, FilterType};
     use image::{ImageFormat, RgbaImage};
     use windows_sys::Win32::Graphics::Gdi::{
@@ -372,37 +483,33 @@ mod windows {
         GetDIBits, GetObjectW, HBITMAP, HDC, RGBQUAD, ReleaseDC,
     };
     use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_NORMAL;
-    use windows_sys::Win32::System::Com::{
-        COINIT_APARTMENTTHREADED, CoInitializeEx, CoUninitialize,
-    };
-    use windows_sys::Win32::UI::Controls::{HIMAGELIST, ILD_TRANSPARENT, ImageList_GetIcon};
     use windows_sys::Win32::UI::Shell::{
-        SHFILEINFOW, SHGFI_SYSICONINDEX, SHGFI_USEFILEATTRIBUTES, SHGetFileInfoW, SHGetImageList,
-        SHIL_EXTRALARGE, SHIL_LARGE, SHIL_SMALL,
+        SHFILEINFOW, SHGFI_SYSICONINDEX, SHGFI_USEFILEATTRIBUTES, SHGetFileInfoW, SHIL_EXTRALARGE,
+        SHIL_LARGE, SHIL_SMALL,
     };
     use windows_sys::Win32::UI::WindowsAndMessaging::{DestroyIcon, GetIconInfo, HICON, ICONINFO};
-    use windows_sys::core::GUID;
 
-    use super::worker::{IconWorker, dispatch};
+    use super::super::windows_com::Com;
+    use super::worker::{IconWorker, WorkerState, dispatch};
     use super::{IconRequest, PlatformError};
 
-    /// `IID_IImageList`：windows-sys 0.59 不导出。
-    const IID_IMAGE_LIST: GUID = GUID::from_u128(0x46eb5926_582e_4017_9fdf_e8998daa0950);
+    type State = WorkerState<[std::cell::OnceCell<Option<IImageList>>; 3], Com>;
 
     /// 单张图标位图的合理边长上限（系统图像列表最大档 256px），防御异常返回值。
     const MAX_BITMAP_SIDE: i32 = 1024;
 
-    static WORKER: LazyLock<Result<IconWorker, String>> =
-        LazyLock::new(|| IconWorker::spawn(Com::init, render_on_worker));
-
-    // 系统图像列表按档位各取一次，常驻不 Release（见模块文档）。取用只发生在已初始化 COM 的
-    // 工作线程上。
-    static SMALL_LIST: LazyLock<Option<HIMAGELIST>> =
-        LazyLock::new(|| system_image_list(SHIL_SMALL as i32));
-    static LARGE_LIST: LazyLock<Option<HIMAGELIST>> =
-        LazyLock::new(|| system_image_list(SHIL_LARGE as i32));
-    static EXTRA_LARGE_LIST: LazyLock<Option<HIMAGELIST>> =
-        LazyLock::new(|| system_image_list(SHIL_EXTRALARGE as i32));
+    static WORKER: LazyLock<Result<IconWorker, String>> = LazyLock::new(|| {
+        IconWorker::spawn(
+            || {
+                let guard = Com::init()?;
+                Ok(State {
+                    resources: std::array::from_fn(|_| std::cell::OnceCell::new()),
+                    _guard: guard,
+                })
+            },
+            render_on_worker,
+        )
+    });
 
     pub(super) fn render(request: IconRequest) -> Result<Vec<u8>, PlatformError> {
         dispatch(&WORKER, request)
@@ -412,40 +519,16 @@ mod windows {
         PlatformError::Failed(format!("{what} failed"))
     }
 
-    /// 线程级 COM（STA）初始化守卫：文档要求调用 `SHGetFileInfo` 前先初始化。
-    struct Com(bool);
-
-    impl Com {
-        fn init() -> Self {
-            // SAFETY: reserved 参数必须为 null；成功（S_OK / S_FALSE）由 Drop 配对 CoUninitialize。
-            let hr = unsafe { CoInitializeEx(ptr::null(), COINIT_APARTMENTTHREADED as _) };
-            if hr < 0 {
-                tracing::warn!(
-                    hr = format!("{hr:#x}"),
-                    "CoInitializeEx failed for file icons"
-                );
-            }
-            Self(hr >= 0)
-        }
-    }
-
-    impl Drop for Com {
-        fn drop(&mut self) {
-            if self.0 {
-                // SAFETY: 与 init 中成功的 CoInitializeEx 配对。
-                unsafe { CoUninitialize() };
-            }
-        }
-    }
-
-    /// `ImageList_GetIcon` 创建的 HICON，Drop 时销毁。
+    /// `IImageList::GetIcon` 创建的 HICON，Drop 时销毁。
     struct Icon(HICON);
 
     impl Drop for Icon {
         fn drop(&mut self) {
             if !self.0.is_null() {
-                // SAFETY: HICON 由 ImageList_GetIcon 新建，仅此守卫拥有。
-                unsafe { DestroyIcon(self.0) };
+                // SAFETY: HICON 由 IImageList::GetIcon 新建，仅此守卫拥有。
+                if unsafe { DestroyIcon(self.0) } == 0 {
+                    tracing::warn!("DestroyIcon failed");
+                }
             }
         }
     }
@@ -457,7 +540,9 @@ mod windows {
         fn drop(&mut self) {
             if !self.0.is_null() {
                 // SAFETY: 位图由 GetIconInfo 交给调用方，仅此守卫拥有且未被选入任何 DC。
-                unsafe { DeleteObject(self.0) };
+                if unsafe { DeleteObject(self.0) } == 0 {
+                    tracing::warn!("DeleteObject failed");
+                }
             }
         }
     }
@@ -469,35 +554,41 @@ mod windows {
         fn drop(&mut self) {
             if !self.0.is_null() {
                 // SAFETY: 由 GetDC(null) 取得，配对 ReleaseDC(null, dc)。
-                unsafe { ReleaseDC(ptr::null_mut(), self.0) };
+                if unsafe { ReleaseDC(ptr::null_mut(), self.0) } == 0 {
+                    tracing::warn!("ReleaseDC failed");
+                }
             }
         }
     }
 
-    fn system_image_list(tier: i32) -> Option<HIMAGELIST> {
-        let mut raw = ptr::null_mut();
-        // SAFETY: riid 指向静态 GUID，raw 为有效输出槽。
-        let hr = unsafe { SHGetImageList(tier, &IID_IMAGE_LIST, &mut raw) };
-        if hr < 0 || raw.is_null() {
-            tracing::debug!(hr = format!("{hr:#x}"), tier, "SHGetImageList failed");
-            return None;
-        }
-        // IImageList 指针按文档可直接当 HIMAGELIST 使用。
-        Some(raw as HIMAGELIST)
-    }
-
-    /// 按目标边长选系统图像列表档位：<=16 小图标，<=32 大图标，其余超大（48px）。不用 JUMBO：
-    /// 缺 256px 图标时它返回左上角小图的 256 画布。
-    fn image_list_for(size: u32) -> Option<HIMAGELIST> {
-        match size {
-            0..=16 => *SMALL_LIST,
-            17..=32 => *LARGE_LIST,
-            _ => *EXTRA_LARGE_LIST,
+    fn system_image_list(tier: i32) -> Option<IImageList> {
+        // SAFETY: called only on the initialized STA; the typed interface owns the returned reference.
+        match unsafe { SHGetImageList::<IImageList>(tier) } {
+            Ok(list) => Some(list),
+            Err(error) => {
+                tracing::debug!(%error, tier, "SHGetImageList failed");
+                None
+            }
         }
     }
 
-    fn render_on_worker(request: &IconRequest) -> Result<Vec<u8>, PlatformError> {
-        let list = image_list_for(request.size).ok_or_else(|| failed("SHGetImageList"))?;
+    /// Avoid JUMBO, which can return a small icon in a 256px canvas.
+    fn image_list_for(state: &State, size: u32) -> Option<&IImageList> {
+        let (slot, tier) = match size {
+            0..=16 => (0, SHIL_SMALL),
+            17..=32 => (1, SHIL_LARGE),
+            _ => (2, SHIL_EXTRALARGE),
+        };
+        state.resources[slot]
+            .get_or_init(|| system_image_list(tier as i32))
+            .as_ref()
+    }
+
+    fn render_on_worker(
+        state: &mut State,
+        request: &IconRequest,
+    ) -> Result<Vec<u8>, PlatformError> {
+        let list = image_list_for(state, request.size).ok_or_else(|| failed("SHGetImageList"))?;
         // 按文件取失败（被占用 / 刚被删除 / 资源损坏）时退回按扩展名，不让这一行只剩类型图标。
         let index = match request.file.as_deref() {
             Some(path) => {
@@ -551,12 +642,12 @@ mod windows {
     }
 
     /// 读取图标的 RGBA 位图（原生尺寸）。
-    fn icon_image(list: HIMAGELIST, index: i32) -> Result<RgbaImage, PlatformError> {
-        // SAFETY: list 为系统图像列表句柄，index 由 SHGetFileInfoW 返回；HICON 交给守卫销毁。
-        let icon = Icon(unsafe { ImageList_GetIcon(list, index, ILD_TRANSPARENT) });
-        if icon.0.is_null() {
-            return Err(failed("ImageList_GetIcon"));
-        }
+    fn icon_image(list: &IImageList, index: i32) -> Result<RgbaImage, PlatformError> {
+        // SAFETY: list belongs to this STA; Shell supplied index; returned HICON is owned by Icon.
+        let handle = unsafe { list.GetIcon(index, ILD_TRANSPARENT.0) }.map_err(|error| {
+            PlatformError::Failed(format!("IImageList::GetIcon failed: {error}"))
+        })?;
+        let icon = Icon(handle.0);
         let mut icon_info = ICONINFO {
             fIcon: 0,
             xHotspot: 0,
@@ -726,7 +817,7 @@ mod macos {
     const DEVICE_RGB_COLOR_SPACE: &str = "NSDeviceRGBColorSpace";
 
     static WORKER: LazyLock<Result<IconWorker, String>> =
-        LazyLock::new(|| IconWorker::spawn(|| (), render_on_worker));
+        LazyLock::new(|| IconWorker::spawn(|| Ok(()), render_on_worker));
 
     pub(super) fn render(request: IconRequest) -> Result<Vec<u8>, PlatformError> {
         dispatch(&WORKER, request)
@@ -737,7 +828,7 @@ mod macos {
     }
 
     /// 工作线程不在主线程的自动释放池里：每个请求自带一个池，图标对象随之释放。
-    fn render_on_worker(request: &IconRequest) -> Result<Vec<u8>, PlatformError> {
+    fn render_on_worker(_state: &mut (), request: &IconRequest) -> Result<Vec<u8>, PlatformError> {
         autoreleasepool(|_| draw_png(request))
     }
 
@@ -760,12 +851,14 @@ mod macos {
 
         let side = isize::try_from(request.size).map_err(|_| failed("icon size"))?;
         let color_space = NSString::from_str(DEVICE_RGB_COLOR_SPACE);
+        let allocated = NSBitmapImageRep::alloc();
+        let planes = ptr::null_mut();
         // SAFETY: planes 传 null 由 AppKit 自行分配像素缓冲；其余参数按 8-bit RGBA 非平面格式取值，
         // bytesPerRow / bitsPerPixel 传 0 表示自动计算。
         let bitmap = unsafe {
             NSBitmapImageRep::initWithBitmapDataPlanes_pixelsWide_pixelsHigh_bitsPerSample_samplesPerPixel_hasAlpha_isPlanar_colorSpaceName_bytesPerRow_bitsPerPixel(
-                NSBitmapImageRep::alloc(),
-                ptr::null_mut(),
+                allocated,
+                planes,
                 side,
                 side,
                 8,
@@ -789,12 +882,10 @@ mod macos {
         context.flushGraphics();
         NSGraphicsContext::restoreGraphicsState_class();
 
+        let properties = NSDictionary::new();
         // SAFETY: properties 字典的泛型即方法签名要求的类型，空字典满足。
         let data = unsafe {
-            bitmap.representationUsingType_properties(
-                NSBitmapImageFileType::PNG,
-                &NSDictionary::new(),
-            )
+            bitmap.representationUsingType_properties(NSBitmapImageFileType::PNG, &properties)
         }
         .ok_or_else(|| failed("PNG representation"))?;
         Ok(data.to_vec())

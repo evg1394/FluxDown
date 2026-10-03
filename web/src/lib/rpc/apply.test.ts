@@ -2,6 +2,26 @@ import { describe, expect, test } from 'bun:test'
 import { WEBHOOK_DELIVERY_LIMIT, applyAgentEvent, applyDaemonEvent } from './apply'
 import type { AgentSnapshot, DaemonSnapshot, TaskDto, TaskRuntimeDto, WebhookDeliveryDto } from './protocol'
 
+test('cloud connection is independent of sync, clears stale self presence and resets on logout', () => {
+  const initial = {
+    sync: { connected: true },
+    cloudDevices: [{ deviceId: 'self', isCurrent: true, isOnline: true }],
+    remoteTasks: [],
+  } as unknown as AgentSnapshot
+  const failed = applyAgentEvent(initial, {
+    type: 'cloudConnectionChanged',
+    data: { state: 'reconnecting', lastError: 'heartbeat rejected', lastErrorReason: 'cloudUnreachable' },
+  })
+  expect(failed.sync).toBe(initial.sync)
+  expect(failed.cloudDevices[0]?.isOnline).toBe(false)
+  expect(failed.cloudConnection?.lastErrorReason).toBe('cloudUnreachable')
+  const restored = applyAgentEvent(failed, { type: 'cloudConnectionChanged', data: { state: 'connected' } })
+  expect(restored.cloudConnection?.lastError).toBeUndefined()
+  expect(restored.cloudDevices[0]?.isOnline).toBe(false)
+  const loggedOut = applyAgentEvent(restored, { type: 'sessionChanged', data: null })
+  expect(loggedOut.cloudConnection).toEqual({ state: 'disconnected' })
+})
+
 function task(taskId: string, status: number): TaskDto {
   return { taskId, status, fileName: 'a.bin', saveDir: '/d', url: 'http://x/a', downloadedBytes: 0, totalBytes: 10, errorMessage: '' } as unknown as TaskDto
 }

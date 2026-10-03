@@ -5,8 +5,9 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use fluxdown_protocol::{
-    AgentEvent, AgentSessionDto, AgentSnapshot, CloudDevice, ErrorReason, LinkDeviceInfo,
-    LinkDiscoveredPeer, LinkPairingRequestDto, ServiceEvent, SyncStatusDto,
+    AgentEvent, AgentSessionDto, AgentSnapshot, CloudConnectionDto, CloudConnectionState,
+    CloudDevice, ErrorReason, LinkDeviceInfo, LinkDiscoveredPeer, LinkPairingRequestDto,
+    ServiceEvent, SyncStatusDto,
 };
 
 use crate::AccountPort;
@@ -26,6 +27,7 @@ pub struct AccountController {
     pub(crate) port: Arc<dyn AccountPort>,
     session: Option<AgentSessionDto>,
     devices: Vec<CloudDevice>,
+    cloud_connection: CloudConnectionDto,
     sync: SyncStatusDto,
     linked: Vec<LinkDeviceInfo>,
     discovered: Vec<LinkDiscoveredPeer>,
@@ -43,6 +45,7 @@ impl AccountController {
             port,
             session: None,
             devices: Vec::new(),
+            cloud_connection: CloudConnectionDto::default(),
             sync: SyncStatusDto::default(),
             linked: Vec::new(),
             discovered: Vec::new(),
@@ -56,6 +59,12 @@ impl AccountController {
     pub(crate) fn replace_snapshot(&mut self, snapshot: &AgentSnapshot) -> Transition {
         self.session.clone_from(&snapshot.session);
         self.devices.clone_from(&snapshot.cloud_devices);
+        self.cloud_connection = if self.session.is_some() {
+            snapshot.cloud_connection.clone()
+        } else {
+            self.devices.clear();
+            CloudConnectionDto::default()
+        };
         self.sync = snapshot.sync.clone();
         self.linked.clone_from(&snapshot.linked_devices);
         self.discovered.clone_from(&snapshot.link_discovered);
@@ -82,6 +91,13 @@ impl AccountController {
                 if self.session.is_none() {
                     // 会话结束后账号维度的数据随之失效，不留旧账号的设备。
                     self.devices.clear();
+                    self.cloud_connection = CloudConnectionDto::default();
+                }
+            }
+            AgentEvent::CloudConnectionChanged(connection) => {
+                transition.changed = true;
+                if self.session.is_some() {
+                    self.cloud_connection.clone_from(connection);
                 }
             }
             // agent 只在非用户主动结束时发送（登出 / 删除本机设备不发）。
@@ -147,6 +163,26 @@ impl AccountController {
     #[must_use]
     pub fn devices(&self) -> &[CloudDevice] {
         &self.devices
+    }
+
+    pub(crate) fn cloud_connection(&self) -> &CloudConnectionDto {
+        &self.cloud_connection
+    }
+
+    pub(crate) fn cloud_connected(&self) -> bool {
+        self.session.is_some() && self.cloud_connection.state == CloudConnectionState::Connected
+    }
+
+    pub(crate) fn device_presence(&self, device: &CloudDevice) -> Option<bool> {
+        (!self.stale && self.cloud_connected()).then_some(device.is_online)
+    }
+
+    pub(crate) fn device_presence_key(&self, device: &CloudDevice) -> &'static str {
+        match self.device_presence(device) {
+            Some(true) => "deviceOnline",
+            Some(false) => "deviceOffline",
+            None => "devicePresenceUnknown",
+        }
     }
 
     #[must_use]
@@ -270,6 +306,89 @@ mod tests {
 
     fn session_changed(session: Option<AgentSessionDto>) -> ServiceEvent {
         ServiceEvent::Agent(AgentEvent::SessionChanged(Box::new(session)))
+    }
+
+    #[test]
+    fn presence_requires_cloud_connection_and_fresh_local_service() {
+        let mut controller = controller();
+        let mut snapshot = snapshot_with_session();
+        snapshot.cloud_devices[1].is_online = true;
+        controller.replace_snapshot(&snapshot);
+        assert_eq!(controller.device_presence(&snapshot.cloud_devices[1]), None);
+        for state in [
+            CloudConnectionState::Connecting,
+            CloudConnectionState::Reconnecting,
+            CloudConnectionState::Disconnected,
+        ] {
+            let transition = controller.apply_event(&ServiceEvent::Agent(
+                AgentEvent::CloudConnectionChanged(CloudConnectionDto {
+                    state,
+                    ..CloudConnectionDto::default()
+                }),
+            ));
+            assert!(transition.changed);
+            assert_eq!(
+                controller.device_presence_key(&snapshot.cloud_devices[1]),
+                "devicePresenceUnknown"
+            );
+        }
+        controller.apply_event(&ServiceEvent::Agent(AgentEvent::CloudConnectionChanged(
+            CloudConnectionDto {
+                state: CloudConnectionState::Connected,
+                ..CloudConnectionDto::default()
+            },
+        )));
+        assert_eq!(
+            controller.device_presence(&snapshot.cloud_devices[1]),
+            Some(true)
+        );
+        // 本机标签不是在线证据。
+        assert_eq!(
+            controller.device_presence(&snapshot.cloud_devices[0]),
+            Some(false)
+        );
+        controller.mark_stale();
+        assert_eq!(controller.device_presence(&snapshot.cloud_devices[1]), None);
+        assert_eq!(
+            controller.cloud_connection().state,
+            CloudConnectionState::Connected
+        );
+        snapshot.cloud_connection.state = CloudConnectionState::Connected;
+        controller.replace_snapshot(&snapshot);
+        assert_eq!(
+            controller.device_presence(&snapshot.cloud_devices[1]),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn sign_out_clears_cloud_connection_and_ignores_late_connection_events() {
+        let mut controller = controller();
+        let mut snapshot = snapshot_with_session();
+        snapshot.cloud_connection = CloudConnectionDto {
+            state: CloudConnectionState::Reconnecting,
+            last_error: Some("private diagnostic".to_owned()),
+            last_error_reason: Some(ErrorReason::CloudUnreachable),
+        };
+        controller.replace_snapshot(&snapshot);
+        assert_eq!(
+            controller.cloud_connection().last_error_reason,
+            Some(ErrorReason::CloudUnreachable)
+        );
+        controller.apply_event(&session_changed(None));
+        assert_eq!(
+            controller.cloud_connection().state,
+            CloudConnectionState::Disconnected
+        );
+        assert!(controller.cloud_connection().last_error.is_none());
+        controller.apply_event(&ServiceEvent::Agent(AgentEvent::CloudConnectionChanged(
+            snapshot.cloud_connection.clone(),
+        )));
+        assert!(controller.cloud_connection().last_error.is_none());
+        snapshot.session = None;
+        controller.replace_snapshot(&snapshot);
+        assert!(controller.devices().is_empty());
+        assert!(!controller.cloud_connected());
     }
 
     #[test]

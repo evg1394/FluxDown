@@ -38,10 +38,27 @@ struct CaptureDispatch {
     form: Option<WeakEntity<NewDownloadView>>,
     handed: HashSet<String>,
     cloud_devices: Vec<CloudDevice>,
+    cloud_user: Option<String>,
+    cloud_connected: bool,
+    agent_current: bool,
     linked_devices: Vec<LinkDeviceInfo>,
 }
 
 impl Global for CaptureDispatch {}
+
+impl CaptureDispatch {
+    fn set_cloud_user(&mut self, user: Option<&str>) {
+        if self.cloud_user.as_deref() != user {
+            self.cloud_devices.clear();
+            self.cloud_connected = false;
+            self.cloud_user = user.map(str::to_owned);
+        }
+    }
+
+    fn set_cloud_connected(&mut self, connected: bool) {
+        self.cloud_connected = self.cloud_user.is_some() && connected;
+    }
+}
 
 /// 菜单 / 快捷键入口：上下文取自主窗口下载页；主窗口不存在时先重建主窗口。
 pub fn open_default(cx: &mut App) {
@@ -81,28 +98,46 @@ pub fn install_captures(cx: &mut App) {
             body.cloud_devices.clone(),
             body.linked_devices.clone(),
             body.pending_captures.clone(),
+            body.cloud_connection.state == fluxdown_protocol::CloudConnectionState::Connected,
+            body.session.as_ref().map(|session| session.user.id.clone()),
         )
     });
-    if let Some((cloud, linked, pending)) = initial {
-        cache_devices(cx, &cloud, &linked);
+    if let Some((cloud, linked, pending, connected, user)) = initial {
+        cache_devices(cx, &cloud, &linked, connected, user.as_deref());
         sync_captures(cx, &pending);
     }
     cx.subscribe(&session, |_, signal, cx| match signal {
         SessionSignal::Snapshot(snapshot) => {
             if let Some(body) = agent_body(snapshot) {
-                cache_devices(cx, &body.cloud_devices, &body.linked_devices);
+                cache_devices(
+                    cx,
+                    &body.cloud_devices,
+                    &body.linked_devices,
+                    body.cloud_connection.state
+                        == fluxdown_protocol::CloudConnectionState::Connected,
+                    body.session
+                        .as_ref()
+                        .map(|session| session.user.id.as_str()),
+                );
                 sync_targets(cx);
                 sync_captures(cx, &body.pending_captures);
             }
         }
         SessionSignal::Event(frame) => match &frame.event {
+            ServiceEvent::Agent(AgentEvent::CloudConnectionChanged(connection)) => {
+                cx.global_mut::<CaptureDispatch>().set_cloud_connected(
+                    connection.state == fluxdown_protocol::CloudConnectionState::Connected,
+                );
+                sync_targets(cx);
+            }
             ServiceEvent::Agent(AgentEvent::PendingCapturesChanged(pending)) => {
                 sync_captures(cx, pending);
             }
             ServiceEvent::Agent(AgentEvent::CloudDevicesChanged(devices)) => {
-                cx.global_mut::<CaptureDispatch>()
-                    .cloud_devices
-                    .clone_from(devices);
+                let dispatch = cx.global_mut::<CaptureDispatch>();
+                if dispatch.cloud_user.is_some() {
+                    dispatch.cloud_devices.clone_from(devices);
+                }
                 sync_targets(cx);
             }
             ServiceEvent::Agent(AgentEvent::LinkedDevicesChanged(devices)) => {
@@ -112,20 +147,41 @@ pub fn install_captures(cx: &mut App) {
                 sync_targets(cx);
             }
             // 会话结束：账号设备名册随之失效（已配对设备与账号无关，保留）。
-            ServiceEvent::Agent(AgentEvent::SessionChanged(session)) if session.is_none() => {
-                cx.global_mut::<CaptureDispatch>().cloud_devices.clear();
+            ServiceEvent::Agent(AgentEvent::SessionChanged(session)) => {
+                cx.global_mut::<CaptureDispatch>().set_cloud_user(
+                    session
+                        .as_ref()
+                        .as_ref()
+                        .map(|session| session.user.id.as_str()),
+                );
                 sync_targets(cx);
             }
             _ => {}
         },
-        SessionSignal::Stale | SessionSignal::Fatal(_) | SessionSignal::ServiceStopped => {}
+        SessionSignal::Stale | SessionSignal::Fatal(_) | SessionSignal::ServiceStopped => {
+            cx.global_mut::<CaptureDispatch>().agent_current = false;
+            sync_targets(cx);
+        }
     })
     .detach();
 }
 
-fn cache_devices(cx: &mut App, cloud: &[CloudDevice], linked: &[LinkDeviceInfo]) {
+fn cache_devices(
+    cx: &mut App,
+    cloud: &[CloudDevice],
+    linked: &[LinkDeviceInfo],
+    connected: bool,
+    user: Option<&str>,
+) {
     let dispatch = cx.global_mut::<CaptureDispatch>();
-    dispatch.cloud_devices = cloud.to_vec();
+    dispatch.set_cloud_user(user);
+    dispatch.set_cloud_connected(connected);
+    dispatch.agent_current = true;
+    dispatch.cloud_devices = if user.is_some() {
+        cloud.to_vec()
+    } else {
+        Vec::new()
+    };
     dispatch.linked_devices = linked.to_vec();
 }
 
@@ -135,7 +191,12 @@ fn sync_targets(cx: &mut App) {
         let dispatch = cx.global::<CaptureDispatch>();
         (
             dispatch.form.as_ref().and_then(WeakEntity::upgrade),
-            new_download_targets(&dispatch.cloud_devices, &dispatch.linked_devices),
+            new_download_targets(
+                &dispatch.cloud_devices,
+                &dispatch.linked_devices,
+                dispatch.agent_current && dispatch.cloud_connected,
+                dispatch.agent_current,
+            ),
         )
     };
     let (Some(form), Some(handle)) = (form, WindowRegistry::handle(cx, &WindowKey::NewDownload))
@@ -373,4 +434,26 @@ fn submit(submission: NewDownloadSubmission, port: &Arc<AgentDownloadsPort>, cx:
         });
     });
     lifecycle::keep_alive(cx, task).detach();
+}
+
+#[cfg(test)]
+mod presence_tests {
+    use super::CaptureDispatch;
+
+    #[test]
+    fn logout_and_account_switch_invalidate_presence_before_next_roster() {
+        let mut dispatch = CaptureDispatch::default();
+        dispatch.set_cloud_user(Some("account-a"));
+        dispatch.set_cloud_connected(true);
+        assert!(dispatch.cloud_connected);
+        dispatch.set_cloud_user(None);
+        assert!(!dispatch.cloud_connected);
+        dispatch.set_cloud_connected(true);
+        assert!(!dispatch.cloud_connected);
+        dispatch.set_cloud_user(Some("account-b"));
+        assert!(!dispatch.cloud_connected);
+        dispatch.set_cloud_connected(true);
+        dispatch.set_cloud_user(Some("account-c"));
+        assert!(!dispatch.cloud_connected);
+    }
 }

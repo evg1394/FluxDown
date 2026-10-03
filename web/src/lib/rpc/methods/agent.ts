@@ -178,6 +178,7 @@ const link = {
 
 const remote = {
   list: () => call<RemoteTaskDto[]>(METHOD.AGENT_REMOTE_LIST),
+  reconnect: () => call<{ accepted: boolean }>(METHOD.AGENT_REMOTE_RECONNECT),
   dispatch: (params: RemoteDispatchParams) =>
     call<RemoteDispatchResult>(METHOD.AGENT_REMOTE_DISPATCH, params),
   command: (params: RemoteCommandParams) => call<OkResult>(METHOD.AGENT_REMOTE_COMMAND, params),

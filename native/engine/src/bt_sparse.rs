@@ -171,7 +171,7 @@ pub(crate) fn mark_sparse(path: &Path) -> std::io::Result<()> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 
@@ -189,14 +189,10 @@ mod tests {
     }
 
     fn file_attributes(path: &Path) -> u32 {
-        use std::os::windows::ffi::OsStrExt;
-        let wide: Vec<u16> = path
-            .as_os_str()
-            .encode_wide()
-            .chain(std::iter::once(0))
-            .collect();
-        // SAFETY: wide 以 NUL 结尾且在调用期间有效。
-        unsafe { windows_sys::Win32::Storage::FileSystem::GetFileAttributesW(wide.as_ptr()) }
+        use std::os::windows::fs::MetadataExt;
+        std::fs::symlink_metadata(path)
+            .expect("read sparse file attributes")
+            .file_attributes()
     }
 
     #[test]

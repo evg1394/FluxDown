@@ -4,10 +4,10 @@ import type { JsonValue, ServiceRole } from './common';
 import type { RpcErrorObject } from './error';
 
 export const JSONRPC_VERSION = '2.0';
-/** 当前协议版本；v4 增加 ShellChanged / PowerChanged，v5 增加 CaptureTasksStarted，v6 增加错误 reason 扩展、远程任务/局域网互联新参数与事件。 */
-export const PROTOCOL_VERSION = 6;
+/** 当前协议版本；v4 增加 ShellChanged / PowerChanged，v5 增加 CaptureTasksStarted，v6 增加错误 reason 扩展、远程任务/局域网互联新参数与事件，v7 增加 CloudConnectionChanged。 */
+export const PROTOCOL_VERSION = 7;
 /** 服务端拒绝低于此版本的客户端，握手时不兼容即断开。 */
-export const MIN_PROTOCOL_VERSION = 6;
+export const MIN_PROTOCOL_VERSION = 7;
 /** 服务因 `system.shutdown` 退出时的 WebSocket 关闭原因：客户端据此停止重连与重拉。 */
 export const CLOSE_REASON_SERVICE_QUIT = 'service-quit';
 /** 订阅者落后于事件广播（lagged）时服务端发送的关闭码：客户端必须重新 snapshot。 */

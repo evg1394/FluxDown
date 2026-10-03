@@ -220,6 +220,16 @@ describe('表头三档循环', () => {
 })
 
 describe('偏好解析', () => {
+  test('三档密度保存后可恢复，未知密度只回退该字段', () => {
+    for (const density of ['compact', 'comfortable', 'relaxed'] as const) {
+      const prefs = { ...defaultViewPrefs(), density, group_by: 'status' as const }
+      expect(parseViewPrefs(JSON.stringify(prefs))).toEqual(prefs)
+    }
+    const future = parseViewPrefs({ density: 'future', group_by: 'status' })
+    expect(future.density).toBe(defaultViewPrefs().density)
+    expect(future.group_by).toBe('status')
+  })
+
   test('status 是合法排序键，非法值回落默认', () => {
     expect(parseViewPrefs({ sort_key: 'status' }).sort_key).toBe('status')
     expect(parseViewPrefs({ sort_key: 'bogus' }).sort_key).toBe('smart')

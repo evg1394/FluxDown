@@ -3699,7 +3699,13 @@ async fn preallocate_file_len(
             // fallocate(fd, 0, 0, len): 预分配 [0, len) 范围的磁盘块，
             // 不写零，ext4/XFS/Btrfs 均支持，耗时 O(1)。
             // mode=0 同时将文件大小设为 max(当前大小, offset+len)。
-            let ret = unsafe { libc::fallocate(fd, 0, 0, target_len as libc::off_t) };
+            // fs2 0.4.3 的 posix_fallocate 会误读 errno，且 glibc 仿真
+            // 不等价于 O_WRONLY/并发扩容下的内核 fallocate。
+            let allocation_len = libc::off_t::try_from(target_len).map_err(|_| {
+                std::io::Error::new(std::io::ErrorKind::InvalidInput, "allocation exceeds off_t")
+            })?;
+            // SAFETY: std_file 持有有效可写 fd；长度已检查为 off_t，调用不保留 fd。
+            let ret = unsafe { libc::fallocate(fd, 0, 0, allocation_len) };
             if ret == 0 {
                 return Ok(());
             }
@@ -3737,24 +3743,29 @@ async fn preallocate_file_len(
                 }
             };
             use std::os::windows::io::AsRawHandle;
-            // FILE_ALLOCATION_INFO: 单字段 AllocationSize (LARGE_INTEGER = i64)
-            #[repr(C)]
-            struct FileAllocInfo {
-                allocation_size: i64,
-            }
+            use windows_sys::Win32::Storage::FileSystem::FILE_ALLOCATION_INFO;
+            // fs2::allocate 额外查询 allocated_size/metadata 并合并分配与 EOF
+            // 错误；不替换此处“分配失败仅记录、EOF 失败传播”的既有策略。
             let handle = std_file.as_raw_handle();
-            // Step 1: sparse 不可用时预分配 NTFS 物理簇——立即保留磁盘空间
-            // （连续簇优先），磁盘不足时提前报错，减少多段随机写的碎片化。
+            // Step 1: sparse 不可用时尽量预留物理簇；失败记日志后继续设置 EOF，
+            // 真正写入仍负责上报磁盘不足，不将后备分配错误混为 EOF 错误。
             if !sparse {
-                let info = FileAllocInfo {
-                    allocation_size: target_len as i64,
+                let info = FILE_ALLOCATION_INFO {
+                    AllocationSize: i64::try_from(target_len).map_err(|_| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::InvalidInput,
+                            "allocation exceeds LARGE_INTEGER",
+                        )
+                    })?,
                 };
+                // SAFETY: std_file 持有有效可写句柄；info 是对应信息类的官方
+                // 结构，正确对齐且大小匹配；同步调用不保留指针或句柄。
                 let ret = unsafe {
                     windows_sys::Win32::Storage::FileSystem::SetFileInformationByHandle(
                         handle,
                         windows_sys::Win32::Storage::FileSystem::FileAllocationInfo,
                         &info as *const _ as *const core::ffi::c_void,
-                        std::mem::size_of::<FileAllocInfo>() as u32,
+                        std::mem::size_of::<FILE_ALLOCATION_INFO>() as u32,
                     )
                 };
                 if ret == 0 {
@@ -5739,13 +5750,23 @@ async fn do_segment(
     {
         use std::os::unix::io::AsRawFd;
         let fd = file.get_ref().as_raw_fd();
-        unsafe {
-            libc::posix_fadvise(
-                fd,
-                seg_start as libc::off_t,
-                seg_downloaded as libc::off_t,
-                libc::POSIX_FADV_DONTNEED,
-            );
+        match (
+            libc::off_t::try_from(seg_start),
+            libc::off_t::try_from(seg_downloaded),
+        ) {
+            (Ok(offset), Ok(len)) => {
+                // SAFETY: file 在调用期间持有有效 fd；偏移与长度均可用 off_t 表示。
+                let error =
+                    unsafe { libc::posix_fadvise(fd, offset, len, libc::POSIX_FADV_DONTNEED) };
+                // posix_fadvise 直接返回错误码，不设置 errno；提示失败不撤销下载成功。
+                if error != 0 {
+                    log_info!(
+                        "[coordinator] posix_fadvise(DONTNEED) failed: {}",
+                        std::io::Error::from_raw_os_error(error)
+                    );
+                }
+            }
+            _ => log_info!("[coordinator] skip posix_fadvise: range exceeds off_t"),
         }
     }
 
@@ -5830,6 +5851,30 @@ mod tests {
     };
     use std::collections::BTreeMap;
     use std::sync::{Arc, Mutex as StdMutex};
+
+    #[tokio::test]
+    async fn preallocate_file_len_preserves_data_and_never_shrinks_existing_file() {
+        let dir = std::env::temp_dir().join(format!("fluxdown_prealloc_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let dest = dir.join("payload");
+        std::fs::write(&dest, b"keep").unwrap();
+        let guard = crate::temp_file_guard::TempFileGuard::acquire(&dest, "prealloc")
+            .await
+            .unwrap();
+        super::preallocate_file_len(&dest, 4096, &guard)
+            .await
+            .unwrap();
+        assert_eq!(std::fs::metadata(&dest).unwrap().len(), 4096);
+        super::preallocate_file_len(&dest, 16, &guard)
+            .await
+            .unwrap();
+        let data = std::fs::read(&dest).unwrap();
+        assert_eq!(data.len(), 4096);
+        assert_eq!(&data[..4], b"keep");
+        assert!(data[4..].iter().all(|byte| *byte == 0));
+        drop(guard);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[tokio::test]
     async fn coordinator_rejects_another_writer_before_truncating_stale_tail() {

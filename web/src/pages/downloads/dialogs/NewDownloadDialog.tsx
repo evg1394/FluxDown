@@ -10,7 +10,8 @@ import { ChevronDown, ChevronRight, FileText, FolderOpen, Plus, X } from 'lucide
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { ChangeEvent } from 'react'
 import { useT } from '../../../i18n'
-import { LATER_QUEUE_ID, MAIN_QUEUE_ID, METHOD, call, rpc, rpcStore, useAgent, useConfigValues, useDaemon } from '../../../lib/rpc'
+import { LATER_QUEUE_ID, MAIN_QUEUE_ID, METHOD, call, rpc, rpcStore, useAgent, useConfigValues, useConnection, useDaemon } from '../../../lib/rpc'
+import { cloudPresenceKnown } from '../../../lib/cloud-presence'
 import { describeUploadError } from '../../../lib/rpcErrorText'
 import type { AgentSnapshot, CloudDevice, LinkDeviceInfo, PendingCaptureDto, QueueDto, ResolvePreviewResponse } from '../../../lib/rpc'
 import { Button, Dialog, DialogFooter, FieldError, FieldHint, FieldLabel, Form, FormField, FormRow, Icon, Input, InputWithAction, OptionGroup, OptionRow, Select, Spinner, Switch, Textarea, toast } from '../../../ui'
@@ -74,7 +75,13 @@ export function NewDownloadDialog({ session }: { session: NewDownloadSession }) 
   const pendingCaptures = useAgent((snapshot) => snapshot.pendingCaptures, EMPTY_CAPTURES)
   const cloudDevices = useAgent((snapshot) => snapshot.cloudDevices, EMPTY_CLOUD)
   const linkedDevices = useAgent((snapshot) => snapshot.linkedDevices, EMPTY_LINKED)
-  const remoteTargets = useMemo(() => buildRemoteTargets(cloudDevices, linkedDevices), [cloudDevices, linkedDevices])
+  const cloudConnection = useAgent((snapshot) => snapshot.cloudConnection, undefined)
+  const localReady = useConnection().phase === 'ready'
+  const cloudReady = cloudPresenceKnown(cloudConnection, localReady)
+  const remoteTargets = useMemo(
+    () => buildRemoteTargets(cloudDevices, linkedDevices, { cloud: cloudReady, local: localReady }),
+    [cloudDevices, linkedDevices, cloudReady, localReady],
+  )
   const [targetValue, setTargetValue] = useState(LOCAL_TARGET)
   // 目标设备消失（登出 / 解除配对）时回落到本服务器。
   const target: RemoteTarget | null = remoteTargets.find((item) => item.value === targetValue) ?? null
@@ -279,7 +286,7 @@ export function NewDownloadDialog({ session }: { session: NewDownloadSession }) 
     )
     const summary = summarizeDispatch(results)
     if (summary.failed === 0) {
-      toast.key(remote.online ? 'downloadToDispatched' : 'downloadToDispatchedOffline', 'success', { count: summary.ok, device: remote.name })
+      toast.key(remote.online === false ? 'downloadToDispatchedOffline' : 'downloadToDispatched', 'success', { count: summary.ok, device: remote.name })
       closeNewDownload()
       return
     }
@@ -572,7 +579,9 @@ export function NewDownloadDialog({ session }: { session: NewDownloadSession }) 
             <FormField
               label={t('downloadTo')}
               htmlFor="new-download-target"
-              hint={target ? (target.online ? t('downloadToRemoteOptionsIgnored') : `${t('downloadToOfflineHint')} ${t('downloadToRemoteOptionsIgnored')}`) : t('downloadToHint')}
+              hint={target
+                ? [target.online === null ? t('devicePresenceUnknown') : target.online ? '' : t('downloadToOfflineHint'), t('downloadToRemoteOptionsIgnored')].filter(Boolean).join(' ')
+                : t('downloadToHint')}
             >
               <Select
                 id="new-download-target"
@@ -581,7 +590,7 @@ export function NewDownloadDialog({ session }: { session: NewDownloadSession }) 
                   { value: LOCAL_TARGET, label: t('webDownloadToServer') },
                   ...remoteTargets.map((item) => ({
                     value: item.value,
-                    label: `${item.name} · ${item.kind === 'link' ? `${t('deviceLocalTag')} · ` : ''}${item.online ? t('deviceOnline') : t('deviceOffline')}`,
+                    label: `${item.name} · ${item.kind === 'link' ? `${t('deviceLocalTag')} · ` : ''}${t(item.online === null ? 'devicePresenceUnknown' : item.online ? 'deviceOnline' : 'deviceOffline')}`,
                   })),
                 ]}
                 aria-label={t('downloadTo')}

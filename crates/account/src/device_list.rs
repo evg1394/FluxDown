@@ -8,12 +8,12 @@ pub(crate) const VISIBLE_LIMIT: usize = 5;
 pub(crate) const NAME_MAX_CHARS: usize = 64;
 
 /// 本机在前，其后在线设备，最后离线；同组按名称（不区分大小写）排序。
-pub(crate) fn sorted(devices: &[CloudDevice]) -> Vec<CloudDevice> {
+pub(crate) fn sorted(devices: &[CloudDevice], presence_known: bool) -> Vec<CloudDevice> {
     let mut list = devices.to_vec();
     list.sort_by(|a, b| {
         b.is_current
             .cmp(&a.is_current)
-            .then(b.is_online.cmp(&a.is_online))
+            .then((presence_known && b.is_online).cmp(&(presence_known && a.is_online)))
             .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
     });
     list
@@ -35,16 +35,23 @@ pub(crate) fn matches_query(device: &CloudDevice, query: &str) -> bool {
     .any(|field| field.to_lowercase().contains(&query))
 }
 
-pub(crate) fn filtered(devices: &[CloudDevice], query: &str) -> Vec<CloudDevice> {
-    sorted(devices)
+pub(crate) fn filtered(
+    devices: &[CloudDevice],
+    query: &str,
+    presence_known: bool,
+) -> Vec<CloudDevice> {
+    sorted(devices, presence_known)
         .into_iter()
         .filter(|device| matches_query(device, query))
         .collect()
 }
 
 /// 设备卡片可见的设备与被折叠的数量。
-pub(crate) fn summarize(devices: &[CloudDevice]) -> (Vec<CloudDevice>, usize) {
-    let mut list = sorted(devices);
+pub(crate) fn summarize(
+    devices: &[CloudDevice],
+    presence_known: bool,
+) -> (Vec<CloudDevice>, usize) {
+    let mut list = sorted(devices, presence_known);
     let hidden = list.len().saturating_sub(VISIBLE_LIMIT);
     list.truncate(VISIBLE_LIMIT);
     (list, hidden)
@@ -128,12 +135,15 @@ mod tests {
 
     #[test]
     fn current_device_first_then_online_then_name() {
-        let list = sorted(&[
-            device("zeta", false, true),
-            device("alpha", false, false),
-            device("Beta", false, true),
-            device("me", true, false),
-        ]);
+        let list = sorted(
+            &[
+                device("zeta", false, true),
+                device("alpha", false, false),
+                device("Beta", false, true),
+                device("me", true, false),
+            ],
+            true,
+        );
         let names: Vec<_> = list.iter().map(|device| device.name.as_str()).collect();
         assert_eq!(names, ["me", "Beta", "zeta", "alpha"]);
     }
@@ -143,11 +153,11 @@ mod tests {
         let mut win = device("Office PC", false, true);
         win.platform = Some("windows".to_owned());
         let devices = [win, device("MacBook", false, false)];
-        assert_eq!(filtered(&devices, "OFFICE").len(), 1);
-        assert_eq!(filtered(&devices, "  windows ").len(), 1);
-        assert_eq!(filtered(&devices, "1.2.3").len(), 2);
-        assert!(filtered(&devices, "linux").is_empty());
-        assert_eq!(filtered(&devices, "").len(), 2);
+        assert_eq!(filtered(&devices, "OFFICE", true).len(), 1);
+        assert_eq!(filtered(&devices, "  windows ", true).len(), 1);
+        assert_eq!(filtered(&devices, "1.2.3", true).len(), 2);
+        assert!(filtered(&devices, "linux", true).is_empty());
+        assert_eq!(filtered(&devices, "", true).len(), 2);
     }
 
     #[test]
@@ -155,13 +165,27 @@ mod tests {
         let devices: Vec<_> = (0..8)
             .map(|index| device(&format!("d{index}"), index == 7, false))
             .collect();
-        let (visible, hidden) = summarize(&devices);
+        let (visible, hidden) = summarize(&devices, true);
         assert_eq!(visible.len(), VISIBLE_LIMIT);
         assert_eq!(hidden, 3);
         // 本机始终可见。
         assert_eq!(visible[0].name, "d7");
-        let (visible, hidden) = summarize(&devices[..2]);
+        let (visible, hidden) = summarize(&devices[..2], true);
         assert_eq!((visible.len(), hidden), (2, 0));
+    }
+
+    #[test]
+    fn unknown_presence_does_not_prioritize_cached_online_devices() {
+        let devices = [
+            device("zeta", false, true),
+            device("alpha", false, false),
+            device("me", true, false),
+        ];
+        let list = sorted(&devices, false);
+        let names: Vec<_> = list.iter().map(|device| device.name.as_str()).collect();
+        assert_eq!(names, ["me", "alpha", "zeta"]);
+        assert_eq!(filtered(&devices, "", false), list);
+        assert_eq!(summarize(&devices, false).0, list);
     }
 
     #[test]

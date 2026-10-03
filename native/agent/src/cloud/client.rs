@@ -14,7 +14,7 @@ use reqwest::{Method, StatusCode};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, watch};
 
 use super::models::{AuthResponse, CloudErrorBody, RefreshRequest};
 use crate::event_hub::AgentEventHub;
@@ -27,6 +27,9 @@ const ENDPOINT_EDITABLE: bool = cfg!(debug_assertions);
 /// 云端连接的 TCP keepalive 探测间隔。
 const TCP_KEEPALIVE: Duration = Duration::from_secs(30);
 
+#[derive(Clone, Copy)]
+pub(crate) struct RequestEpoch(u64);
+
 #[derive(Clone)]
 pub struct CloudClient {
     default_base_url: String,
@@ -36,12 +39,39 @@ pub struct CloudClient {
     state: Arc<Mutex<AgentState>>,
     store: Arc<StateStore>,
     refresh: Arc<Mutex<()>>,
+    session_generation: watch::Sender<u64>,
     /// 会话被清除（退出 / 刷新令牌被拒 / 远端撤销）时投影 `SessionChanged(None)`，
     /// 让 UI 与 agent 私有状态永不脱节。
     events: Option<AgentEventHub>,
 }
 
 impl CloudClient {
+    // Capture before starting account-scoped work. Token rotation does not
+    // advance this epoch; only explicit session replacement/clear does.
+    pub(crate) fn request_epoch(&self) -> RequestEpoch {
+        RequestEpoch(*self.session_generation.borrow())
+    }
+
+    // The guard is the commit boundary for both state and event projections.
+    // A transport-only check is insufficient: another connection can log in
+    // between receiving the HTTP response and acquiring the state lock.
+    pub(crate) async fn lock_epoch(
+        &self,
+        epoch: RequestEpoch,
+    ) -> Result<tokio::sync::MutexGuard<'_, AgentState>, CloudError> {
+        let state = self.state.lock().await;
+        if *self.session_generation.borrow() != epoch.0 {
+            return Err(CloudError {
+                status: None,
+                code: Some("session_changed".to_owned()),
+                message: "account-scoped response belongs to an ended session".to_owned(),
+                retryable: false,
+                unreachable: false,
+            });
+        }
+        Ok(state)
+    }
+
     pub fn new(
         base_url: String,
         state: Arc<Mutex<AgentState>>,
@@ -50,6 +80,7 @@ impl CloudClient {
         validate_base_url(&base_url)?;
         let http = LazyHttpClient::new(|| {
             reqwest::Client::builder()
+                .user_agent(format!("FluxDown/{}", fluxdown_protocol::APP_VERSION))
                 .connect_timeout(Duration::from_secs(10))
                 .timeout(Duration::from_secs(15))
                 .pool_idle_timeout(Duration::from_secs(15))
@@ -59,6 +90,7 @@ impl CloudClient {
         // 与应用层空闲看门狗互为补充。
         let stream_http = LazyHttpClient::new(|| {
             reqwest::Client::builder()
+                .user_agent(format!("FluxDown/{}", fluxdown_protocol::APP_VERSION))
                 .connect_timeout(Duration::from_secs(10))
                 .pool_idle_timeout(Duration::from_secs(90))
                 .tcp_keepalive(Some(TCP_KEEPALIVE))
@@ -72,6 +104,7 @@ impl CloudClient {
             state,
             store,
             refresh: Arc::new(Mutex::new(())),
+            session_generation: watch::channel(0).0,
             events: None,
         })
     }
@@ -182,28 +215,56 @@ impl CloudClient {
         path: &str,
         body: Option<&P>,
     ) -> Result<R, CloudError> {
+        let epoch = self.request_epoch();
+        self.authenticated_epoch(method, path, body, epoch).await
+    }
+
+    pub(crate) async fn authenticated_epoch<P: Serialize, R: DeserializeOwned>(
+        &self,
+        method: Method,
+        path: &str,
+        body: Option<&P>,
+        epoch: RequestEpoch,
+    ) -> Result<R, CloudError> {
         let body = body
             .map(serde_json::to_value)
             .transpose()
             .map_err(|error| CloudError::invalid(error.to_string()))?;
-        let attempted = self.access_token().await?;
+        let attempted = self
+            .lock_epoch(epoch)
+            .await?
+            .credentials
+            .as_ref()
+            .map(|credentials| credentials.access_token.clone())
+            .filter(|token| !token.is_empty())
+            .ok_or_else(CloudError::unauthorized)?;
         let response = self
             .send_once(method.clone(), path, body.clone(), Some(&attempted))
             .await?;
         if response.status() != StatusCode::UNAUTHORIZED {
-            return decode(response).await;
+            let result = decode(response).await;
+            drop(self.lock_epoch(epoch).await?);
+            return result;
         }
-        let replay_token = self.refreshed_access_token(&attempted).await?;
+        let replay_token = self.refreshed_access_token(&attempted, epoch).await?;
+        drop(self.lock_epoch(epoch).await?);
         let replay = self
             .send_once(method, path, body, Some(&replay_token))
             .await?;
-        decode(replay).await
+        let result = decode(replay).await;
+        drop(self.lock_epoch(epoch).await?);
+        result
     }
 
     /// 401 后取可重放的 access token：单飞刷新，其他调用方已轮换过则直接复用新令牌。
     /// 普通请求与 SSE 必须共用这一入口，否则并发刷新会用同一枚 refresh token 撞上服务端的一次性轮换。
-    async fn refreshed_access_token(&self, attempted: &str) -> Result<String, CloudError> {
+    async fn refreshed_access_token(
+        &self,
+        attempted: &str,
+        epoch: RequestEpoch,
+    ) -> Result<String, CloudError> {
         let _guard = self.refresh.lock().await;
+        drop(self.lock_epoch(epoch).await?);
         let current = self.access_token().await?;
         if current != attempted {
             return Ok(current);
@@ -220,6 +281,8 @@ impl CloudClient {
         let session = auth.session();
         let switched = {
             let mut state = self.state.lock().await;
+            self.session_generation
+                .send_modify(|generation| *generation = generation.wrapping_add(1));
             state.credentials = Some(CloudCredentials {
                 access_token: auth.access_token,
                 refresh_token: auth.refresh_token,
@@ -279,10 +342,11 @@ impl CloudClient {
     /// 资料修改成功后更新无令牌会话并原子持久化。
     pub(crate) async fn persist_profile(
         &self,
+        epoch: RequestEpoch,
         profile: fluxdown_protocol::CloudProfile,
     ) -> Result<fluxdown_protocol::AgentSessionDto, CloudError> {
         let updated = {
-            let mut state = self.state.lock().await;
+            let mut state = self.lock_epoch(epoch).await?;
             let session = state
                 .credentials
                 .as_mut()
@@ -291,7 +355,11 @@ impl CloudClient {
             session.user = profile.user;
             session.entitlements = profile.entitlements;
             session.current_plan = profile.current_plan;
-            session.clone()
+            let updated = session.clone();
+            if let Some(events) = &self.events {
+                events.publish(AgentEvent::SessionChanged(Box::new(Some(updated.clone()))));
+            }
+            updated
         };
         self.store
             .persist(&self.state)
@@ -311,21 +379,6 @@ impl CloudClient {
             .map(|session| session.user.id.clone())
     }
 
-    /// 更新本机设备名（`state.device_name`，供请求头与后续登录使用）。
-    pub(crate) async fn set_device_name(&self, name: &str) -> Result<(), CloudError> {
-        {
-            let mut state = self.state.lock().await;
-            if state.device_name == name {
-                return Ok(());
-            }
-            name.clone_into(&mut state.device_name);
-        }
-        self.store
-            .persist(&self.state)
-            .await
-            .map_err(CloudError::from_state)
-    }
-
     /// 清除完整会话（显式退出 / 用户删除本设备）并投影账号维度的清空事件；不发 `SessionRevoked`。
     /// 与进行中的令牌刷新互斥：刷新结果不会在清除之后复活会话。
     pub async fn clear_session(&self) -> Result<(), CloudError> {
@@ -341,27 +394,57 @@ impl CloudClient {
         self.clear_session_locked(announce.then_some(reason)).await
     }
 
+    pub(crate) async fn revoke_session_epoch(
+        &self,
+        reason: ErrorReason,
+        epoch: RequestEpoch,
+    ) -> Result<(), CloudError> {
+        let _guard = self.refresh.lock().await;
+        let announce = self.lock_epoch(epoch).await?.credentials.is_some();
+        self.clear_session_epoch_locked(announce.then_some(reason), Some(epoch))
+            .await
+    }
+
     /// 调用方必须持有 `self.refresh` 锁。清空凭证、账号维度状态（同步水位 / 脏键按账号暂存、
     /// 远程任务与接单绑定丢弃），先投影事件再报告落盘错误，保证 UI 与内存状态一致。
     /// `revoked` 为 `Some` 时先于 `SessionChanged(None)` 发布 `SessionRevoked`。
     async fn clear_session_locked(&self, revoked: Option<ErrorReason>) -> Result<(), CloudError> {
-        let sync = {
-            let mut state = self.state.lock().await;
+        self.clear_session_epoch_locked(revoked, None).await
+    }
+
+    pub(crate) async fn clear_session_epoch(&self, epoch: RequestEpoch) -> Result<(), CloudError> {
+        let _guard = self.refresh.lock().await;
+        self.clear_session_epoch_locked(None, Some(epoch)).await
+    }
+
+    async fn clear_session_epoch_locked(
+        &self,
+        revoked: Option<ErrorReason>,
+        epoch: Option<RequestEpoch>,
+    ) -> Result<(), CloudError> {
+        {
+            let mut state = match epoch {
+                Some(epoch) => self.lock_epoch(epoch).await?,
+                None => self.state.lock().await,
+            };
+            self.session_generation
+                .send_modify(|generation| *generation = generation.wrapping_add(1));
             state.credentials = None;
             state.bind_account(None);
-            state.sync.clone()
-        };
-        let saved = self.store.persist(&self.state).await;
-        if let Some(events) = &self.events {
-            if let Some(reason) = revoked {
-                events.publish(AgentEvent::SessionRevoked(reason));
+            if let Some(events) = &self.events {
+                if let Some(reason) = revoked {
+                    events.publish(AgentEvent::SessionRevoked(reason));
+                }
+                events.publish(AgentEvent::SessionChanged(Box::new(None)));
+                events.publish(AgentEvent::RemoteTasksChanged(Vec::new()));
+                events.publish(AgentEvent::CloudDevicesChanged(Vec::new()));
+                events.publish(AgentEvent::SyncChanged(state.sync.clone()));
             }
-            events.publish(AgentEvent::SessionChanged(Box::new(None)));
-            events.publish(AgentEvent::RemoteTasksChanged(Vec::new()));
-            events.publish(AgentEvent::CloudDevicesChanged(Vec::new()));
-            events.publish(AgentEvent::SyncChanged(sync));
         }
-        saved.map_err(CloudError::from_state)
+        self.store
+            .persist(&self.state)
+            .await
+            .map_err(CloudError::from_state)
     }
 
     /// 退出登录：持有刷新锁完成「服务端吊销 + 本地清除」，避免与刷新竞态导致会话复活。
@@ -527,23 +610,41 @@ impl CloudClient {
             })
     }
 
-    pub(crate) async fn authenticated_stream(
+    pub(crate) async fn authenticated_stream_epoch(
         &self,
         path: &str,
+        epoch: RequestEpoch,
     ) -> Result<reqwest::Response, CloudError> {
-        let access_token = self.access_token().await?;
-        let response = self.send_stream_once(path, &access_token).await?;
+        let access_token = self
+            .lock_epoch(epoch)
+            .await?
+            .credentials
+            .as_ref()
+            .map(|credentials| credentials.access_token.clone())
+            .filter(|token| !token.is_empty())
+            .ok_or_else(CloudError::unauthorized)?;
+        let response = self.send_stream_once(path, &access_token, epoch).await?;
         if response.status() != StatusCode::UNAUTHORIZED {
-            return ensure_success(response).await;
+            let result = ensure_success(response).await;
+            drop(self.lock_epoch(epoch).await?);
+            return result;
         }
-        let replay_token = self.refreshed_access_token(&access_token).await?;
-        ensure_success(self.send_stream_once(path, &replay_token).await?).await
+        let replay_token = self.refreshed_access_token(&access_token, epoch).await?;
+        drop(self.lock_epoch(epoch).await?);
+        let result = ensure_success(self.send_stream_once(path, &replay_token, epoch).await?).await;
+        drop(self.lock_epoch(epoch).await?);
+        result
+    }
+
+    pub(crate) fn session_changes(&self) -> watch::Receiver<u64> {
+        self.session_generation.subscribe()
     }
 
     async fn send_stream_once(
         &self,
         path: &str,
         bearer: &str,
+        epoch: RequestEpoch,
     ) -> Result<reqwest::Response, CloudError> {
         let (device_id, device_name, platform) = self.device_identity().await;
         let client = self
@@ -551,7 +652,8 @@ impl CloudClient {
             .get()
             .await
             .map_err(|error| CloudError::local(format!("cloud stream client: {error:#}")))?;
-        client
+        drop(self.lock_epoch(epoch).await?);
+        let request = client
             .get(format!("{}{}", self.current_base_url(), path))
             .bearer_auth(bearer)
             .header("Accept", "text/event-stream")
@@ -559,8 +661,11 @@ impl CloudClient {
             .header("X-FluxDown-Device-Name", device_name)
             .header("X-FluxDown-Platform", platform)
             .header("X-FluxDown-Version", fluxdown_protocol::APP_VERSION)
-            .send()
+            .send();
+        // 仅限制响应头，不给无限 SSE body 加总寿命；包括成功 TCP 后不回头的反代。
+        tokio::time::timeout(Duration::from_secs(15), request)
             .await
+            .map_err(|_| CloudError::network("cloud SSE response headers timeout".to_owned()))?
             .map_err(|error| CloudError::network(error_chain(&error)))
     }
 
@@ -802,6 +907,9 @@ impl CloudError {
             Some("invalid_code") => Some(ErrorReason::InvalidVerificationCode),
             Some("rate_limited") => Some(ErrorReason::RateLimited),
             Some("email_taken") => Some(ErrorReason::EmailTaken),
+            Some("origin_id_taken") => Some(ErrorReason::OriginIdTaken),
+            Some("origin_id_change_not_allowed") => Some(ErrorReason::OriginIdChangeNotAllowed),
+            Some("origin_id_already_changed") => Some(ErrorReason::OriginIdAlreadyChanged),
             Some("account_disabled") => Some(ErrorReason::AccountDisabled),
             Some("registration_closed") => Some(ErrorReason::RegistrationClosed),
             Some("registration_incomplete") => Some(ErrorReason::RegistrationIncomplete),
@@ -839,13 +947,17 @@ impl CloudError {
             Some(ErrorReason::RateLimited) => (ApplicationErrorCode::Unavailable, true),
             Some(
                 ErrorReason::EmailTaken
+                | ErrorReason::OriginIdTaken
+                | ErrorReason::OriginIdAlreadyChanged
                 | ErrorReason::RegistrationIncomplete
                 | ErrorReason::DeviceLimit
                 | ErrorReason::SyncDeviceLimit
                 | ErrorReason::TaskStateConflict
                 | ErrorReason::TaskDeviceMismatch,
             ) => (ApplicationErrorCode::Conflict, false),
-            Some(ErrorReason::RegistrationClosed) => (ApplicationErrorCode::Unsupported, false),
+            Some(ErrorReason::RegistrationClosed | ErrorReason::OriginIdChangeNotAllowed) => {
+                (ApplicationErrorCode::Unsupported, false)
+            }
             Some(ErrorReason::MailNotConfigured) => (ApplicationErrorCode::Unavailable, false),
             Some(ErrorReason::CloudUnreachable | ErrorReason::TargetDeviceOffline) => {
                 (ApplicationErrorCode::Unavailable, true)
@@ -1167,6 +1279,10 @@ mod tests {
         State(cloud): State<RotatingCloud>,
         headers: HeaderMap,
     ) -> Response {
+        assert_eq!(
+            headers.get(header::USER_AGENT).expect("product user agent"),
+            format!("FluxDown/{}", fluxdown_protocol::APP_VERSION).as_str()
+        );
         if bearer(&headers) == cloud.inner.lock().await.0 {
             axum::Json(json!({ "ok": true })).into_response()
         } else {
@@ -1244,7 +1360,7 @@ mod tests {
 
         let request =
             client.authenticated::<Value, Value>(reqwest::Method::GET, "/api/v1/test", None);
-        let stream = client.authenticated_stream("/api/v1/stream");
+        let stream = client.authenticated_stream_epoch("/api/v1/stream", client.request_epoch());
         let (request, stream) = tokio::join!(request, stream);
         assert_eq!(request.expect("request replay")["ok"], true);
         assert!(stream.expect("stream replay").status().is_success());
@@ -1378,6 +1494,32 @@ mod tests {
             cloud_error(422, "validation_error").to_rpc_error().code,
             Code::InvalidArgument
         );
+    }
+
+    #[test]
+    fn origin_id_rejections_preserve_actionable_reasons_without_retrying() {
+        for (status, cloud_code, code, reason) in [
+            (409, "origin_id_taken", "conflict", "originIdTaken"),
+            (
+                403,
+                "origin_id_change_not_allowed",
+                "unsupported",
+                "originIdChangeNotAllowed",
+            ),
+            (
+                409,
+                "origin_id_already_changed",
+                "conflict",
+                "originIdAlreadyChanged",
+            ),
+        ] {
+            let data = cloud_error(status, cloud_code).to_rpc_error();
+            assert_eq!(
+                serde_json::to_value(data).expect("serialize RPC rejection"),
+                json!({ "code": code, "retryable": false, "reason": reason }),
+                "{cloud_code}",
+            );
+        }
     }
 
     #[test]

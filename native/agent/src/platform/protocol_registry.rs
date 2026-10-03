@@ -240,20 +240,8 @@ mod inner {
     use std::path::Path;
 
     use super::UrlScheme;
-    use crate::platform::macos_cf::{
-        CFArrayRef, CFStringRef, CfOwned, cf_string, cf_string_array, cf_to_string,
-    };
+    use crate::platform::macos_cf;
     use crate::platform::{PlatformError, host_bundle_id, successor_handler};
-
-    #[link(name = "CoreServices", kind = "framework")]
-    unsafe extern "C" {
-        fn LSCopyDefaultHandlerForURLScheme(url_scheme: CFStringRef) -> CFStringRef;
-        fn LSSetDefaultHandlerForURLScheme(
-            url_scheme: CFStringRef,
-            handler_bundle_id: CFStringRef,
-        ) -> i32;
-        fn LSCopyAllHandlersForURLScheme(url_scheme: CFStringRef) -> CFArrayRef;
-    }
 
     pub fn supported(_desktop: Option<&Path>) -> bool {
         host_bundle_id().is_some()
@@ -261,13 +249,7 @@ mod inner {
 
     /// 本 bundle 是否为 `proto` 的默认处理程序。
     pub fn is_registered(proto: UrlScheme, _desktop: Option<&Path>) -> bool {
-        let Ok(scheme) = cf_string(proto.scheme) else {
-            return false;
-        };
-        // SAFETY: `scheme.raw()` 是有效 CFStringRef；返回的 handler 引用归我们
-        // 所有，由 `CfOwned` 释放。
-        let handler = CfOwned::new(unsafe { LSCopyDefaultHandlerForURLScheme(scheme.raw()) });
-        let Some(handler_id) = cf_to_string(handler.raw()) else {
+        let Ok(Some(handler_id)) = macos_cf::default_scheme_handler(proto.scheme) else {
             return false;
         };
         host_bundle_id().is_some_and(|mine| handler_id.eq_ignore_ascii_case(&mine))
@@ -278,15 +260,8 @@ mod inner {
         let bundle_id = host_bundle_id().ok_or(PlatformError::Unsupported(
             "fluxdown-agent is not running inside an app bundle",
         ))?;
-        let scheme = cf_string(proto.scheme)?;
-        let id = cf_string(&bundle_id)?;
-        // SAFETY: 两个 CFStringRef 在调用期间存活；函数不接管所有权。
-        let status = unsafe { LSSetDefaultHandlerForURLScheme(scheme.raw(), id.raw()) };
-        if status != 0 {
-            return Err(PlatformError::Failed(format!(
-                "LSSetDefaultHandlerForURLScheme failed (OSStatus={status})"
-            )));
-        }
+        macos_cf::set_scheme_handler(proto.scheme, &bundle_id)
+            .map_err(|error| PlatformError::Failed(error.to_string()))?;
         tracing::info!(scheme = proto.scheme, bundle_id, "registered URL protocol");
         Ok(())
     }
@@ -308,24 +283,16 @@ mod inner {
             );
             return Ok(());
         }
-        let scheme = cf_string(proto.scheme)?;
-        // SAFETY: `scheme.raw()` 是有效 CFStringRef；返回的数组引用归我们所有，由 `CfOwned` 释放。
-        let candidates = CfOwned::new(unsafe { LSCopyAllHandlersForURLScheme(scheme.raw()) });
-        let Some(successor) = successor_handler(cf_string_array(&candidates), &mine) else {
+        let candidates = macos_cf::scheme_handlers(proto.scheme)?;
+        let Some(successor) = successor_handler(candidates, &mine) else {
             tracing::info!(
                 scheme = proto.scheme,
                 "no other handler installed; FluxDown stays the system default"
             );
             return Ok(());
         };
-        let id = cf_string(&successor)?;
-        // SAFETY: 两个 CFStringRef 在调用期间存活；函数不接管所有权。
-        let status = unsafe { LSSetDefaultHandlerForURLScheme(scheme.raw(), id.raw()) };
-        if status != 0 {
-            return Err(PlatformError::Failed(format!(
-                "LSSetDefaultHandlerForURLScheme (hand over) failed (OSStatus={status})"
-            )));
-        }
+        macos_cf::set_scheme_handler(proto.scheme, &successor)
+            .map_err(|error| PlatformError::Failed(error.to_string()))?;
         tracing::info!(scheme = proto.scheme, successor, "handed URL protocol over");
         Ok(())
     }

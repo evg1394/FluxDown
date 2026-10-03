@@ -231,27 +231,15 @@ impl WindowRegistry {
     pub fn open_count(cx: &App) -> usize {
         cx.global::<Self>().open.len()
     }
-
-    /// 满足条件的已开窗口数量。
-    #[must_use]
-    pub fn count(cx: &App, predicate: impl Fn(&WindowKey) -> bool) -> usize {
-        cx.global::<Self>()
-            .open
-            .keys()
-            .filter(|key| predicate(key))
-            .count()
-    }
 }
 
-/// 把窗口连同应用一起置前（界面常是后台应用：外部捕获、静默下载发生时浏览器在前台）：
+/// 请求激活应用与窗口；前台切换最终由系统决定，并不保证强制置前。
 ///
-/// - macOS：`activate_window` 只在本应用内排序（`makeKeyAndOrderFront`），必须同时
-///   `cx.activate(true)` 激活应用本身（`activateIgnoringOtherApps`），否则窗口压在浏览器下面。
-/// - Windows：`cx.activate` 为空操作；gpui 的 `activate_window` 以 `SetForegroundWindow` +
-///   模拟一次按键输入绕过前台锁，后台进程也能置前。
-/// - Linux：X11 发 `_NET_ACTIVE_WINDOW`、Wayland 申请 xdg-activation token，窗口管理器的
-///   防抢焦点策略可能拒绝；再请求注意（X11 置 urgency，任务栏 / 工作区高亮），被拒时
-///   用户仍能看到有待确认的下载。
+/// - macOS：应用激活与 `makeKeyAndOrderFront` 是不同操作，都经 GPUI 请求。
+/// - Windows：GPUI 调用 `SetForegroundWindow`，仍受系统前台策略约束。
+/// - X11：发送 `_NET_ACTIVE_WINDOW`；额外请求 urgency 提示。
+/// - Wayland：申请 xdg-activation token，合成器可拒绝；GPUI 0.3.7 的
+///   `request_attention` 是空实现，不能承诺任务栏提示或抢焦点。
 pub fn bring_to_front(window: &mut Window, cx: &mut App) {
     cx.activate(true);
     window.activate_window();

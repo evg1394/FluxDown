@@ -305,6 +305,8 @@ pub struct DownloadsController {
     group_summaries: Vec<GroupSummary>,
     group_summaries_generation: u64,
     cloud_devices: Vec<CloudDevice>,
+    cloud_connected: bool,
+    agent_stale: bool,
     linked_devices: Vec<LinkDeviceInfo>,
     config: BTreeMap<String, String>,
     config_revision: u64,
@@ -333,6 +335,8 @@ impl DownloadsController {
             group_summaries: Vec::new(),
             group_summaries_generation: u64::MAX,
             cloud_devices: Vec::new(),
+            cloud_connected: false,
+            agent_stale: true,
             linked_devices: Vec::new(),
             config: BTreeMap::new(),
             config_revision: 0,
@@ -349,6 +353,9 @@ impl DownloadsController {
         self.local.clone_from(&snapshot.daemon.tasks);
         self.remote.clone_from(&snapshot.remote_tasks);
         self.cloud_devices.clone_from(&snapshot.cloud_devices);
+        self.cloud_connected =
+            snapshot.cloud_connection.state == fluxdown_protocol::CloudConnectionState::Connected;
+        self.agent_stale = false;
         self.linked_devices.clone_from(&snapshot.linked_devices);
         self.session_device = snapshot
             .session
@@ -398,6 +405,11 @@ impl DownloadsController {
                 self.rebuild_remote();
                 true
             }
+            AgentEvent::CloudConnectionChanged(connection) => {
+                self.cloud_connected =
+                    connection.state == fluxdown_protocol::CloudConnectionState::Connected;
+                true
+            }
             // 会话结束（登出 / 被撤销）后不再展示旧账号的设备与远程任务。
             AgentEvent::SessionChanged(session) => {
                 self.session_device = session
@@ -405,6 +417,7 @@ impl DownloadsController {
                     .as_ref()
                     .map(|session| session.device.device_id.clone());
                 if self.session_device.is_none() {
+                    self.cloud_connected = false;
                     self.cloud_devices.clear();
                     self.remote.clear();
                 }
@@ -425,6 +438,7 @@ impl DownloadsController {
     }
 
     pub fn mark_stale(&mut self) {
+        self.agent_stale = true;
         self.stale = true;
         self.task_runtime.clear();
         self.live_speeds.clear();
@@ -497,7 +511,12 @@ impl DownloadsController {
     /// 「其他设备」：云设备（去掉本机、去重）+ 已配对设备，同名已消歧。
     #[must_use]
     pub(crate) fn other_devices(&self) -> Vec<DeviceEntry> {
-        other_devices(&self.cloud_devices, &self.linked_devices)
+        other_devices(
+            &self.cloud_devices,
+            &self.linked_devices,
+            !self.agent_stale && self.cloud_connected,
+            !self.agent_stale,
+        )
     }
 
     #[must_use]
@@ -1254,6 +1273,37 @@ mod tests {
 
     fn agent(event: AgentEvent) -> ServiceEvent {
         ServiceEvent::Agent(event)
+    }
+
+    #[test]
+    fn device_presence_tracks_cloud_and_agent_not_daemon_connectivity() {
+        let mut controller = DownloadsController::new(Arc::new(NullPort));
+        let mut snapshot = fluxdown_protocol::AgentSnapshot {
+            cloud_devices: serde_json::from_value(json!([
+                {"id":"1","deviceId":"other","isOnline":true}
+            ]))
+            .expect("devices"),
+            ..fluxdown_protocol::AgentSnapshot::default()
+        };
+        snapshot.cloud_connection.state = fluxdown_protocol::CloudConnectionState::Connected;
+        controller.replace_snapshot(&snapshot);
+        // 下载核心离线不代表云端或 agent 已断连。
+        assert!(controller.is_stale());
+        assert_eq!(controller.other_devices()[0].online, Some(true));
+        controller.apply_event(&agent(AgentEvent::CloudConnectionChanged(
+            fluxdown_protocol::CloudConnectionDto::default(),
+        )));
+        assert_eq!(controller.other_devices()[0].online, None);
+        controller.apply_event(&agent(AgentEvent::CloudConnectionChanged(
+            snapshot.cloud_connection.clone(),
+        )));
+        assert_eq!(controller.other_devices()[0].online, Some(true));
+        controller.mark_stale();
+        assert_eq!(controller.other_devices()[0].online, None);
+        controller.apply_event(&agent(AgentEvent::DaemonConnectionChanged(true)));
+        assert_eq!(controller.other_devices()[0].online, None);
+        controller.replace_snapshot(&snapshot);
+        assert_eq!(controller.other_devices()[0].online, Some(true));
     }
 
     fn remote_task(id: &str, from: &str, to: &str) -> fluxdown_protocol::RemoteTaskDto {

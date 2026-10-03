@@ -10,7 +10,9 @@ use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 use crate::event_hub::AgentEventHub;
-use crate::notification::{Notifier, completion_text, english_text, rss_auto_download_text};
+use crate::notification::{
+    NoticeText, Notifier, completion_path, completion_text, english_text, rss_auto_download_text,
+};
 
 /// 完成通知防抖：最后一次完成后静默这么久才合并发一条（同 Flutter `NotificationService`）。
 const NOTIFY_DEBOUNCE: Duration = Duration::from_millis(800);
@@ -20,6 +22,7 @@ const NOTIFY_MAX_WAIT: Duration = Duration::from_secs(3);
 pub struct BackgroundEffects {
     events: AgentEventHub,
     notifier: Arc<Notifier>,
+    action_text: NoticeText,
     #[cfg(feature = "desktop")]
     translator: Option<fluxdown_ui_i18n::Translator>,
 }
@@ -28,6 +31,8 @@ pub struct BackgroundEffects {
 #[derive(Default)]
 struct PendingCompletions {
     file_names: Vec<String>,
+    // 与通知正文最后一个文件绑定；不得在无效路径时回退到前一个任务。
+    last_path: Option<std::path::PathBuf>,
     /// 最近一批完成时的界面语言偏好（`general.locale`；`None` = 跟随系统）。
     locale: Option<String>,
     started_at: Option<Instant>,
@@ -41,6 +46,7 @@ impl BackgroundEffects {
         Self {
             events,
             notifier,
+            action_text: NoticeText::default(),
             #[cfg(feature = "desktop")]
             translator: match fluxdown_ui_i18n::I18nCatalog::load_embedded() {
                 Ok(catalog) => {
@@ -159,11 +165,18 @@ impl BackgroundEffects {
     /// 把防抖中的完成合并成一条系统通知发出（发送阻塞，放进 blocking 线程）。
     fn flush(&mut self, pending: &mut PendingCompletions) {
         let batch = std::mem::take(pending);
+        if !self.events.inspect(notify_on_complete) {
+            return;
+        }
+        let open_file = self.action_text.text("openFile", batch.locale.as_deref());
+        let open_folder = self.action_text.text("openFolder", batch.locale.as_deref());
         let Some((title, body)) = self.completion_notice(&batch.file_names, batch.locale) else {
             return;
         };
         let notifier = Arc::clone(&self.notifier);
-        tokio::task::spawn_blocking(move || notifier.show(&title, &body));
+        tokio::task::spawn_blocking(move || {
+            notifier.show_completion(&title, &body, batch.last_path, open_file, open_folder);
+        });
     }
 
     #[cfg(feature = "desktop")]
@@ -198,8 +211,12 @@ impl BackgroundEffects {
 impl PendingCompletions {
     /// 并入一批完成并重排发送时刻：静默 [`NOTIFY_DEBOUNCE`] 后发，但自本批首个完成起
     /// 最多等 [`NOTIFY_MAX_WAIT`]。
-    fn push(&mut self, file_names: Vec<String>, locale: Option<String>, now: Instant) {
-        self.file_names.extend(file_names);
+    fn push(&mut self, completed: Vec<CompletedFile>, locale: Option<String>, now: Instant) {
+        if let Some(last) = completed.last() {
+            self.last_path.clone_from(&last.path);
+        }
+        self.file_names
+            .extend(completed.into_iter().map(|file| file.name));
         self.locale = locale;
         let started_at = *self.started_at.get_or_insert(now);
         self.flush_at = Some((now + NOTIFY_DEBOUNCE).min(started_at + NOTIFY_MAX_WAIT));
@@ -236,12 +253,18 @@ fn agent_snapshot(snapshot: fluxdown_protocol::Snapshot) -> AgentSnapshot {
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
+struct CompletedFile {
+    name: String,
+    path: Option<std::path::PathBuf>,
+}
+
 /// 用最新任务状态原地刷新 `statuses`，返回本次新转为完成（status 3）且需要
-/// 通知的文件名。首次出现的任务只登记不通知；已删除的任务从表中剔除。
+/// 通知的文件及最终路径。首次出现的任务只登记不通知；已删除的任务从表中剔除。
 fn take_new_completions(
     snapshot: &AgentSnapshot,
     statuses: &mut HashMap<String, i32>,
-) -> Vec<String> {
+) -> Vec<CompletedFile> {
     let enabled = notify_on_complete(snapshot);
     let tasks = &snapshot.daemon.tasks;
     let mut completed = Vec::new();
@@ -249,7 +272,10 @@ fn take_new_completions(
         match statuses.get_mut(&task.task_id) {
             Some(previous) => {
                 if enabled && task.status == 3 && *previous != 3 {
-                    completed.push(task.file_name.clone());
+                    completed.push(CompletedFile {
+                        name: task.file_name.clone(),
+                        path: completion_path(&task.save_dir, &task.file_name),
+                    });
                 }
                 *previous = task.status;
             }
@@ -347,23 +373,49 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        KEEP_AWAKE_DEFAULT, KEEP_AWAKE_PREF, NOTIFY_DEBOUNCE, NOTIFY_MAX_WAIT, PendingCompletions,
-        locale_preference, notify_on_complete, preference_bool, take_new_completions,
+        CompletedFile, KEEP_AWAKE_DEFAULT, KEEP_AWAKE_PREF, NOTIFY_DEBOUNCE, NOTIFY_MAX_WAIT,
+        PendingCompletions, locale_preference, notify_on_complete, preference_bool,
+        take_new_completions,
     };
 
     #[test]
     fn completion_batches_debounce_but_never_wait_past_the_cap() {
         let start = tokio::time::Instant::now();
         let mut pending = PendingCompletions::default();
-        pending.push(vec!["a.bin".to_owned()], None, start);
+        pending.push(vec![completed("a.bin")], None, start);
         assert_eq!(pending.flush_at, Some(start + NOTIFY_DEBOUNCE));
 
         // 连续完成不断顺延，但封顶于首个完成后 NOTIFY_MAX_WAIT。
         let late = start + NOTIFY_MAX_WAIT - Duration::from_millis(100);
-        pending.push(vec!["b.bin".to_owned()], Some("zh".to_owned()), late);
+        pending.push(vec![completed("b.bin")], Some("zh".to_owned()), late);
         assert_eq!(pending.flush_at, Some(start + NOTIFY_MAX_WAIT));
         assert_eq!(pending.file_names, ["a.bin", "b.bin"]);
+        assert_eq!(pending.last_path, completed("b.bin").path);
         assert_eq!(pending.locale.as_deref(), Some("zh"));
+    }
+
+    fn completed(name: &str) -> CompletedFile {
+        CompletedFile {
+            name: name.to_owned(),
+            path: Some(std::env::temp_dir().join(name)),
+        }
+    }
+
+    #[test]
+    fn batch_without_final_path_never_targets_an_earlier_file() {
+        let mut pending = PendingCompletions::default();
+        let now = tokio::time::Instant::now();
+        pending.push(vec![completed("a.bin")], None, now);
+        pending.push(
+            vec![CompletedFile {
+                name: "b.bin".into(),
+                path: None,
+            }],
+            None,
+            now,
+        );
+        assert_eq!(pending.last_path, None);
+        assert_eq!(pending.file_names, ["a.bin", "b.bin"]);
     }
 
     #[test]
@@ -387,7 +439,7 @@ mod tests {
             "taskId": task_id,
             "url": "https://example.com/file",
             "fileName": format!("{task_id}.bin"),
-            "saveDir": "/tmp",
+            "saveDir": std::env::temp_dir(),
             "status": status,
             "downloadedBytes": 0,
             "totalBytes": 100,
@@ -415,7 +467,10 @@ mod tests {
 
         // a 从下载中转为完成：恰好通知一次，重复帧不再通知。
         snapshot.daemon.tasks = vec![task("a", 3)?, task("b", 3)?];
-        assert_eq!(take_new_completions(&snapshot, &mut statuses), ["a.bin"]);
+        assert_eq!(
+            take_new_completions(&snapshot, &mut statuses),
+            [completed("a.bin")]
+        );
         assert!(take_new_completions(&snapshot, &mut statuses).is_empty());
 
         // b 被删除后以同 id 重新出现并直接是完成态：视为新任务，不通知。

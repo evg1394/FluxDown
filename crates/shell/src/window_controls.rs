@@ -23,11 +23,6 @@ use gpui_component::{
 /// 单个控制按钮的宽度：与 gpui-component 的窗口控制按钮一致。
 const CONTROL_WIDTH: Pixels = TITLE_BAR_HEIGHT;
 
-/// 固定尺寸窗口自绘控制区（最小化 + 关闭）占用的宽度。
-pub(crate) fn controls_width() -> Pixels {
-    CONTROL_WIDTH * 2.
-}
-
 #[derive(Clone, Copy)]
 enum Control {
     Minimize,

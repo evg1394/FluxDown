@@ -1,56 +1,61 @@
 ---
-description: Rust 代码禁止 unsafe（块 / fn / impl / extern），只允许已批准的平台 FFI 兜底
+description: Rust 默认安全；仅允许经审查、无语义等价安全替代的平台 FFI 边界
 condition:
   - '\bunsafe\s*\{'
   - '\bunsafe\s+(fn|impl|trait|extern)\b'
-astCondition:
-  - 'unsafe { $$$BODY }'
+  - '\bunsafe\s*\('
 globs:
   - native/**/*.rs
   - crates/**/*.rs
+  - scripts/**/*.rs
 repeatMode: after-gap
 repeatGap: 2
 ---
 
-你正在往 FluxDown 的 Rust 代码写入 `unsafe`。项目红线：**全部代码默认安全**，`unsafe` 只在「没有安全替代」的平台 FFI 场景被批准，且必须满足下面全部条件。
+项目维护的 Rust 源码（含测试、构建脚本与开发工具）默认安全。`unsafe` 块、函数、impl、extern 和属性都必须审查；文件出现在下文不等于整文件豁免。
 
-## 先自问：真的没有安全写法吗
+## 先排除语义等价的安全实现
 
-`unsafe` 在本项目里几乎总是错误答案。先按顺序排除：
+1. 优先 std：`std::env::home_dir`、文件元数据、Windows `MetadataExt::file_attributes`、`CStr::from_bytes_until_nul`、`CommandExt::creation_flags` 等。本地拥有的字节缓冲不得再用裸指针重建切片或字符串。
+2. 复用当前 crate **已有直接依赖及启用的 feature**：`directories`、`fs2`、`tokio::fs`、`objc2` 的安全 downcast、`windows` 的类型化 COM RAII。传递依赖不是直接依赖；新增依赖仍须用户确认，不为去 unsafe 私自扩充依赖或改变 headless feature 边界。
+3. 安全替代必须保留实际语义：物理分配与 `set_len` 不等价；核对锁定依赖实现、错误码、符号链接、路径存在性、整数宽度、并发写与权限。不得为减少关键字引入错误或无谓分配、复制、系统调用。
+4. 所有权、生命周期和线程归属优先由类型表达。禁止 `transmute` / `from_raw_parts`；纯 Rust 数据处理不能借 FFI 例外使用 unsafe。
 
-1. **std 已有安全 API**：`File::set_len` / `sync_all`、`std::fs::metadata`、`OsString` / `CString` / `Path` 转换、`std::process::Command` + `CommandExt::creation_flags`（Windows 隐藏黑窗）——都不需要 `unsafe`。
-2. **已是直接依赖的安全封装**（无需新增依赖）：`directories`（home / 数据目录，engine / cli / agent / `crates/app` 已用）、`fs2`（`FileExt::allocate` 预分配、`available_space` 磁盘余量、文件锁；engine / daemon / agent / server 已用）、`tokio::fs`。其他 crate（`nix` / `rustix` / `sysinfo` / `core-foundation`）只是传递依赖，**不许**为了绕过 `unsafe` 直接引入——新增依赖需用户确认。
-3. **改设计**：能靠 `Result` / `Option` / 生命周期表达的，就不该靠裸指针；「性能」不是理由，先测量。
-4. **类型转换**：`bytemuck` / `zerocopy` 不是直接依赖，`transmute` / `from_raw_parts` / `slice::from_raw_parts` 一律禁止；改用 `to_le_bytes` / `from_le_bytes` / `chunks_exact` 等安全 API。
+### 已核实的 fs2 0.4.3 限制
 
-以上任一路走得通 → 删掉 `unsafe`，重写。
+- Linux `allocate` 使用 `posix_fallocate`，其错误码不能用 `last_os_error` 取得；glibc 仿真与当前只写句柄、并发扩容不等价。保留直接 `fallocate`，不改为写零仿真或全量 `set_len`。
+- Apple 空间查询须保留 64 位 `statfs`；fs2 的 `statvfs` 使用 32 位可用块数，后置转 u64 不能修复大卷截断。其他 Unix 当前用饱和乘法，fs2 的普通乘法也不能无条件替换。
+- Windows fs2 空间查询并非 `GetDiskFreeSpaceExW`，路径及容量语义不同；`allocate` 还混合分配查询、EOF 修改与错误，不可直接替换既有后备分配策略。依赖升级后重新核对，不把这些限制当永久豁免。
 
-## 唯一被批准的例外：无安全封装的平台 FFI
+## 必要平台边界的准入条件
 
-只有「调用操作系统 C API，且 std 与现有依赖都没有安全封装」才允许，且**必须同时满足**：
+只有无语义等价安全替代的平台操作才允许，且全部满足：
 
-- `#[cfg(target_os = …)]` / `#[cfg(unix)]` / `#[cfg(windows)]` 门控，非该平台零 `unsafe`。
-- **每个 `unsafe` 块紧上方一行 `// SAFETY:` 注释**，写清被满足的前置条件（指针有效期、NUL 结尾、所有权归属、谁负责释放）。没有 SAFETY 注释 = 违规。
-- `unsafe` 块**只包住那一条 FFI 调用**，参数准备、返回值检查、错误转换全放在块外；禁止把整段逻辑塞进一个大 `unsafe {}`。
-- 对外暴露的是**安全函数**（签名无 `unsafe`），内部把 FFI 的失败映射为 `Result` / `Option`；禁止新增 `pub unsafe fn`。
-- 资源型句柄（`CFStringRef`、`HGLOBAL`、`HANDLE`、`LocalAlloc` 内存）必须用 RAII 守卫（参考 `native/hub/src/macos_cf.rs::CfOwned`、`native/hub/src/clipboard_file.rs` 的剪贴板 guard），不许裸 `Release/Free` 散落在各分支。
-- `unsafe extern "C" {}` / `unsafe extern "system" {}` 只声明当前文件确实调用的符号；能用 `windows_sys` 已导出的绑定就不要手写 `extern`。
-- 禁止 `unsafe impl Send/Sync`：类型跨线程不安全就换结构（`Arc<Mutex<_>>`、消息通道），不要用 `unsafe impl` 把问题盖住。
+- 用目标平台 `cfg` 门控；桌面特有依赖同时尊重 feature 边界。
+- 每个 unsafe 块、unsafe impl 和 ABI 属性都有**紧邻的 `// SAFETY:` 注释块**；多行注释合法，必须解释实际前置条件，而非只写“FFI”。unsafe 函数另以 `# Safety` 文档声明调用契约；extern 声明说明 ABI 来源。
+- 块内仅一项必要不安全操作；参数准备、分支和错误处理在块外。除调用外，仅允许同一边界必要的外部常量读取、有效回调指针短期借用、已成功初始化的 FFI 输出读取。它们各自需要生命周期/初始化证明，不能假称 `assume_init` 是安全 API。
+- Objective-C 协议 impl/方法属性必须核对 selector、ABI、回调线程和完成回调恰好一次；不得借此新增 `unsafe impl Send/Sync`。
+- 对外提供安全业务函数并消费失败；不得暴露可接管任意裸指针的 safe 构造器，也不得以 `pub unsafe fn` 把义务转嫁给调用者。私有边界辅助函数若确需 unsafe，必须声明完整契约并在调用处证明。
+- 拥有引用与借用引用分开、字符串与数组等不同资源类型分开；借用不能逃逸所有者生命周期，不能从借用复制出第二个 owner。仅判空或改成 NonNull 不足以证明安全。
+- 拥有的 CF/COM/GDI/PIDL 资源立即进入 RAII；线程受限守卫必须 !Send/!Sync，相关对象先于 apartment 释放。初始化失败必须停止依赖它的操作，不允许继续执行后再记录“不可用”。
+- 所有返回状态都处理，包括未标记 must_use 的 C 整数/BOOL；按 API 契约区分直接错误码与 last_os_error。Drop 清理失败记录而不 panic，禁止把错误哨兵当作属性或尺寸。
+- 复用现有绑定；手写 extern 只声明实际调用的符号。
 
-**已批准的存量 FFI 站点**（改这些文件时保持现有形态，不扩大范围）：
+## 已审查的边界坐标
 
-|位置|用途|
+|位置|必要语义；不是目录级自由授权|
 |---|---|
-|`native/engine/src/segment_coordinator.rs`|`libc::fallocate` / `posix_fadvise` / Win32 `SetFileInformationByHandle` 预分配|
-|`native/engine/src/disk_space.rs`|`libc::statvfs` / `statfs` / `GetDiskFreeSpaceExW` 磁盘余量|
-|`native/engine/src/bt_sparse.rs`、`bt_downloader.rs`|Win32 `DeviceIoControl(FSCTL_SET_SPARSE)` / `GetFileAttributesW`|
-|`native/agent/src/platform/*`|macOS CoreFoundation / LaunchServices、Win32 `SHChangeNotify`|
-|`native/nmh/src/main.rs`|进程等待 / 枚举（`OpenProcess` / Toolhelp / `libc::kill`）|
+|`native/engine/src/segment_coordinator.rs`|Linux fallocate / fadvise，Windows 非 sparse 后备物理分配；不能改变并发扩容或错误策略|
+|`native/engine/src/disk_space.rs`|64 位/饱和空间计算与 Windows 目录语义|
+|`native/engine/src/bt_sparse.rs`、`bt_downloader.rs`|置 sparse / HIDDEN 属性；读取属性用 std|
+|`native/agent/src/platform/macos_cf.rs`|CF/LaunchServices 单一所有权边界；调用方不得操作裸 CF 引用|
+|`native/agent/src/platform/`|系统图标、Shell 定位/关联变更、COM 生命周期；每项遵守上述约束|
+|`native/agent/src/notification/`|macOS UserNotifications ABI 与 Windows WinRT apartment；已有安全接口优先|
 
-**engine crate 之外的下载逻辑、`native/api`、`native/protocol`、`native/daemon`、`native/server`、`crates/*`（GPUI）一律零 `unsafe`**——这些 crate 目前没有任何 `unsafe`，不要成为第一个。
+`native/{api,protocol,daemon,server}`、`crates/*`（GPUI）、`native/nmh`、`scripts/desktop-dev` 的项目源码保持零 unsafe；冻结 server 不改动。测试不自动豁免：先用安全 API，确需独立平台 oracle 才保留最小 FFI 并检查失败。
 
-## 修正方式
+## 防止回归
 
-- 有安全替代 → 直接用安全写法重写，删掉 `unsafe`。
-- 确属平台 FFI 例外 → 按上面清单补齐：`cfg` 门控 + `// SAFETY:` + 最小 `unsafe` 范围 + 安全外层函数 + RAII 守卫，并在回复里向用户**明确说明为何没有安全替代**。
-- 测试代码（`#[cfg(test)]` / `tests/`）同样适用；只有验证平台行为的 Windows 专属测试（如 `native/engine/tests/bt_sparse_add.rs`）可沿用既有形态。
+- workspace deny `unsafe_op_in_unsafe_fn` 与 `clippy::undocumented_unsafe_blocks`；NMH 以 `forbid(unsafe_code)` 锁定安全实现。不得 allow/命令行关闭这些检查来消音。
+- 源码扫描不覆盖第三方实现及宏展开。hub 的 Rinf ABI 宏是独立审计边界，不能把手写源码零 unsafe 宣称为整个产物零 unsafe，也不要另写第二套 ABI。
+- 验证实际目标与 feature：macOS 编译通过不证明 Windows cfg 已编译；没有目标运行环境时明确报告限制。规则准入变更同步根 AGENTS.md、RULES.md 与 WATCHDOG.md，避免相互矛盾。

@@ -22,6 +22,8 @@
 //!   - Diagnostic log is written to `%TEMP%/fluxdown_nmh.log`.
 //!   - Message size limit: 1 MB (Chrome NMH hard limit).
 
+#![forbid(unsafe_code)]
+
 use serde::{Deserialize, Serialize};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
@@ -239,60 +241,17 @@ fn chrono_free_timestamp() -> String {
 }
 
 // ---------------------------------------------------------------------------
-// Home directory resolution (macOS: getpwuid fallback for launchd env)
+// Home directory resolution (macOS: std passwd fallback for launchd env)
 // ---------------------------------------------------------------------------
 
 /// Returns the current user's home directory.
 ///
 /// On macOS, Chrome/Firefox launch the NMH process via launchd, which may
-/// strip $HOME from the environment. Fall back to the passwd database via
-/// getpwuid(getuid()) to get the correct home directory in all cases.
+/// strip $HOME from the environment. The standard library falls back to the
+/// passwd database and preserves non-UTF-8 filesystem paths.
 #[cfg(target_os = "macos")]
 fn home_dir() -> Option<PathBuf> {
-    // Fast path: $HOME is set (terminal / direct invocation).
-    if let Ok(h) = std::env::var("HOME")
-        && !h.is_empty()
-    {
-        return Some(PathBuf::from(h));
-    }
-
-    // Slow path: query the passwd database. Safe to call from any thread
-    // because we use the re-entrant getpwuid_r variant.
-    use std::ffi::CStr;
-    let uid = unsafe { libc::getuid() };
-    let buf_size = unsafe { libc::sysconf(libc::_SC_GETPW_R_SIZE_MAX) };
-    let buf_size = if buf_size > 0 {
-        buf_size as usize
-    } else {
-        1024
-    };
-    let mut buf = vec![0i8; buf_size];
-    let mut pwd = std::mem::MaybeUninit::<libc::passwd>::uninit();
-    let mut result: *mut libc::passwd = std::ptr::null_mut();
-
-    let ret = unsafe {
-        libc::getpwuid_r(
-            uid,
-            pwd.as_mut_ptr(),
-            buf.as_mut_ptr(),
-            buf_size,
-            &mut result,
-        )
-    };
-
-    if ret == 0 && !result.is_null() {
-        let pwd = unsafe { pwd.assume_init() };
-        if !pwd.pw_dir.is_null() {
-            let cstr = unsafe { CStr::from_ptr(pwd.pw_dir) };
-            if let Ok(s) = cstr.to_str()
-                && !s.is_empty()
-            {
-                return Some(PathBuf::from(s));
-            }
-        }
-    }
-
-    None
+    std::env::home_dir().filter(|home| !home.as_os_str().is_empty())
 }
 
 /// Returns the current user's home directory on Linux.

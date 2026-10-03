@@ -39,7 +39,9 @@ use crate::{
         dispatch::DispatchSummary,
         format_bytes,
         row_order::RowOrder,
-        view_prefs::{DateBucket, SortDir, ViewGroupBy, ViewPrefs, ViewSortKey, state_group_key},
+        view_prefs::{
+            DateBucket, SortDir, ViewDensity, ViewGroupBy, ViewPrefs, ViewSortKey, state_group_key,
+        },
     },
     pages::downloads::DownloadView,
     strings::{DownloadStrings, error_text},
@@ -1437,7 +1439,7 @@ impl DownloadTableDelegate {
                     .color(muted)
                     .into_any_element();
             }
-            // 舒适双行给系统图标更大的尺寸（与两行文字等高感），紧凑单行与文字同高。
+            // 双行密度给系统图标更大的尺寸（与两行文字等高感），紧凑单行与文字同高。
             let size = if self.prefs.density.two_line() {
                 icon_sizes.lg * FILE_ICON_COMFORTABLE_SCALE
             } else {
@@ -1538,6 +1540,9 @@ impl DownloadTableDelegate {
             .size_full()
             .min_w_0()
             .justify_center()
+            .when(self.prefs.density == ViewDensity::Relaxed, |this| {
+                this.gap(tokens.spacing.xs)
+            })
             .child(
                 div()
                     .min_w_0()
@@ -1562,7 +1567,7 @@ impl DownloadTableDelegate {
             .into_any_element()
     }
 
-    /// 活动列：主文案按状态着色（仅下载中 primary、失败 destructive），舒适密度
+    /// 活动列：主文案按状态着色（仅下载中 primary、失败 destructive），双行密度
     /// 第二行给详情；紧凑密度把详情放进悬停提示，失败总是提示完整原因。
     fn render_status_cell(&self, task: &DownloadTaskView, cx: &App) -> AnyElement {
         let theme = active_theme(cx);
@@ -1584,6 +1589,9 @@ impl DownloadTableDelegate {
             .size_full()
             .min_w_0()
             .justify_center()
+            .when(self.prefs.density == ViewDensity::Relaxed, |this| {
+                this.gap(theme.tokens().spacing.xs)
+            })
             .text_size(typography.xs.size)
             .line_height(typography.xs.line_height)
             .font_features(tabular_numbers())
@@ -2368,18 +2376,23 @@ impl TableDelegate for DownloadTableDelegate {
             .h(row_height)
             .group(ROW_GROUP)
             .relative()
-            .when(selected, |this| {
-                this.child(
-                    div()
-                        .absolute()
-                        .top_0()
-                        .bottom_0()
-                        .left(px(SELECTED_INSET_X))
-                        .right(px(SELECTED_INSET_X))
-                        .rounded(radius)
-                        .bg(accent),
-                )
-            })
+            // 覆盖 DataTable 自带的满宽悬浮底色，两种状态共用内缩背景。
+            .child(div().absolute().inset_0().bg(theme.tokens().colors.surface))
+            .child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .bottom_0()
+                    .left(px(SELECTED_INSET_X))
+                    .right(px(SELECTED_INSET_X))
+                    .rounded(radius)
+                    .when(selected, |this| this.bg(accent))
+                    .when(!selected, |this| {
+                        this.group_hover(ROW_GROUP, |style| {
+                            style.bg(theme.extended().colors.row_hover)
+                        })
+                    }),
+            )
             .on_click(cx.listener(move |table, event: &ClickEvent, _, cx| {
                 table
                     .delegate_mut()

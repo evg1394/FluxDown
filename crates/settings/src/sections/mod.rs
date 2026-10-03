@@ -12,6 +12,7 @@ pub(crate) mod category_dialog;
 pub(crate) mod doctor;
 pub(crate) mod download;
 pub(crate) mod ed2k;
+mod font_family;
 pub(crate) mod general;
 pub(crate) mod notify;
 pub(crate) mod proxy;

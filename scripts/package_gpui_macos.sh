@@ -134,9 +134,9 @@ cat >"$HPL" <<EOF
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
 	<key>CFBundleName</key>
-	<string>FluxDown Agent</string>
+	<string>FluxDown</string>
 	<key>CFBundleDisplayName</key>
-	<string>FluxDown Agent</string>
+	<string>FluxDown</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>

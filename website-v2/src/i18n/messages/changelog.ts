@@ -31,7 +31,7 @@ export const changelog = defineMessages({
     copied: "Copied",
     permalink: (version: string) => `Link to ${version}`,
     downloads: (n: number) => `Downloads · ${n} file${n === 1 ? "" : "s"}`,
-    assetsNote: "Links go through our download endpoint, which redirects to a mirror of the GitHub release files or to GitHub itself.",
+    assetsNote: "Downloads use GitHub by default. If a download fails or is too slow, use the backup link for the same file.",
     textHeader: (tag: string) => `FluxDown ${tag} release notes`,
     asset: {
       installer: "installer",
@@ -72,7 +72,7 @@ export const changelog = defineMessages({
     copied: "已复制",
     permalink: (version: string) => `${version} 的链接`,
     downloads: (n: number) => `下载 · ${n} 个文件`,
-    assetsNote: "链接经由本站下载端点,重定向到 GitHub Release 文件的镜像或 GitHub 本身。",
+    assetsNote: "默认通过 GitHub 下载。无法下载或速度过慢时，可使用同一文件的备用下载链接。",
     textHeader: (tag: string) => `FluxDown ${tag} 更新日志`,
     asset: {
       installer: "安装包",

@@ -10,7 +10,7 @@ use gpui::{
     StatefulInteractiveElement as _, Styled, Window, div, px,
 };
 use gpui_component::{
-    Icon,
+    Icon, WindowExt as _,
     button::{Button, ButtonVariants as _},
     h_flex,
     menu::{DropdownMenu as _, PopupMenuItem},
@@ -19,10 +19,71 @@ use gpui_component::{
 
 use crate::{
     components::task_table::{SELECTION_COLUMN_WIDTH, TABLE_HEADER_HEIGHT, ToolbarCommand},
+    model::{RowKey, TaskState, TaskStore},
     pages::downloads::DownloadView,
 };
 
+fn retain_stale_tasks(store: &TaskStore, keys: &mut Vec<RowKey>) {
+    keys.retain(|key| {
+        store.get(key).is_some_and(|row| {
+            if key.is_local() {
+                row.state == TaskState::Failed || row.is_file_missing()
+            } else {
+                row.remote_status == Some(fluxdown_protocol::RemoteTaskStatus::Failed)
+            }
+        })
+    });
+}
+
 impl DownloadView {
+    fn selected_stale_keys(&self, cx: &gpui::App) -> Vec<RowKey> {
+        let mut keys = self.table_state.read(cx).delegate().selected_keys();
+        retain_stale_tasks(self.controller.store(), &mut keys);
+        keys
+    }
+
+    fn confirm_clean_stale_tasks(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let keys = self.selected_stale_keys(cx);
+        if keys.is_empty() || self.controller.is_stale() {
+            return;
+        }
+        let title = self.strings.clean_stale_tasks.clone();
+        let description = self
+            .strings
+            .clean_stale_tasks_description
+            .replace("{count}", &keys.len().to_string());
+        let ok_label = self.strings.confirm.clone();
+        let cancel_label = self.strings.cancel.clone();
+        let view = cx.weak_entity();
+        window.open_alert_dialog(cx, move |dialog, _, cx| {
+            let view = view.clone();
+            let keys = keys.clone();
+            dialog
+                .title(fluxdown_ui_components::dialog_title(title.clone(), cx))
+                .description(description.clone())
+                .footer(fluxdown_ui_components::dialog_footer(
+                    Some(cancel_label.clone()),
+                    ok_label.clone(),
+                    fluxdown_ui_components::DialogIntent::Destructive,
+                    cx,
+                ))
+                .on_ok(move |_, _, cx| {
+                    view.update(cx, |this, cx| {
+                        if this.controller.is_stale() {
+                            return false;
+                        }
+                        // 固定确认时的候选集合，跳过期间已恢复下载或文件已找回的任务。
+                        let mut keys = keys.clone();
+                        retain_stale_tasks(this.controller.store(), &mut keys);
+                        let commands = this.delete_commands(&keys, false);
+                        this.execute_commands(commands, cx);
+                        true
+                    })
+                    .unwrap_or(false)
+                })
+        });
+    }
+
     /// chrome 风格图标按钮 + 悬浮提示；`on_click` 在下载页上下文执行。
     pub(crate) fn icon_action(
         &self,
@@ -60,7 +121,7 @@ impl DownloadView {
             .into_any_element()
     }
 
-    /// 删除入口：下拉区分「删除任务」与「删除任务和文件」（后者二次确认）。
+    /// 删除入口：普通删除、删除文件，以及只清理选区内的无效任务。
     fn selection_delete_menu(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = active_theme(cx);
         let tokens = theme.tokens();
@@ -69,6 +130,7 @@ impl DownloadView {
         let icon_size = theme.extended().icon.md;
         let delete_task = self.strings.delete_task.clone();
         let delete_with_files = self.strings.delete_task_and_file.clone();
+        let clean_stale_tasks = self.strings.clean_stale_tasks.clone();
         let view = cx.weak_entity();
         div()
             .flex_none()
@@ -83,7 +145,11 @@ impl DownloadView {
                             .size(icon_size)
                             .text_color(destructive),
                     )
-                    .dropdown_menu_with_anchor(Anchor::TopLeft, move |menu, _, _| {
+                    .dropdown_menu_with_anchor(Anchor::TopLeft, move |menu, _, cx| {
+                        let cleanup_disabled = view.upgrade().is_none_or(|view| {
+                            let this = view.read(cx);
+                            this.controller.is_stale() || this.selected_stale_keys(cx).is_empty()
+                        });
                         menu.item(
                             PopupMenuItem::new(delete_task.clone())
                                 .icon(FluxIcon::Trash2)
@@ -109,6 +175,23 @@ impl DownloadView {
                                             this.delete_selected_with_files(window, cx);
                                         }) else {
                                             // 视图已释放，结束这次回调而不再更新状态。
+                                            return;
+                                        };
+                                    }
+                                }),
+                        )
+                        .separator()
+                        .item(
+                            PopupMenuItem::new(clean_stale_tasks.clone())
+                                .icon(FluxIcon::Trash2)
+                                .disabled(cleanup_disabled)
+                                .on_click({
+                                    let view = view.clone();
+                                    move |_, window, cx| {
+                                        let Ok(()) = view.update(cx, |this, cx| {
+                                            this.confirm_clean_stale_tasks(window, cx);
+                                        }) else {
+                                            // 视图已释放，不再发起清理。
                                             return;
                                         };
                                     }
@@ -239,5 +322,112 @@ impl DownloadView {
                 .child(clear)
                 .into_any_element(),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::retain_stale_tasks;
+    use crate::model::{DownloadTaskView, RowKey, TaskStore};
+
+    fn local(id: &str, status: i32, missing: bool) -> DownloadTaskView {
+        let dto = serde_json::from_value::<fluxdown_protocol::TaskDto>(serde_json::json!({
+            "taskId": id, "url": "https://example.com/file", "fileName": "file.bin",
+            "saveDir": "/tmp", "status": status, "downloadedBytes": 0, "totalBytes": 1,
+            "errorMessage": "", "createdAt": "1", "proxyUrl": "", "queueId": "main",
+            "checksum": "", "fileMissing": missing
+        }))
+        .expect("task");
+        DownloadTaskView::local(&dto, None, false)
+    }
+
+    fn keys(ids: &[&str]) -> Vec<RowKey> {
+        ids.iter().map(|id| RowKey::Local((*id).into())).collect()
+    }
+
+    #[test]
+    fn cleanup_filters_selection_without_touching_healthy_or_active_tasks() {
+        let store = TaskStore::default();
+        store.replace_local(vec![
+            local("failed", 4, false),
+            local("missing", 3, true),
+            local("complete", 3, false),
+            local("paused", 2, true),
+            local("downloading", 1, true),
+            local("pending", 0, true),
+            local("preparing", 5, true),
+            local("unselected", 4, false),
+        ]);
+        let mut selected = keys(&[
+            "failed",
+            "missing",
+            "complete",
+            "paused",
+            "downloading",
+            "pending",
+            "preparing",
+            "removed",
+        ]);
+        retain_stale_tasks(&store, &mut selected);
+        assert_eq!(selected, keys(&["failed", "missing"]));
+        let mut empty = Vec::new();
+        retain_stale_tasks(&store, &mut empty);
+        assert!(empty.is_empty());
+    }
+
+    #[test]
+    fn cleanup_rechecks_candidates_without_adding_new_failures() {
+        let store = TaskStore::default();
+        store.replace_local(vec![
+            local("resumed", 4, false),
+            local("restored", 3, true),
+            local("still-failed", 4, false),
+            local("later-failed", 1, false),
+            local("removed", 4, false),
+        ]);
+        let mut candidates = keys(&[
+            "resumed",
+            "restored",
+            "still-failed",
+            "later-failed",
+            "removed",
+        ]);
+        retain_stale_tasks(&store, &mut candidates);
+        store.replace_local(vec![
+            local("resumed", 1, false),
+            local("restored", 3, false),
+            local("still-failed", 4, false),
+            local("later-failed", 4, false),
+        ]);
+        retain_stale_tasks(&store, &mut candidates);
+        assert_eq!(candidates, keys(&["still-failed"]));
+    }
+
+    #[test]
+    fn cleanup_remote_tasks_requires_explicit_failed_status() {
+        let store = TaskStore::default();
+        let rows: Vec<_> = [
+            "failed",
+            "canceled",
+            "completed",
+            "paused",
+            "downloading",
+            "pending",
+            "new-status",
+        ]
+        .into_iter()
+        .map(|status| {
+            let dto =
+                serde_json::from_value::<fluxdown_protocol::RemoteTaskDto>(serde_json::json!({
+                    "id": status, "url": "https://example.com/file", "status": status,
+                }))
+                .expect("remote task");
+            DownloadTaskView::remote(&dto)
+        })
+        .collect();
+        let mut selected = rows.iter().map(|row| row.key.clone()).collect();
+        store.replace_remote(rows);
+        retain_stale_tasks(&store, &mut selected);
+        assert_eq!(selected, [RowKey::Remote("failed".into())]);
     }
 }

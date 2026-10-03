@@ -1,7 +1,7 @@
 //! 设备分组：云账号受信任设备（在线状态 / 重命名 / 删除 / 详情 / 管理全部）
 //! 与局域网已配对设备（在线 / 解除配对 / 刷新），以及「添加设备」入口。
 
-use fluxdown_protocol::{CloudDevice, LinkDeviceInfo};
+use fluxdown_protocol::{CloudConnectionState, CloudDevice, LinkDeviceInfo};
 use fluxdown_ui_components::{
     Button as BaseButton, ButtonVariant, FluxIcon, IconControlExt as _, button, card,
 };
@@ -75,10 +75,43 @@ fn render_cloud(
 ) -> impl IntoElement {
     let title = t(translator, "accountDevicesTitle");
     let desc = t(translator, "accountDevicesDesc");
-    let retry_label = t(translator, "accountDevicesRetry");
+    let controller = &state.host.read(cx).controller;
+    let retry_label = t(
+        translator,
+        if controller.cloud_connected() {
+            "accountDevicesRetry"
+        } else {
+            "cloudConnectionRetry"
+        },
+    );
+    let connection = controller.cloud_connection();
+    let status_key = if controller.is_stale() {
+        "localServiceDisconnected"
+    } else {
+        match connection.state {
+            CloudConnectionState::Connected => "cloudConnectionConnected",
+            CloudConnectionState::Connecting => "cloudConnectionConnecting",
+            CloudConnectionState::Reconnecting => "cloudConnectionReconnecting",
+            CloudConnectionState::Disconnected => "cloudConnectionDisconnected",
+        }
+    };
+    let error_key = (!controller.is_stale()
+        && !controller.cloud_connected()
+        && (connection.last_error.is_some() || connection.last_error_reason.is_some()))
+    .then(|| {
+        connection
+            .last_error_reason
+            .and_then(|reason| {
+                crate::errors::reason_key(reason, crate::errors::ErrorContext::General)
+            })
+            .unwrap_or("accountErrorNetwork")
+    });
     let empty_label = t(translator, "accountDevicesEmpty");
     let extended = active_theme(cx).extended().clone();
-    let (visible, hidden) = summarize(state.devices);
+    let (visible, hidden) = summarize(
+        state.devices,
+        !controller.is_stale() && controller.cloud_connected(),
+    );
     let host = state.host.clone();
     let disabled = state.disabled;
     let refreshing = state.refreshing;
@@ -138,6 +171,12 @@ fn render_cloud(
                         ),
                 ),
         )
+        .child(ui::group_heading(
+            t(translator, status_key),
+            Some(t(translator, "cloudConnectionStatusHint")),
+            cx,
+        ))
+        .children(error_key.map(|key| ui::group_heading(t(translator, key), None, cx)))
         .child(card(cx).w_full().map(|card| {
             if rows.is_empty() {
                 card.p(tokens.spacing.lg).flex().justify_center().child(
@@ -313,11 +352,7 @@ pub(crate) fn device_row(
         (device.clone(), device.clone(), device.clone());
     let status = t(
         translator,
-        if device.is_online {
-            "deviceOnline"
-        } else {
-            "deviceOffline"
-        },
+        host.read(cx).controller.device_presence_key(device),
     );
 
     div()
@@ -336,7 +371,10 @@ pub(crate) fn device_row(
                         .min_w_0()
                         .items_center()
                         .gap(tokens.spacing.sm)
-                        .child(presence_dot(device.is_online, cx))
+                        .child(presence_dot(
+                            host.read(cx).controller.device_presence(device) == Some(true),
+                            cx,
+                        ))
                         .child(
                             v_flex()
                                 .min_w_0()
@@ -433,7 +471,9 @@ fn linked_row(
     let subtitle = [
         t(
             translator,
-            if device.online {
+            if host.read(cx).controller.is_stale() {
+                "devicePresenceUnknown"
+            } else if device.online {
                 "deviceOnline"
             } else {
                 "deviceOffline"
@@ -469,7 +509,10 @@ fn linked_row(
                         .min_w_0()
                         .items_center()
                         .gap(tokens.spacing.sm)
-                        .child(presence_dot(device.online, cx))
+                        .child(presence_dot(
+                            !host.read(cx).controller.is_stale() && device.online,
+                            cx,
+                        ))
                         .child(
                             v_flex()
                                 .min_w_0()

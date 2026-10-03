@@ -138,6 +138,8 @@ pub const AGENT_GATEWAY_PATCH: &str = "agent.gateway.patch";
 /// 仅供本机官方 UI 展示/复制用户 token；结果 `{ "userToken": "..." }`（未配置为空串）。
 pub const AGENT_GATEWAY_REVEAL_TOKEN: &str = "agent.gateway.revealToken";
 pub const AGENT_DEVICE_LIST: &str = "agent.device.list";
+/// 请求立即重连任务 SSE；返回 `{ "accepted": true }` 不表示已经连接成功。
+pub const AGENT_REMOTE_RECONNECT: &str = "agent.remote.reconnect";
 pub const AGENT_DEVICE_RENAME: &str = "agent.device.rename";
 pub const AGENT_DEVICE_DELETE: &str = "agent.device.delete";
 pub const AGENT_PREFERENCES_PATCH: &str = "agent.preferences.patch";
@@ -352,6 +354,7 @@ pub const ALL_METHODS: &[&str] = &[
     AGENT_GATEWAY_PATCH,
     AGENT_GATEWAY_REVEAL_TOKEN,
     AGENT_DEVICE_LIST,
+    AGENT_REMOTE_RECONNECT,
     AGENT_DEVICE_RENAME,
     AGENT_DEVICE_DELETE,
     AGENT_PREFERENCES_PATCH,

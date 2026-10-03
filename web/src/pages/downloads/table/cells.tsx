@@ -5,6 +5,7 @@ import { cn } from '../../../lib/cn'
 import { Icon } from '../../../ui'
 import { percentLabel, sourceSite } from '../model/task'
 import type { DownloadTaskView } from '../model/task'
+import type { ViewDensity } from '../model/viewPrefs'
 import { SegmentProgress } from './SegmentProgress'
 import { KIND_ICON, kindLabel, statusDetail, statusLabel, STATUS_TEXT } from './text'
 import type { Translate } from './text'
@@ -17,11 +18,12 @@ export function KindGlyph({ view, className }: { view: DownloadTaskView; classNa
   )
 }
 
-export function FileCell({ t, view, twoLine }: { t: Translate; view: DownloadTaskView; twoLine: boolean }) {
+export function FileCell({ t, view, density }: { t: Translate; view: DownloadTaskView; density: ViewDensity }) {
+  const twoLine = density !== 'compact'
   const site = sourceSite(view)
   const category = kindLabel(t, view.kind)
   return (
-    <div className="flex min-w-0 flex-col justify-center">
+    <div className={cn('flex min-w-0 flex-col justify-center', density === 'relaxed' && 'gap-[var(--fx-spacing-xs)]')}>
       <div
         className={cn('truncate text-sm', view.metadataPending ? 'text-muted-foreground' : 'text-foreground')}
         title={view.metadataPending ? undefined : view.name}
@@ -35,12 +37,13 @@ export function FileCell({ t, view, twoLine }: { t: Translate; view: DownloadTas
   )
 }
 
-export function StatusCell({ t, view, twoLine }: { t: Translate; view: DownloadTaskView; twoLine: boolean }) {
+export function StatusCell({ t, view, density }: { t: Translate; view: DownloadTaskView; density: ViewDensity }) {
+  const twoLine = density !== 'compact'
   const detail = statusDetail(t, view)
   const failedError = view.state === 'failed' && view.errorMessage.trim() !== ''
   const tooltip = failedError ? view.errorMessage : twoLine ? undefined : (detail ?? undefined)
   return (
-    <div className="tabular flex min-w-0 flex-col justify-center text-xs" title={tooltip}>
+    <div className={cn('tabular flex min-w-0 flex-col justify-center text-xs', density === 'relaxed' && 'gap-[var(--fx-spacing-xs)]')} title={tooltip}>
       <div className={cn('truncate', STATUS_TEXT[view.state])}>{statusLabel(t, view)}</div>
       {twoLine && detail ? <div className="truncate text-text-tertiary">{detail}</div> : null}
     </div>

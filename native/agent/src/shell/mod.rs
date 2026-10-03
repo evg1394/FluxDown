@@ -49,6 +49,7 @@ pub enum TrayAvailability {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TrayAction {
     ShowWindow,
+    ShowSettings,
     PauseAll,
     ResumeAll,
     CancelShutdown,
@@ -65,6 +66,7 @@ pub enum TrayAction {
 pub struct TrayModel {
     pub visible: bool,
     pub show_window: String,
+    pub settings: String,
     pub pause_all: String,
     pub resume_all: String,
     /// `Some` 时显示「取消完成后关机」菜单项。
@@ -416,6 +418,11 @@ async fn handle_action(
 ) {
     match action {
         TrayAction::ShowWindow => state.show_window(),
+        TrayAction::ShowSettings => {
+            if let Err(error) = crate::platform::launch_desktop(&["--settings"]) {
+                tracing::warn!(error = %error, "could not launch desktop settings");
+            }
+        }
         TrayAction::PauseAll => call_daemon(daemon, method::DAEMON_TASK_PAUSE_ALL).await,
         TrayAction::ResumeAll => call_daemon(daemon, method::DAEMON_TASK_RESUME_ALL).await,
         TrayAction::CancelShutdown => power.disarm(),

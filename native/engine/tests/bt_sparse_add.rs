@@ -58,30 +58,21 @@ fn relative_paths(torrent_bytes: &[u8]) -> Vec<PathBuf> {
         .collect()
 }
 
-fn wide(path: &Path) -> Vec<u16> {
-    use std::os::windows::ffi::OsStrExt;
-    path.as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect()
-}
-
 fn file_attributes(path: &Path) -> u32 {
-    let w = wide(path);
-    // SAFETY: w 以 NUL 结尾且在调用期间有效。
-    unsafe { windows_sys::Win32::Storage::FileSystem::GetFileAttributesW(w.as_ptr()) }
+    use std::os::windows::fs::MetadataExt;
+    std::fs::symlink_metadata(path)
+        .expect("read sparse file attributes")
+        .file_attributes()
 }
 
 /// 文件的实际磁盘占用（已分配簇）。sparse 文件未写区域不占簇，
 /// 该值远小于逻辑大小即证明没有整体物理预留。
 fn allocated_size(path: &Path) -> u64 {
-    let w = wide(path);
-    let mut high: u32 = 0;
-    // SAFETY: w 以 NUL 结尾；high 指向栈上有效 u32。
-    let low = unsafe {
-        windows_sys::Win32::Storage::FileSystem::GetCompressedFileSizeW(w.as_ptr(), &mut high)
-    };
-    (u64::from(high) << 32) | u64::from(low)
+    use fs2::FileExt;
+    std::fs::File::open(path)
+        .expect("open sparse file for allocation query")
+        .allocated_size()
+        .expect("query sparse file allocated size")
 }
 
 async fn local_session(root: &Path) -> (std::sync::Arc<Session>, PathBuf) {

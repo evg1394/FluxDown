@@ -126,11 +126,6 @@ impl SyncService {
         self.state.lock().await.sync.clone()
     }
 
-    async fn publish_status(&self) {
-        let sync = self.state.lock().await.sync.clone();
-        self.events.publish(AgentEvent::SyncChanged(sync));
-    }
-
     async fn persist(&self) -> Result<(), SyncError> {
         self.store.persist(&self.state).await?;
         Ok(())
@@ -138,8 +133,9 @@ impl SyncService {
 
     /// 开 / 关同步；用户显式关闭会被记住（登录后不再自动开启）。
     pub async fn set_enabled(&self, enabled: bool) -> Result<(), SyncError> {
+        let epoch = self.cloud.request_epoch();
         {
-            let mut state = self.state.lock().await;
+            let mut state = self.cloud.lock_epoch(epoch).await?;
             state.sync.enabled = enabled;
             state.sync_user_disabled = !enabled;
             if enabled {
@@ -149,9 +145,10 @@ impl SyncService {
             } else {
                 state.sync.connected = false;
             }
+            self.events
+                .publish(AgentEvent::SyncChanged(state.sync.clone()));
         }
         self.persist().await?;
-        self.publish_status().await;
         if enabled {
             self.resume.notify_one();
         }
@@ -165,13 +162,14 @@ impl SyncService {
         keys: &[String],
         local_only: bool,
     ) -> Result<SyncStatusDto, SyncError> {
+        let epoch = self.cloud.request_epoch();
         for key in keys {
             if owner_for_key(key) == SyncOwner::Excluded {
                 return Err(SyncError::UnknownKey(key.clone()));
             }
         }
         let status = {
-            let mut state = self.state.lock().await;
+            let mut state = self.cloud.lock_epoch(epoch).await?;
             let mut set = state
                 .sync
                 .local_only_keys
@@ -197,10 +195,11 @@ impl SyncService {
                 state.sync_pulled = false;
             }
             state.refresh_sync_projection();
+            self.events
+                .publish(AgentEvent::SyncChanged(state.sync.clone()));
             state.sync.clone()
         };
         self.persist().await?;
-        self.events.publish(AgentEvent::SyncChanged(status.clone()));
         self.wake.notify_one();
         Ok(status)
     }
@@ -212,8 +211,9 @@ impl SyncService {
             if cancel.is_cancelled() {
                 return;
             }
+            let epoch = self.cloud.request_epoch();
             if !self.cloud.is_authenticated().await {
-                self.set_connected(false).await;
+                self.set_connected_epoch(false, epoch).await;
                 tokio::select! {
                     _ = cancel.cancelled() => return,
                     _ = self.wake.notified() => {},
@@ -222,7 +222,7 @@ impl SyncService {
                 }
                 continue;
             }
-            match self.enable_by_default().await {
+            match self.enable_by_default(epoch).await {
                 Ok(()) => {}
                 Err(error) => {
                     tracing::warn!(error = %error, "enabling config sync after login failed")
@@ -233,7 +233,7 @@ impl SyncService {
                 (state.sync.enabled, state.sync.halted)
             };
             if !enabled {
-                self.set_connected(false).await;
+                self.set_connected_epoch(false, epoch).await;
                 tokio::select! {
                     _ = cancel.cancelled() => return,
                     _ = self.wake.notified() => {},
@@ -248,13 +248,13 @@ impl SyncService {
                     _ = cancel.cancelled() => return,
                     _ = self.resume.notified() => {},
                     _ = wait_for_session(&mut session_events) => {
-                        self.clear_halt().await;
+                        self.clear_halt(epoch).await;
                     },
                 }
                 continue;
             }
-            if let Err(error) = self.sync_once().await {
-                self.record_error(&error).await;
+            if let Err(error) = self.sync_once_epoch(epoch).await {
+                self.record_error(&error, epoch).await;
                 if error.halts() {
                     continue;
                 }
@@ -269,19 +269,19 @@ impl SyncService {
             }
             let sync_started = std::time::Instant::now();
             let device_id = self.state.lock().await.device_id.clone();
-            match self.cloud.sync_events(&device_id).await {
+            match self.cloud.at_epoch(epoch).sync_events(&device_id).await {
                 Ok(response) => {
-                    self.set_connected(true).await;
+                    self.set_connected_epoch(true, epoch).await;
                     let outcome = self
-                        .consume_events(response, &cancel, &mut session_events)
+                        .consume_events(response, &cancel, &mut session_events, epoch)
                         .await;
-                    self.set_connected(false).await;
+                    self.set_connected_epoch(false, epoch).await;
                     match outcome {
                         Ok(SseEnd::Cancelled) => return,
                         Ok(SseEnd::Stopped) => continue,
                         Ok(SseEnd::Resync) => {
                             tracing::info!("sync SSE asked for resync; reloading everything");
-                            self.force_full_pull().await;
+                            self.force_full_pull(epoch).await;
                             tokio::select! {
                                 _ = cancel.cancelled() => return,
                                 _ = tokio::time::sleep(RESYNC_PAUSE) => {},
@@ -289,7 +289,7 @@ impl SyncService {
                             continue;
                         }
                         Err(error) => {
-                            self.record_error(&error).await;
+                            self.record_error(&error, epoch).await;
                             if error.halts() {
                                 continue;
                             }
@@ -298,7 +298,7 @@ impl SyncService {
                 }
                 Err(error) => {
                     let error = SyncError::Cloud(error);
-                    self.record_error(&error).await;
+                    self.record_error(&error, epoch).await;
                     if error.halts() {
                         continue;
                     }
@@ -318,44 +318,65 @@ impl SyncService {
     }
 
     /// 登录后默认开启同步；用户曾显式关闭则保持关闭。
-    async fn enable_by_default(&self) -> Result<(), SyncError> {
+    async fn enable_by_default(&self, epoch: crate::cloud::RequestEpoch) -> Result<(), SyncError> {
         {
-            let mut state = self.state.lock().await;
+            let mut state = self.cloud.lock_epoch(epoch).await?;
             if state.sync.enabled || state.sync_user_disabled {
                 return Ok(());
             }
             state.sync.enabled = true;
+            self.events
+                .publish(AgentEvent::SyncChanged(state.sync.clone()));
         }
         self.persist().await?;
-        self.publish_status().await;
         Ok(())
     }
 
-    async fn clear_halt(&self) {
+    async fn clear_halt(&self, epoch: crate::cloud::RequestEpoch) {
         {
-            let mut state = self.state.lock().await;
+            let mut state = match self.cloud.lock_epoch(epoch).await {
+                Ok(state) => state,
+                Err(error) => {
+                    tracing::debug!(%error, "discarding stale sync resume");
+                    return;
+                }
+            };
             if !state.sync.halted {
                 return;
             }
             state.sync.halted = false;
+            self.events
+                .publish(AgentEvent::SyncChanged(state.sync.clone()));
         }
-        self.publish_status().await;
     }
 
-    async fn set_connected(&self, connected: bool) {
+    async fn set_connected_epoch(&self, connected: bool, epoch: crate::cloud::RequestEpoch) {
         {
-            let mut state = self.state.lock().await;
+            let mut state = match self.cloud.lock_epoch(epoch).await {
+                Ok(state) => state,
+                Err(error) => {
+                    tracing::debug!(%error, "discarding stale sync connection state");
+                    return;
+                }
+            };
             if state.sync.connected == connected {
                 return;
             }
             state.sync.connected = connected;
+            self.events
+                .publish(AgentEvent::SyncChanged(state.sync.clone()));
         }
-        self.publish_status().await;
     }
 
     /// 让下一轮同步 `since=0` 并重新播种（resync 事件）。
-    async fn force_full_pull(&self) {
-        let mut state = self.state.lock().await;
+    async fn force_full_pull(&self, epoch: crate::cloud::RequestEpoch) {
+        let mut state = match self.cloud.lock_epoch(epoch).await {
+            Ok(state) => state,
+            Err(error) => {
+                tracing::debug!(%error, "discarding stale sync resync request");
+                return;
+            }
+        };
         state.sync.revision = 0;
         state.sync_pulled = false;
     }
@@ -365,6 +386,7 @@ impl SyncService {
         response: reqwest::Response,
         cancel: &CancellationToken,
         session_events: &mut broadcast::Receiver<fluxdown_protocol::EventFrame>,
+        epoch: crate::cloud::RequestEpoch,
     ) -> Result<SseEnd, SyncError> {
         let stream_uid = self.cloud.current_user_id().await;
         let mut stream = response.bytes_stream();
@@ -411,7 +433,7 @@ impl SyncService {
                     if !self.sync_allowed().await {
                         return Ok(SseEnd::Stopped);
                     }
-                    self.sync_once().await?;
+                    self.sync_once_epoch(epoch).await?;
                 }
                 chunk = stream.next() => {
                     let chunk = chunk
@@ -424,7 +446,7 @@ impl SyncService {
                     }
                     while let Some(newline) = buffer.iter().position(|byte| *byte == b'\n') {
                         let line = buffer.drain(..=newline).collect::<Vec<_>>();
-                        if let Some(end) = self.handle_sse_line(&line).await? {
+                        if let Some(end) = self.handle_sse_line(&line, epoch).await? {
                             return Ok(end);
                         }
                     }
@@ -443,7 +465,12 @@ impl SyncService {
     }
 
     /// 单行 SSE：坏行只记录；`resync` 结束流；有新 revision 则同步。
-    async fn handle_sse_line(&self, line: &[u8]) -> Result<Option<SseEnd>, SyncError> {
+    async fn handle_sse_line(
+        &self,
+        line: &[u8],
+        epoch: crate::cloud::RequestEpoch,
+    ) -> Result<Option<SseEnd>, SyncError> {
+        drop(self.cloud.lock_epoch(epoch).await?);
         let Ok(line) = std::str::from_utf8(line) else {
             tracing::warn!("sync SSE line is not UTF-8; skipped");
             return Ok(None);
@@ -470,55 +497,70 @@ impl SyncService {
                 if !self.sync_allowed().await {
                     return Ok(Some(SseEnd::Stopped));
                 }
-                self.sync_once().await?;
+                self.sync_once_epoch(epoch).await?;
             }
         }
         Ok(None)
     }
 
     /// 只在内存里记录错误（不落盘：每次重试都写盘没有意义）；不可自动恢复的错误置 `halted`。
-    async fn record_error(&self, error: &SyncError) {
+    async fn record_error(&self, error: &SyncError, epoch: crate::cloud::RequestEpoch) {
         tracing::warn!(error = %error, reason = ?error.reason(), "config sync failed");
         {
-            let mut state = self.state.lock().await;
+            let mut state = match self.cloud.lock_epoch(epoch).await {
+                Ok(state) => state,
+                Err(error) => {
+                    tracing::debug!(%error, "discarding stale sync error");
+                    return;
+                }
+            };
             state.sync.last_error = Some(error.to_string());
             state.sync.last_error_reason = error.reason();
             state.sync.connected = false;
             if error.halts() {
                 state.sync.halted = true;
             }
+            self.events
+                .publish(AgentEvent::SyncChanged(state.sync.clone()));
         }
-        self.publish_status().await;
     }
 
     /// 用户显式「立即同步」：清除 `halted` 后执行一次同步；仍失败则重新 halted 并返回错误。
     pub async fn sync_now(&self) -> Result<(), SyncError> {
-        if !self.state.lock().await.sync.enabled {
+        let epoch = self.cloud.request_epoch();
+        if !self.cloud.lock_epoch(epoch).await?.sync.enabled {
             return Err(SyncError::Disabled);
         }
-        self.clear_halt().await;
-        match self.sync_once().await {
+        self.clear_halt(epoch).await;
+        match self.sync_once_epoch(epoch).await {
             Ok(()) => {
                 self.resume.notify_one();
                 Ok(())
             }
             Err(error) => {
-                self.record_error(&error).await;
+                self.record_error(&error, epoch).await;
                 Err(error)
             }
         }
     }
 
     /// 执行一次严格 pull-before-push 同步。
+    #[cfg(test)]
     async fn sync_once(&self) -> Result<(), SyncError> {
+        let epoch = self.cloud.request_epoch();
+        self.sync_once_epoch(epoch).await
+    }
+
+    async fn sync_once_epoch(&self, epoch: crate::cloud::RequestEpoch) -> Result<(), SyncError> {
         let _gate = self.gate.lock().await;
+        drop(self.cloud.lock_epoch(epoch).await?);
         let uid = self
             .cloud
             .current_user_id()
             .await
             .ok_or_else(|| SyncError::Cloud(CloudError::unauthorized()))?;
         let (since, device_id, first_sync) = {
-            let mut state = self.state.lock().await;
+            let mut state = self.cloud.lock_epoch(epoch).await?;
             state.bind_account(Some(&uid));
             (
                 state.sync.revision,
@@ -526,7 +568,8 @@ impl SyncService {
                 state.sync.revision == 0 || !state.sync_pulled,
             )
         };
-        let pull_value = self.cloud.sync_pull(since, &device_id).await?;
+        let cloud = self.cloud.at_epoch(epoch);
+        let pull_value = cloud.sync_pull(since, &device_id).await?;
         let pull = serde_json::from_value::<PullResult>(pull_value)
             .map_err(|error| SyncError::Protocol(format!("sync pull response: {error}")))?;
         let no_pulled_items = pull.items.is_empty();
@@ -544,7 +587,7 @@ impl SyncService {
 
         let current_daemon = daemon_config_values(&self.events);
         let (daemon_changes, prefs_changed, sent_entries) = {
-            let mut state = self.state.lock().await;
+            let mut state = self.cloud.lock_epoch(epoch).await?;
             if state.account_uid.as_deref() != Some(uid.as_str()) {
                 return Err(SyncError::AccountChanged);
             }
@@ -561,7 +604,7 @@ impl SyncService {
         };
 
         if !daemon_changes.is_empty() {
-            self.patch_daemon(daemon_changes).await?;
+            self.patch_daemon(daemon_changes, epoch).await?;
         }
         let mut idle = false;
         if !sent_entries.is_empty() {
@@ -578,6 +621,7 @@ impl SyncService {
                 .collect::<Vec<_>>();
             let response = self
                 .cloud
+                .at_epoch(epoch)
                 .sync_push(&serde_json::json!({
                     "deviceId": device_id,
                     "items": payload,
@@ -587,7 +631,7 @@ impl SyncService {
                 .get("revision")
                 .and_then(Value::as_u64)
                 .ok_or_else(|| SyncError::Protocol("sync push returned no revision".to_owned()))?;
-            let mut state = self.state.lock().await;
+            let mut state = self.cloud.lock_epoch(epoch).await?;
             if state.account_uid.as_deref() != Some(uid.as_str()) {
                 return Err(SyncError::AccountChanged);
             }
@@ -608,7 +652,7 @@ impl SyncService {
                 pull.revision
             };
         } else {
-            let mut state = self.state.lock().await;
+            let mut state = self.cloud.lock_epoch(epoch).await?;
             if state.account_uid.as_deref() != Some(uid.as_str()) {
                 return Err(SyncError::AccountChanged);
             }
@@ -616,8 +660,8 @@ impl SyncService {
             idle = no_pulled_items && !first_sync && pull.revision == since;
         }
 
-        let (preferences, status) = {
-            let mut state = self.state.lock().await;
+        {
+            let mut state = self.cloud.lock_epoch(epoch).await?;
             idle = idle && state.sync_pulled && state.sync.last_error.is_none();
             state.sync_pulled = true;
             state.refresh_sync_projection();
@@ -625,24 +669,29 @@ impl SyncService {
             state.sync.last_error_reason = None;
             state.sync.halted = false;
             state.sync.last_synced_at_unix_ms = Some(now_unix_ms());
-            (state.preferences.clone(), state.sync.clone())
-        };
+            if prefs_changed {
+                self.events
+                    .publish(AgentEvent::PreferencesChanged(state.preferences.clone()));
+            }
+            self.events
+                .publish(AgentEvent::SyncChanged(state.sync.clone()));
+        }
         if !idle {
             self.persist().await?;
         }
-        if prefs_changed {
-            self.events
-                .publish(AgentEvent::PreferencesChanged(preferences));
-        }
-        self.events.publish(AgentEvent::SyncChanged(status));
         Ok(())
     }
 
     /// 把云端值写进 daemon。`normalize` 已在 [`apply_pull`] 里剔除毒值；revision 冲突时按
     /// 错误里给出的最新 revision 重试一次。
-    async fn patch_daemon(&self, values: BTreeMap<String, String>) -> Result<(), SyncError> {
+    async fn patch_daemon(
+        &self,
+        values: BTreeMap<String, String>,
+        epoch: crate::cloud::RequestEpoch,
+    ) -> Result<(), SyncError> {
         let mut expected_revision = daemon_revision(&self.events);
         for attempt in 0..2 {
+            drop(self.cloud.lock_epoch(epoch).await?);
             let result = self
                 .daemon
                 .call::<DaemonConfigPatch, Value>(
@@ -683,6 +732,7 @@ impl SyncService {
         value: Value,
         deleted: bool,
     ) -> Result<u64, SyncError> {
+        let epoch = self.cloud.request_epoch();
         let Some(spec) = setting_spec(&key).filter(|spec| spec.owner != SyncOwner::Excluded) else {
             return self.set_local_preference(key, value, deleted).await;
         };
@@ -702,14 +752,14 @@ impl SyncService {
             } else {
                 value_to_daemon_config(spec, &value).map_err(SyncError::InvalidValue)?
             };
-            self.patch_daemon(BTreeMap::from([(
-                spec.storage_key.to_owned(),
-                daemon_value,
-            )]))
+            self.patch_daemon(
+                BTreeMap::from([(spec.storage_key.to_owned(), daemon_value)]),
+                epoch,
+            )
             .await?;
         }
         let revision = {
-            let mut state = self.state.lock().await;
+            let mut state = self.cloud.lock_epoch(epoch).await?;
             if matches!(spec.owner, SyncOwner::Agent | SyncOwner::Preferences) {
                 if deleted {
                     state.preferences.values.remove(&key);
@@ -725,16 +775,13 @@ impl SyncService {
                 entry.dirty = true;
             }
             state.refresh_sync_projection();
+            self.events
+                .publish(AgentEvent::PreferencesChanged(state.preferences.clone()));
+            self.events
+                .publish(AgentEvent::SyncChanged(state.sync.clone()));
             state.preferences.revision
         };
         self.persist().await?;
-        let (preferences, status) = {
-            let state = self.state.lock().await;
-            (state.preferences.clone(), state.sync.clone())
-        };
-        self.events
-            .publish(AgentEvent::PreferencesChanged(preferences));
-        self.events.publish(AgentEvent::SyncChanged(status));
         self.wake.notify_one();
         Ok(revision)
     }
@@ -1475,12 +1522,18 @@ mod tests {
         pushes: Mutex<Vec<Value>>,
         pull_status: Mutex<Option<(StatusCode, Value)>>,
         pull_items: Mutex<Vec<Value>>,
+        pull_barrier: Mutex<Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>>,
         /// `true`：SSE 发出首个事件后保持连接不再有数据（长连接）；否则发完即断（触发重连）。
         hold_open: std::sync::atomic::AtomicBool,
     }
 
     async fn mock_pull(State(state): State<Arc<SyncMockState>>) -> axum::response::Response {
         state.pulls.fetch_add(1, Ordering::SeqCst);
+        let barrier = state.pull_barrier.lock().await.clone();
+        if let Some((started, release)) = barrier {
+            started.notify_one();
+            release.notified().await;
+        }
         if let Some((status, body)) = state.pull_status.lock().await.clone() {
             return (status, axum::Json(body)).into_response();
         }
@@ -1527,6 +1580,68 @@ mod tests {
             [(header::CONTENT_TYPE, "text/event-stream")],
             body,
         )
+    }
+
+    #[tokio::test]
+    async fn old_sync_event_cannot_resample_reopened_same_uid() {
+        let harness = Harness::new("sync_event_epoch", |state| state.sync.enabled = true).await;
+        let epoch = harness.service.cloud.request_epoch();
+        let credentials = harness.state.lock().await.credentials.clone();
+        harness.service.cloud.clear_session().await.expect("logout");
+        {
+            let mut state = harness.state.lock().await;
+            state.credentials = credentials;
+            state.bind_account(Some("u1"));
+            state.sync.enabled = true;
+            state.sync.revision = 99;
+        }
+        assert!(
+            harness
+                .service
+                .handle_sse_line(b"data: {\"revision\":7}\n", epoch)
+                .await
+                .is_err()
+        );
+        assert_eq!(harness.mock.pulls.load(Ordering::SeqCst), 0);
+        assert_eq!(harness.state.lock().await.sync.revision, 99);
+        harness.finish().await;
+    }
+
+    #[tokio::test]
+    async fn old_sync_response_and_error_cannot_modify_reopened_account() {
+        let harness = Harness::new("sync_epoch", |state| state.sync.enabled = true).await;
+        let epoch = harness.service.cloud.request_epoch();
+        let credentials = harness.state.lock().await.credentials.clone();
+        let started = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        *harness.mock.pull_barrier.lock().await = Some((started.clone(), release.clone()));
+        let request = harness.service.sync_once();
+        let replace = async {
+            started.notified().await;
+            harness.service.cloud.clear_session().await.expect("logout");
+            let mut state = harness.state.lock().await;
+            // Reopening the same UID is a different epoch too (UID-only guards
+            // cannot distinguish this logout/login ABA).
+            state.credentials = credentials;
+            state.bind_account(Some("u1"));
+            state.sync.revision = 99;
+            state.sync.last_error = None;
+            drop(state);
+            release.notify_one();
+        };
+        let (result, ()) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            tokio::join!(request, replace)
+        })
+        .await
+        .expect("barrier completes");
+        let error = result.expect_err("old pull rejected");
+        harness.service.record_error(&error, epoch).await;
+        let state = harness.state.lock().await;
+        assert_eq!(state.sync.revision, 99);
+        assert!(state.sync.last_error.is_none());
+        assert!(!state.sync_pulled);
+        drop(state);
+        harness.finish().await;
     }
 
     struct Harness {

@@ -3,6 +3,9 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, ExitStatus};
 
+#[cfg(target_os = "macos")]
+mod macos;
+
 const BUILD: &[&str] = &[
     "build",
     "-p",
@@ -40,7 +43,7 @@ fn run() -> io::Result<u8> {
             println!(
                 "Usage: cargo desktop-dev [--build-only]\n\
                 Activate the running desktop, or build UI + agent + daemon + browser relay and start it.\n\
-                --build-only builds without launching or activating anything.\n\
+                --build-only builds (and stages a signed .app on macOS) without launching or activating anything.\n\
                 Existing services are reused, never forcibly stopped. Quit the UI and\n\
                 stop the services explicitly before testing changes to running code."
             );
@@ -82,15 +85,19 @@ fn run() -> io::Result<u8> {
         return Ok(exit_code(status));
     }
     fs::write(&marker, binary_stamp(&desktop)?)?;
-    if build_only {
+    if !build_only && activate_existing(&desktop)? {
+        eprintln!("desktop-dev: activated the running UI; running code was not replaced.");
         return Ok(0);
     }
-    if activate_existing(&desktop)? {
-        eprintln!("desktop-dev: activated the running UI; running code was not replaced.");
+    #[cfg(target_os = "macos")]
+    let desktop = macos::assemble(&root, output)?;
+    if build_only {
         return Ok(0);
     }
     eprintln!("desktop-dev: starting UI; existing agent/daemon will be reused, not restarted.");
     let mut launch = Command::new(&desktop);
+    #[cfg(target_os = "macos")]
+    macos::configure_launch(&desktop, &mut launch)?;
     launch.current_dir(root);
     no_console_window(&mut launch);
     let mut child = launch.spawn()?;

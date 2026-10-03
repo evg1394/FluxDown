@@ -40,9 +40,8 @@ tracing-subscriber = { version = "0.3.23", features = ["fmt", "env-filter"] }
 tray-icon = { version = "0.24.2", default-features = false, features = ["gtk"], optional = true }
 uuid = { version = "1.23.4", features = ["v4", "serde"] }
 
-# macOS 通知经系统 osascript 投递（见 src/notification.rs）：notify-rust 的 macOS 后端走
-# 已被新版系统拒收的 NSUserNotification，只在 Windows / Linux 使用。
-[target.'cfg(not(target_os = "macos"))'.dependencies]
+# macOS / Windows 使用原生可交互通知；notify-rust 仅用于 Linux D-Bus。
+[target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
 notify-rust = "4.11"
 
 # TLS 后端按平台区分（对齐 engine）：Windows 用系统 Schannel（reqwest 默认 native-tls）；
@@ -56,19 +55,22 @@ reqwest = { version = "0.12", features = ["json", "stream"] }
 # ShellExecuteW("open")：open/reveal 回退的标准「打开」调用（见 platform/mod.rs）
 # Win32_UI_Shell_Common：SHParseDisplayName / SHOpenFolderAndSelectItems（ITEMIDLIST 类型，见 platform/mod.rs）
 # Win32_UI_Controls / Win32_Graphics_Gdi / Win32_Storage_FileSystem：系统文件图标提取
-# （SHGetFileInfoW / ImageList_GetIcon / GetDIBits，见 platform/file_icon.rs）
+# （SHGetFileInfoW / IImageList::GetIcon / GetDIBits，见 platform/file_icon.rs）
 # 固定 0.59：0.61 引入 windows-link(raw-dylib)，与 cdylib 构建在 CI 上不兼容
 winreg = "0.55"
 windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_Storage_FileSystem", "Win32_System_Com", "Win32_UI_Controls", "Win32_UI_Shell", "Win32_UI_Shell_Common", "Win32_UI_WindowsAndMessaging"] }
+windows = { version = "0.61.3", features = ["Data_Xml_Dom", "Foundation", "UI_Notifications", "Win32_Graphics_Gdi", "Win32_System_WinRT", "Win32_UI_Controls", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 gtk = { version = "0.18", optional = true }
 
 # 系统文件图标（NSWorkspace → NSBitmapImageRep → PNG，见 platform/file_icon.rs），随 `desktop` 启用。
 [target.'cfg(target_os = "macos")'.dependencies]
+block2 = { version = "0.6.2", optional = true }
 objc2 = { version = "0.6", optional = true }
 objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSWorkspace", "NSImage", "NSImageRep", "NSBitmapImageRep", "NSGraphicsContext", "NSGraphics"], optional = true }
-objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSString", "NSData", "NSDictionary", "NSGeometry"], optional = true }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSString", "NSData", "NSDictionary", "NSGeometry", "NSBundle", "NSArray", "NSSet", "NSError", "NSObject"], optional = true }
+objc2-user-notifications = { version = "0.3.2", default-features = false, features = ["std", "block2", "UNUserNotificationCenter", "UNNotification", "UNNotificationAction", "UNNotificationCategory", "UNNotificationContent", "UNNotificationRequest", "UNNotificationResponse", "UNNotificationSettings", "UNNotificationTrigger"], optional = true }
 
 [features]
 # 桌面外壳集成：托盘（tao 事件循环 + tray-icon）、剪贴板监听、托盘文案 i18n。
@@ -84,6 +86,8 @@ desktop = [
     "dep:objc2",
     "dep:objc2-app-kit",
     "dep:objc2-foundation",
+    "dep:block2",
+    "dep:objc2-user-notifications",
 ]
 
 # server 模式的 Web UI：构建期把 `FLUXDOWN_EMBED_WEBROOT`（缺省 `web/dist`）内嵌进二进制，

@@ -301,10 +301,18 @@ export function applyAgentEvent(snapshot: AgentSnapshot, event: AgentEvent): Age
     case 'sessionChanged':
       // 会话结束后账号维度投影随之失效（对应 Rust apply_agent_event）。
       return event.data === null
-        ? { ...snapshot, session: null, cloudDevices: [], remoteTasks: [] }
+        ? { ...snapshot, session: null, cloudDevices: [], remoteTasks: [], cloudConnection: { state: 'disconnected' } }
         : { ...snapshot, session: event.data }
     case 'syncChanged':
       return { ...snapshot, sync: event.data }
+    case 'cloudConnectionChanged':
+      return {
+        ...snapshot,
+        cloudConnection: event.data,
+        cloudDevices: event.data.state === 'connected'
+          ? snapshot.cloudDevices
+          : snapshot.cloudDevices.map((device) => device.isCurrent ? { ...device, isOnline: false } : device),
+      }
     case 'preferencesChanged':
       return { ...snapshot, preferences: event.data }
     case 'gatewayChanged':

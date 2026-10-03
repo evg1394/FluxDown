@@ -3,7 +3,7 @@
 
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { ArrowDown, ArrowUp, ChevronDown, ChevronRight, Download, Pause, Play, RotateCw } from 'lucide-react'
-import { memo, useCallback, useMemo, useRef, useState } from 'react'
+import { memo, useCallback, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { MouseEvent } from 'react'
 import { useT } from '../../../i18n'
 import { cn } from '../../../lib/cn'
@@ -25,7 +25,7 @@ import {
   resolveColumns,
   toColumnPrefs,
 } from '../model/viewPrefs'
-import type { ColumnKind, ResolvedColumn } from '../model/viewPrefs'
+import type { ColumnKind, ResolvedColumn, ViewDensity } from '../model/viewPrefs'
 import { useDownloads } from '../state'
 import type { VisibleRow } from '../state'
 import { FileCell, KindGlyph, ProgressCell, StatusCell } from './cells'
@@ -74,7 +74,7 @@ interface RowProps {
   t: Translate
   view: DownloadTaskView
   columns: readonly LayoutColumn[]
-  twoLine: boolean
+  density: ViewDensity
   selected: boolean
   anySelected: boolean
   queueName: (queueId: string) => string
@@ -87,11 +87,11 @@ interface RowProps {
 }
 
 function renderCell(props: RowProps, column: LayoutColumn) {
-  const { t, view, twoLine, queueName } = props
+  const { t, view, density, queueName } = props
   const downloading = view.state === 'downloading'
   switch (column.kind) {
     case 'file_name':
-      return <FileCell t={t} view={view} twoLine={twoLine} />
+      return <FileCell t={t} view={view} density={density} />
     case 'progress': {
       const barWidth = Math.max(0, column.width - 2 * CELL_PADDING_X - PROGRESS_LABEL_WIDTH - PROGRESS_GAP)
       return <ProgressCell view={view} barWidth={barWidth} />
@@ -105,7 +105,7 @@ function renderCell(props: RowProps, column: LayoutColumn) {
         </Meta>
       )
     case 'status':
-      return <StatusCell t={t} view={view} twoLine={twoLine} />
+      return <StatusCell t={t} view={view} density={density} />
     case 'speed':
       return downloading && view.speed !== null && view.speed > 0 ? (
         <Meta numeric>{`${formatBytes(view.speed)}/s`}</Meta>
@@ -163,7 +163,7 @@ function RowActions({ view, labels, selected }: { view: DownloadTaskView; labels
   return (
     <div
       className={cn(
-        'absolute inset-y-0 right-0 hidden items-center gap-0.5 pl-1 pr-1 group-hover/row:flex',
+        'absolute inset-y-0 right-1 rounded-r-[var(--fx-components-task-row-radius)] hidden items-center gap-0.5 pl-1 pr-1 group-hover/row:flex',
         selected ? 'bg-nav-selected' : 'bg-row-hover',
       )}
     >
@@ -188,7 +188,8 @@ function RowActions({ view, labels, selected }: { view: DownloadTaskView; labels
 }
 
 const TaskRow = memo(function TaskRow(props: RowProps) {
-  const { view, columns, selected, anySelected, onClick, onDoubleClick, onToggle, getMenu, onContext, twoLine } = props
+  const { view, columns, selected, anySelected, onClick, onDoubleClick, onToggle, getMenu, onContext, density } = props
+  const twoLine = density !== 'compact'
   return (
     <ContextMenuArea entries={() => getMenu(view)} title={view.name}>
       <div
@@ -198,12 +199,11 @@ const TaskRow = memo(function TaskRow(props: RowProps) {
         onDoubleClick={() => onDoubleClick(view)}
         onContextMenu={() => onContext(view)}
         className={cn(
-          'group/row relative flex cursor-default select-none items-center hover:bg-row-hover',
-          twoLine ? 'h-task-row' : 'h-task-row-compact',
-          selected && 'hover:bg-transparent',
+          'group/row relative flex cursor-default select-none items-center',
+          density === 'relaxed' ? 'h-task-row-relaxed' : twoLine ? 'h-task-row' : 'h-task-row-compact',
         )}
       >
-        {selected ? <div className="pointer-events-none absolute inset-y-0 left-1 right-1 rounded-[var(--fx-components-task-row-radius)] bg-accent" /> : null}
+        <div className={cn('pointer-events-none absolute inset-y-0 left-1 right-1 rounded-[var(--fx-components-task-row-radius)]', selected ? 'bg-accent' : 'group-hover/row:bg-row-hover')} />
         <div className="relative flex shrink-0 items-center justify-center" style={{ width: SELECTION_COLUMN_WIDTH }}>
           <div className={cn(anySelected || selected ? 'hidden' : 'group-hover/row:hidden')}>
             <KindGlyph view={view} />
@@ -314,13 +314,16 @@ export function TaskTable() {
   const virtualizer = useVirtualizer({
     count: rows.length,
     getScrollElement: () => scrollRef.current,
-    estimateSize: (index) => (rows[index]?.type === 'group' ? GROUP_SLOT_HEIGHT : prefs.density === 'comfortable' ? 44 : 30),
+    estimateSize: (index) => (rows[index]?.type === 'group' ? GROUP_SLOT_HEIGHT : prefs.density === 'relaxed' ? 66 : prefs.density === 'comfortable' ? 44 : 30),
     overscan: 10,
     scrollMargin: HEADER_HEIGHT,
     getItemKey: (index) => rows[index]?.key ?? index,
   })
 
-  const twoLine = prefs.density === 'comfortable'
+  // 密度切换会改变所有任务行高，清掉屏外行的旧测量，避免滚动时保留旧间距。
+  useLayoutEffect(() => {
+    virtualizer.measure()
+  }, [prefs.density, virtualizer])
 
   // 回调经 ref 读取最新上下文，自身身份恒定，TaskRow 的 memo 才能在进度帧中命中。
   const ctxRef = useRef(ctx)
@@ -510,7 +513,7 @@ export function TaskTable() {
                     t={t}
                     view={row.view}
                     columns={columns}
-                    twoLine={twoLine}
+                    density={prefs.density}
                     selected={selected.has(row.key)}
                     anySelected={selected.size > 0}
                     queueName={ctx.queueName}

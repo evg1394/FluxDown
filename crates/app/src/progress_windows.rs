@@ -138,21 +138,6 @@ fn release_if_resolved(task_id: &str, cx: &mut App) {
     }
 }
 
-/// 该任务完成时是否显示完成视图（窗口覆盖值优先于全局设置）。
-#[must_use]
-pub fn show_completion(cx: &App, task_id: &str) -> bool {
-    cx.global::<ProgressWindows>()
-        .tracker
-        .show_completion(task_id, prefs(cx))
-}
-
-/// 窗口内「完成后显示完成窗口」的单任务覆盖。
-pub fn set_completion_override(cx: &mut App, task_id: &str, value: bool) {
-    cx.global_mut::<ProgressWindows>()
-        .tracker
-        .set_completion_override(task_id, value);
-}
-
 fn prefs(cx: &App) -> ProgressWindowPrefs {
     ProgressWindowPrefs::from_preferences(Desktop::preferences(cx))
 }

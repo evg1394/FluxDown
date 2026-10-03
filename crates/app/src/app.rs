@@ -127,6 +127,7 @@ pub(crate) fn run() -> Result<RunOutcome, AppError> {
         urls: launch.urls.clone(),
         files: launch.torrent_files.clone(),
         activate: launch.activate_existing || !launch.capture_only,
+        settings: launch.settings,
     };
     let _instance_lock =
         match acquire_or_activate(&instance_dir, &endpoint, &message, launch.activate_existing)? {
@@ -177,7 +178,10 @@ pub(crate) fn run() -> Result<RunOutcome, AppError> {
     );
     let open_urls_client = agent_client.clone();
 
-    let application = gpui_platform::application().with_assets(DesktopAssets);
+    // GPUI 在非 macOS 默认关掉最后一个窗口即退出；必须让 lifecycle 等待在途提交。
+    let application = gpui_platform::application()
+        .with_quit_mode(gpui::QuitMode::Explicit)
+        .with_assets(DesktopAssets);
     application.on_open_urls(move |urls| {
         let files = urls
             .iter()
@@ -318,14 +322,23 @@ pub(crate) fn run() -> Result<RunOutcome, AppError> {
         cx.spawn(async move |cx| {
             while let Some(request) = activate_rx.recv().await {
                 let (message, acknowledgement) = request.into_parts();
-                drop(submit_captures_detached(
-                    &activate_client,
-                    message.urls,
-                    message.files,
-                ));
-                if message.activate {
-                    cx.update(crate::windows::main::reveal);
-                }
+                cx.update(|cx| {
+                    if !message.urls.is_empty() || !message.files.is_empty() {
+                        let submitted =
+                            submit_captures_detached(&activate_client, message.urls, message.files);
+                        let task = cx.spawn(async move |_| {
+                            if submitted.await.is_err() {
+                                log::debug!("activation submission owner released");
+                            }
+                        });
+                        crate::lifecycle::keep_alive(cx, task).detach();
+                    }
+                    if message.settings {
+                        crate::windows::settings::open(cx);
+                    } else if message.activate {
+                        crate::windows::main::reveal(cx);
+                    }
+                });
                 if acknowledgement.send(()).is_err() {
                     log::trace!("activation acknowledgement receiver already closed");
                 }
@@ -338,7 +351,6 @@ pub(crate) fn run() -> Result<RunOutcome, AppError> {
         // 引擎选择请求窗口 / 外部捕获确认（并入新建下载窗口）：跟随会话事件独立开关，
         // 不依赖主窗口存在。
         crate::windows::selection::install(cx);
-        crate::windows::new_download::install_captures(cx);
         crate::plugin_notices::install(cx);
         crate::progress_windows::install(cx);
         if let Some(task_id) = launch.progress_task.clone() {
@@ -346,26 +358,26 @@ pub(crate) fn run() -> Result<RunOutcome, AppError> {
             crate::progress_windows::user_started_on_launch(task_id, cx);
         }
 
-        if launch.capture_only {
+        if launch.settings {
+            after_session_settled(cx, crate::windows::settings::open);
+        } else if launch.capture_only {
             // 由 agent 为待确认交互拉起：不开主窗口；确认窗口随快照 / 事件打开，全部关闭后由
             // 窗口注册表退出。启动链接提交完成后若首个快照里已无待确认项，直接退出。
             quit_when_nothing_to_confirm(launch_submissions, cx);
-            return;
-        }
-        if launch.minimized {
+        } else if launch.minimized {
             // 开机自启（agent 判定需要界面时才拉起）：会话就绪后开最小化主窗口。
             after_session_settled(cx, open_main_minimized);
-            return;
-        }
-        if launch.is_plain() {
+        } else if launch.is_plain() {
             // 普通启动：本进程冷启动了服务时按「启动时最小化到托盘」决定；agent 早已驻留时
             // 这是用户在打开应用，直接开窗。
             decide_plain_launch(bootstrap, cx);
-            return;
+        } else {
+            // 等快照就绪后开主窗口，避免首帧闪连接态。
+            after_session_settled(cx, crate::windows::main::reveal);
         }
-        // 连接在 GPUI 初始化前已开始：热启动时首个快照几乎与事件循环同时到达，等它到了再开窗，
-        // 首帧就是完整数据、主题与语言，不闪「正在连接」；冷启动（需拉起后台）等到会话宽限到期。
-        after_session_settled(cx, crate::windows::main::reveal);
+        // 主窗口的首帧 / 快照订阅先注册，捕获确认后开，避免主窗口覆盖待确认窗口。
+        // --capture 仍不创建主窗口；其空窗退出检查在异步回调里执行。
+        crate::windows::new_download::install_captures(cx);
     });
 
     Ok(RunOutcome::Completed)

@@ -1,7 +1,6 @@
 //! 跨平台可用磁盘空间查询。零新依赖:Windows 用已启用的 windows-sys
 //! `Win32_Storage_FileSystem` feature(`GetDiskFreeSpaceExW`),Unix 用既有
-//! `libc::statvfs`。两处 unsafe FFI,先例:`segment_coordinator.rs` 的
-//! `unsafe libc::fallocate` 预分配。
+//! `libc::statvfs`，Apple 用 64-bit `statfs`，保留块数乘法的饱和语义。
 //!
 //! 消费者:HLS remux 与 DASH mux 的 ENOSPC 预检(两者的中间产物会让磁盘
 //! 峰值达到 ≈2x 源体积,预检不足时走各自既有的优雅降级路径)。
@@ -36,6 +35,9 @@ fn available_space_impl(dir: &Path) -> Option<u64> {
         .encode_wide()
         .chain(std::iter::once(0))
         .collect();
+    if wide[..wide.len() - 1].contains(&0) {
+        return None;
+    }
     let mut free_to_caller: u64 = 0;
     // SAFETY: `wide` 是 NUL 结尾 UTF-16 缓冲,调用期间存活;第 2 参指向栈上
     // u64 出参(ULARGE_INTEGER 同布局);后两个 out 指针按 API 约定传 null
@@ -54,32 +56,48 @@ fn available_space_impl(dir: &Path) -> Option<u64> {
 // Apple 平台专用:`statvfs` 在 libc 的 apple 绑定中 `fsblkcnt_t = c_uint`
 // (u32,全 apple 家族共用),`f_bavail` 在可用块数 > u32::MAX 时回绕
 // (4K frsize 下 ≈17.6TB 的大卷会误报极小可用空间 → 预检误拒)。改用
-// 64 位的 `statfs`(libc 绑定链接 `statfs$INODE64` 变体,
-// `f_bavail: u64` + `f_bsize: u32`)。`target_vendor = "apple"` 覆盖
+// 64 位的 statfs（libc 的 Apple 绑定：f_bavail: u64、f_bsize: u32）。
+// `target_vendor = "apple"` 覆盖
 // macos/ios/tvos/watchos/visionos,与 libc apple 模块的门控一致。
 #[cfg(target_vendor = "apple")]
 fn available_space_impl(dir: &Path) -> Option<u64> {
     use std::os::unix::ffi::OsStrExt;
     let c_path = std::ffi::CString::new(dir.as_os_str().as_bytes()).ok()?;
-    // SAFETY: `c_path` 是合法 NUL 结尾 C 字符串;`stat` 为栈上出参,仅在
-    // statfs 返回 0(成功、结构已完整写入)后读取其字段。
-    let mut stat: libc::statfs = unsafe { std::mem::zeroed() };
-    let ret = unsafe { libc::statfs(c_path.as_ptr(), &mut stat) };
-    (ret == 0).then(|| stat.f_bavail.saturating_mul(stat.f_bsize as u64))
+    let mut stat = std::mem::MaybeUninit::<libc::statfs>::uninit();
+    // SAFETY: c_path 有效且 NUL 结尾；stat 提供正确对齐、足够大小的可写出参。
+    let ret = unsafe { libc::statfs(c_path.as_ptr(), stat.as_mut_ptr()) };
+    if ret != 0 {
+        return None;
+    }
+    // SAFETY: statfs 成功已初始化整个输出结构；失败路径不读取它。
+    let stat = unsafe { stat.assume_init() };
+    Some(available_bytes(stat.f_bavail, stat.f_bsize))
 }
 
 #[cfg(all(unix, not(target_vendor = "apple")))]
 fn available_space_impl(dir: &Path) -> Option<u64> {
     use std::os::unix::ffi::OsStrExt;
     let c_path = std::ffi::CString::new(dir.as_os_str().as_bytes()).ok()?;
-    // SAFETY: `c_path` 是合法 NUL 结尾 C 字符串;`stat` 为栈上出参,仅在
-    // statvfs 返回 0(成功、结构已完整写入)后读取其字段。
+    // fs2 0.4.3 对 available/free/total 都做普通乘法且不暴露原始计数；
+    // 保留此边界，避免异常或虚拟文件系统的大计数导致 panic/回绕。
     // 64-bit target 上 fsblkcnt_t/f_frsize 均为 64 位,无截断;32-bit
     // glibc 旧 ABI / 32-bit Android 上 fsblkcnt_t 为 u32,存在与 apple
     // 相同的大卷截断风险——FluxDown 仅支持 64 位桌面端,不在支持矩阵内。
-    let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
-    let ret = unsafe { libc::statvfs(c_path.as_ptr(), &mut stat) };
-    (ret == 0).then(|| (stat.f_bavail as u64).saturating_mul(stat.f_frsize as u64))
+    let mut stat = std::mem::MaybeUninit::<libc::statvfs>::uninit();
+    // SAFETY: c_path 有效且 NUL 结尾；stat 提供正确对齐、足够大小的可写出参。
+    let ret = unsafe { libc::statvfs(c_path.as_ptr(), stat.as_mut_ptr()) };
+    if ret != 0 {
+        return None;
+    }
+    // SAFETY: statvfs 成功已初始化整个输出结构；失败路径不读取它。
+    let stat = unsafe { stat.assume_init() };
+    Some(available_bytes(stat.f_bavail, stat.f_frsize))
+}
+
+#[cfg(unix)]
+fn available_bytes(blocks: impl Into<u64>, block_size: impl Into<u64>) -> u64 {
+    // libc 字段宽度随 ABI 变化；先无损扩展，再饱和相乘。
+    blocks.into().saturating_mul(block_size.into())
 }
 
 #[cfg(not(any(windows, unix)))]
@@ -104,6 +122,20 @@ pub async fn available_space_checked(dir: PathBuf) -> Option<u64> {
 mod tests {
     use super::available_space;
 
+    #[cfg(unix)]
+    #[test]
+    fn available_bytes_preserves_large_volumes_and_saturates() {
+        use super::available_bytes;
+
+        assert_eq!(
+            available_bytes(u32::MAX, 4096_u32),
+            u64::from(u32::MAX) * 4096
+        );
+        assert_eq!(available_bytes(1_u64 << 32, 4096_u32), 1_u64 << 44);
+        assert_eq!(available_bytes(u64::MAX, 2_u64), u64::MAX);
+        assert_eq!(available_bytes(u64::MAX, 0_u32), 0);
+    }
+
     #[test]
     fn available_space_reports_positive_for_temp_dir() {
         let avail = available_space(&std::env::temp_dir());
@@ -119,5 +151,12 @@ mod tests {
         // Windows GetDiskFreeSpaceExW 对不存在路径失败;Unix statvfs 同样
         // 报 ENOENT。两平台均应得到 None 而非 panic。
         assert!(available_space(&missing).is_none());
+    }
+
+    #[test]
+    fn available_space_rejects_nul_instead_of_querying_prefix() {
+        let mut path = std::env::temp_dir().into_os_string();
+        path.push("\0suffix");
+        assert!(available_space(std::path::Path::new(&path)).is_none());
     }
 }

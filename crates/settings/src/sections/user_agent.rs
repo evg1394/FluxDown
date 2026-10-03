@@ -6,7 +6,7 @@ use fluxdown_ui_components::ControlExt as _;
 use fluxdown_ui_theme::active_theme;
 use gpui::{
     App, AppContext as _, Entity, IntoElement as _, ParentElement, SharedString, Styled,
-    Subscription, Window, px,
+    Subscription, Window, div, px,
 };
 use gpui_component::{
     input::{Input, InputEvent, InputState},
@@ -14,7 +14,9 @@ use gpui_component::{
 };
 
 use super::SectionContext;
-use crate::ui::{Control, INPUT_WIDE_WIDTH, dropdown_button};
+use crate::ui::{
+    DROPDOWN_MIN_WIDTH, INPUT_WIDTH, SettingsRow, body_text, dropdown_button, meta_text,
+};
 
 pub(crate) const UA_KEY: &str = "global_user_agent";
 
@@ -56,7 +58,7 @@ struct CustomSlot {
     _subscription: Subscription,
 }
 
-pub(crate) fn field(ctx: &SectionContext) -> Control {
+pub(crate) fn row(ctx: &SectionContext) -> SettingsRow {
     let store = ctx.store();
     let options: Vec<(SharedString, SharedString)> = vec![
         (
@@ -73,7 +75,11 @@ pub(crate) fn field(ctx: &SectionContext) -> Control {
         (SharedString::from("custom"), ctx.t("userAgentPresetCustom")),
     ];
     let placeholder = ctx.t("userAgentPlaceholder");
-    Control::custom(move |disabled, key, window: &mut Window, cx: &mut App| {
+    let title = ctx.t("userAgent");
+    let description = ctx.t("userAgentDesc");
+    let render_title = title.clone();
+    let render_description = description.clone();
+    let mut row = SettingsRow::custom(move |disabled, key, window: &mut Window, cx: &mut App| {
         let tokens = active_theme(cx).tokens();
         let current = store.read(cx).daemon_str(UA_KEY);
         let preset = detect_preset(&current);
@@ -95,7 +101,7 @@ pub(crate) fn field(ctx: &SectionContext) -> Control {
             &options,
             selected_key,
             disabled,
-            false,
+            true,
             Rc::new(move |value: SharedString, cx: &mut App| {
                 select_store.update(cx, |store, cx| match value.as_ref() {
                     "default" => {
@@ -116,11 +122,36 @@ pub(crate) fn field(ctx: &SectionContext) -> Control {
             cx,
         );
 
+        // 以卡片实际可用宽度换行，而非按窗口单双列猜测控件空间。
+        let header = div()
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .w_full()
+            .gap_x(tokens.spacing.lg)
+            .gap_y(tokens.spacing.sm)
+            .child(
+                v_flex()
+                    .flex_grow(1.)
+                    .flex_basis(px(INPUT_WIDTH))
+                    .min_w_0()
+                    .gap(tokens.spacing.xxs)
+                    .child(body_text(cx).child(render_title.clone()))
+                    .child(meta_text(cx).child(render_description.clone())),
+            )
+            .child(
+                div()
+                    .w(px(DROPDOWN_MIN_WIDTH))
+                    .max_w_full()
+                    .min_w_0()
+                    .flex_shrink_0()
+                    .child(dropdown),
+            );
         let mut column = v_flex()
             .w_full()
+            .min_w_0()
             .gap(tokens.spacing.sm)
-            .items_end()
-            .child(dropdown);
+            .child(header);
         if custom_active {
             let slot = window.use_keyed_state(SharedString::from(format!("{key}-custom")), cx, {
                 let store = store.clone();
@@ -163,15 +194,13 @@ pub(crate) fn field(ctx: &SectionContext) -> Control {
                 }
             });
             let input = slot.read(cx).input.clone();
-            column = column.child(
-                Input::new(&input)
-                    .control(cx)
-                    .w(px(INPUT_WIDE_WIDTH))
-                    .disabled(disabled),
-            );
+            column = column.child(Input::new(&input).control(cx).w_full().disabled(disabled));
         }
         column.into_any_element()
-    })
+    });
+    // 自渲染不丢失设置搜索所需的标题与说明。
+    row.title = title;
+    row.description(description)
 }
 
 #[cfg(test)]

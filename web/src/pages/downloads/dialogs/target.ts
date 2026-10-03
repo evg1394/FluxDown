@@ -19,7 +19,7 @@ export interface RemoteTarget {
   /** cloud = deviceId；link = 指纹。 */
   id: string
   name: string
-  online: boolean
+  online: boolean | null
   /** 目标自报的默认下载目录；未上报为 null。 */
   defaultSaveDir: string | null
   /** 目标路径风格；无法判定为 null（此时只能交给 agent 校验）。 */
@@ -29,13 +29,14 @@ export interface RemoteTarget {
 export function buildRemoteTargets(
   cloudDevices: readonly CloudDevice[],
   linkedDevices: readonly LinkDeviceInfo[],
+  presence: { cloud: boolean; local: boolean },
 ): RemoteTarget[] {
   const cloud = otherDevices(cloudDevices).map<RemoteTarget>((device) => ({
     value: `cloud:${device.deviceId}`,
     kind: 'cloud',
     id: device.deviceId,
     name: device.name || device.deviceId,
-    online: device.isOnline,
+    online: presence.cloud ? device.isOnline : null,
     defaultSaveDir: device.defaultSaveDir?.trim() || null,
     pathStyle: effectivePathStyle(device),
   }))
@@ -44,7 +45,7 @@ export function buildRemoteTargets(
     kind: 'link',
     id: device.fingerprint,
     name: device.name || device.fingerprint,
-    online: device.online,
+    online: presence.local ? device.online : null,
     defaultSaveDir: device.defaultSaveDir?.trim() || null,
     pathStyle: effectivePathStyle(device),
   }))

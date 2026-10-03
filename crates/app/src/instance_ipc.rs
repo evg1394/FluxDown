@@ -36,6 +36,8 @@ pub struct ActivateMessage {
     pub files: Vec<PathBuf>,
     #[serde(default)]
     pub activate: bool,
+    #[serde(default)]
+    pub settings: bool,
 }
 
 /// 已排入 UI 事件泵的激活请求；仅在 UI 实际处理后确认给次实例。
@@ -441,6 +443,7 @@ mod tests {
             urls: vec!["https://a/b".to_owned()],
             files: vec!["/tmp/x.torrent".into()],
             activate: true,
+            settings: true,
         };
         let json = serde_json::to_string(&message).expect("serialize");
         assert_eq!(
@@ -464,6 +467,7 @@ mod tests {
             urls: vec!["magnet:?xt=abc".to_owned()],
             files: Vec::new(),
             activate: true,
+            settings: true,
         };
         let sender_endpoint = endpoint.clone();
         let sender_message = sent.clone();

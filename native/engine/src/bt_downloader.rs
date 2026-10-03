@@ -26,9 +26,7 @@ use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 #[cfg(target_os = "windows")]
-use windows_sys::Win32::Storage::FileSystem::{
-    FILE_ATTRIBUTE_HIDDEN, GetFileAttributesW, SetFileAttributesW,
-};
+use windows_sys::Win32::Storage::FileSystem::{FILE_ATTRIBUTE_HIDDEN, SetFileAttributesW};
 
 use bytes::Bytes;
 use librqbit::{
@@ -1839,31 +1837,41 @@ pub fn stage_dir_has_real_data(dir: &Path) -> bool {
 /// On non-Windows platforms this is a no-op — the leading `.` in the directory
 /// name is already the POSIX convention for hidden files.
 ///
-/// Failures are silently ignored: a non-hidden staging directory is merely a
+/// Failures are logged: a non-hidden staging directory is merely a
 /// cosmetic nuisance; it does not affect correctness.
 fn set_hidden(path: &Path) {
     #[cfg(target_os = "windows")]
     {
         use std::os::windows::ffi::OsStrExt;
-        // Encode path as a NUL-terminated wide string.
+        use std::os::windows::fs::MetadataExt;
         let wide: Vec<u16> = path
             .as_os_str()
             .encode_wide()
-            .chain(std::iter::once(0u16))
+            .chain(std::iter::once(0))
             .collect();
-        // Safety: `wide` is a valid NUL-terminated UTF-16 path.
-        unsafe {
-            let attrs = GetFileAttributesW(wide.as_ptr());
-            // INVALID_FILE_ATTRIBUTES == 0xFFFFFFFF
-            if attrs != 0xFFFF_FFFF {
-                if SetFileAttributesW(wide.as_ptr(), attrs | FILE_ATTRIBUTE_HIDDEN) == 0 {
-                    log_warn!(
-                        "[BT] cannot hide staging directory {}: {}",
-                        path.display(),
-                        std::io::Error::last_os_error()
-                    );
-                }
+        if wide[..wide.len() - 1].contains(&0) {
+            log_warn!("[BT] cannot hide staging directory: path contains NUL");
+            return;
+        }
+        let attrs = match std::fs::symlink_metadata(path) {
+            Ok(metadata) => metadata.file_attributes(),
+            Err(error) => {
+                log_warn!(
+                    "[BT] cannot read staging directory attributes {}: {}",
+                    path.display(),
+                    error
+                );
+                return;
             }
+        };
+        // SAFETY: wide 是无内嵌 NUL 的 NUL 结尾路径，调用期间存活，API 不保留指针。
+        let ok = unsafe { SetFileAttributesW(wide.as_ptr(), attrs | FILE_ATTRIBUTE_HIDDEN) };
+        if ok == 0 {
+            log_warn!(
+                "[BT] cannot hide staging directory {}: {}",
+                path.display(),
+                std::io::Error::last_os_error()
+            );
         }
     }
     #[cfg(not(target_os = "windows"))]
@@ -6873,6 +6881,28 @@ mod tests {
     // -------------------------------------------------------------------------
     // stage_dir_has_real_data — recursive, fail-safe (BUG-BT-PHANTOM-PIECES).
     // -------------------------------------------------------------------------
+
+    #[cfg(windows)]
+    #[test]
+    fn set_hidden_rejects_nul_without_changing_prefix() {
+        use std::os::windows::fs::MetadataExt;
+        let dir = unique_test_dir("hidden_nul");
+        std::fs::create_dir_all(&dir).expect("create staging directory");
+        let before = std::fs::symlink_metadata(&dir).unwrap().file_attributes();
+        let mut invalid = dir.clone().into_os_string();
+        invalid.push("\0suffix");
+        super::set_hidden(std::path::Path::new(&invalid));
+        assert_eq!(
+            std::fs::symlink_metadata(&dir).unwrap().file_attributes(),
+            before
+        );
+        super::set_hidden(&dir);
+        assert_eq!(
+            std::fs::symlink_metadata(&dir).unwrap().file_attributes(),
+            before | super::FILE_ATTRIBUTE_HIDDEN
+        );
+        std::fs::remove_dir_all(&dir).expect("remove staging directory");
+    }
 
     fn unique_test_dir(tag: &str) -> std::path::PathBuf {
         std::env::temp_dir().join(format!(

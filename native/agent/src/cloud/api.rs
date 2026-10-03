@@ -9,12 +9,34 @@ use super::{CloudClient, CloudError};
 #[derive(Clone)]
 pub struct CloudApi {
     client: CloudClient,
+    epoch: Option<super::client::RequestEpoch>,
 }
 
 impl CloudApi {
+    pub(crate) fn at_epoch(&self, epoch: super::client::RequestEpoch) -> Self {
+        Self {
+            client: self.client.clone(),
+            epoch: Some(epoch),
+        }
+    }
+
+    pub(crate) fn request_epoch(&self) -> super::client::RequestEpoch {
+        self.epoch.unwrap_or_else(|| self.client.request_epoch())
+    }
+
+    pub(crate) async fn lock_epoch(
+        &self,
+        epoch: super::client::RequestEpoch,
+    ) -> Result<tokio::sync::MutexGuard<'_, crate::state::AgentState>, CloudError> {
+        self.client.lock_epoch(epoch).await
+    }
+
     #[must_use]
     pub fn new(client: CloudClient) -> Self {
-        Self { client }
+        Self {
+            client,
+            epoch: None,
+        }
     }
 
     pub async fn profile(&self) -> Result<Value, CloudError> {
@@ -106,10 +128,10 @@ impl CloudApi {
 
     pub async fn remote_events(&self, device_id: &str) -> Result<reqwest::Response, CloudError> {
         self.client
-            .authenticated_stream(&format!(
-                "/api/v1/tasks/events?deviceId={}",
-                encode(device_id)
-            ))
+            .authenticated_stream_epoch(
+                &format!("/api/v1/tasks/events?deviceId={}", encode(device_id)),
+                self.request_epoch(),
+            )
             .await
     }
 
@@ -197,12 +219,16 @@ impl CloudApi {
         self.client.is_authenticated().await
     }
 
+    pub(crate) fn session_changes(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.client.session_changes()
+    }
+
     pub async fn sync_events(&self, device_id: &str) -> Result<reqwest::Response, CloudError> {
         self.client
-            .authenticated_stream(&format!(
-                "/api/v1/sync/events?deviceId={}",
-                encode(device_id)
-            ))
+            .authenticated_stream_epoch(
+                &format!("/api/v1/sync/events?deviceId={}", encode(device_id)),
+                self.request_epoch(),
+            )
             .await
     }
 
@@ -243,17 +269,25 @@ impl CloudApi {
             .await
     }
 
-    pub async fn persist_profile(
+    pub(crate) async fn persist_profile(
         &self,
+        epoch: super::client::RequestEpoch,
         value: Value,
     ) -> Result<fluxdown_protocol::AgentSessionDto, CloudError> {
         let profile = serde_json::from_value::<fluxdown_protocol::CloudProfile>(value)
             .map_err(|error| CloudError::invalid_response(error.to_string()))?;
-        self.client.persist_profile(profile).await
+        self.client.persist_profile(epoch, profile).await
     }
 
     pub async fn clear_session(&self) -> Result<(), CloudError> {
         self.client.clear_session().await
+    }
+
+    pub(crate) async fn clear_session_epoch(
+        &self,
+        epoch: super::client::RequestEpoch,
+    ) -> Result<(), CloudError> {
+        self.client.clear_session_epoch(epoch).await
     }
 
     /// 非用户主动结束会话：先发 `SessionRevoked(reason)` 再清会话。
@@ -264,14 +298,17 @@ impl CloudApi {
         self.client.revoke_session(reason).await
     }
 
+    pub(crate) async fn revoke_session_epoch(
+        &self,
+        reason: fluxdown_protocol::ErrorReason,
+        epoch: super::client::RequestEpoch,
+    ) -> Result<(), CloudError> {
+        self.client.revoke_session_epoch(reason, epoch).await
+    }
+
     /// 当前登录账号 id；未登录为 `None`。
     pub async fn current_user_id(&self) -> Option<String> {
         self.client.current_user_id().await
-    }
-
-    /// 同步本机设备名（重命名当前设备后使用）。
-    pub async fn set_device_name(&self, name: &str) -> Result<(), CloudError> {
-        self.client.set_device_name(name).await
     }
 
     #[must_use]
@@ -292,7 +329,9 @@ impl CloudApi {
         path: &str,
         body: Option<&P>,
     ) -> Result<Value, CloudError> {
-        self.client.authenticated(method, path, body).await
+        self.client
+            .authenticated_epoch(method, path, body, self.request_epoch())
+            .await
     }
 }
 

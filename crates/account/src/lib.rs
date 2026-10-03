@@ -11,6 +11,7 @@ mod errors;
 mod host;
 mod link;
 mod pages;
+mod profile_edit;
 mod sync_scope;
 mod ui;
 mod verification;

@@ -1,6 +1,6 @@
 //! 窗口边界记忆。
 //!
-//! - 主窗口 / 设置窗口记「位置 + 尺寸 + 最大化 + 所在显示器」；其余可调尺寸的辅助窗口只记
+//! - 主窗口 / 设置窗口 / 进度窗口记「位置 + 尺寸 + 最大化 + 所在显示器」；其余可调尺寸的辅助窗口只记
 //!   尺寸，位置仍按各自规则居中（新建下载 / BT 选择跟随主窗口所在显示器）。同类窗口共用一条
 //!   记录：所有任务详情窗口共享一份尺寸。
 //! - gpui 的窗口坐标以「打开时 `display_id` 指定的显示器（缺省主显示器）」为基准解释：macOS
@@ -30,6 +30,7 @@ const MAX_EDGE: f32 = 20_000.;
 pub enum RememberedWindow {
     Main,
     Settings,
+    Progress,
     NewDownload,
     QueueManager,
     TaskDetail,
@@ -42,6 +43,7 @@ impl RememberedWindow {
         match self {
             Self::Main => "desktop.window.main",
             Self::Settings => "desktop.window.settings",
+            Self::Progress => "desktop.window.progress",
             Self::NewDownload => "desktop.window.new_download",
             Self::QueueManager => "desktop.window.queue_manager",
             Self::TaskDetail => "desktop.window.task_detail",
@@ -51,7 +53,7 @@ impl RememberedWindow {
     }
 
     const fn remembers_position(self) -> bool {
-        matches!(self, Self::Main | Self::Settings)
+        matches!(self, Self::Main | Self::Settings | Self::Progress)
     }
 }
 

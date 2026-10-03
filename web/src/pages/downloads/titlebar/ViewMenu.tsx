@@ -56,6 +56,7 @@ const SORT_DIRS: readonly { value: SortDir; labelKey: string }[] = [
 const DENSITIES: readonly { value: ViewDensity; labelKey: string }[] = [
   { value: 'compact', labelKey: 'viewDensityCompact' },
   { value: 'comfortable', labelKey: 'viewDensityComfortable' },
+  { value: 'relaxed', labelKey: 'viewDensityRelaxed' },
 ]
 
 const PLACEMENTS: readonly { value: DetailPlacement; labelKey: string }[] = [

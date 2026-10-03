@@ -17,6 +17,7 @@ use gpui::{
 use gpui_component::{Icon, Sizable as _, h_flex, spinner::Spinner, tooltip::Tooltip, v_flex};
 
 use crate::assets::{CLOUD_ICON_PATH, CROWN_ICON_PATH, REFRESH_ICON_PATH};
+use crate::profile_edit::{ProfileField, can_edit_origin_id};
 use crate::t;
 use crate::view::AccountView;
 
@@ -73,6 +74,10 @@ pub(crate) fn render(
         .as_ref()
         .and_then(|plan| plan_badge(tokens, &extended, plan, session.user.membership_ordinal));
     let accent = tokens.colors.accent_foreground;
+    let ring = tokens.colors.ring;
+    let edit_size = extended.icon.lg * 1.5;
+    let edit_gap = tokens.spacing.xs;
+    let edit_border = extended.stroke.thin;
     let origin_id = session.user.origin_id;
     let logout_label = t(translator, "accountLogout");
     let refresh_label = t(translator, "accountCloudRefresh");
@@ -121,24 +126,110 @@ pub(crate) fn render(
                         .gap(tokens.spacing.sm)
                         .items_center()
                         .child(
-                            div()
-                                .text_size(extended.title.size)
-                                .line_height(extended.title.line_height)
-                                .font_weight(extended.title.weight)
-                                .truncate()
-                                .text_color(tokens.colors.foreground)
-                                .child(display_name),
+                            h_flex()
+                                .group("account-nickname")
+                                .min_w_0()
+                                .gap_0()
+                                .child(
+                                    div()
+                                        .text_size(extended.title.size)
+                                        .line_height(extended.title.line_height)
+                                        .font_weight(extended.title.weight)
+                                        .truncate()
+                                        .text_color(tokens.colors.foreground)
+                                        .child(display_name),
+                                )
+                                .child(
+                                    icon_button(
+                                        "account-nickname-edit",
+                                        t(translator, "accountNicknameEditTooltip"),
+                                        Icon::new(FluxIcon::Pen).size(extended.icon.sm),
+                                        ButtonVariant::Ghost,
+                                        cx,
+                                    )
+                                    // Keep the tab stop mounted, but collapse its visual footprint.
+                                    .h(edit_size)
+                                    .w_0()
+                                    .min_w_0()
+                                    .ml_0()
+                                    .border_0()
+                                    .overflow_hidden()
+                                    .flex_none()
+                                    .opacity(0.)
+                                    .group_hover("account-nickname", move |style| {
+                                        style
+                                            .w(edit_size)
+                                            .ml(edit_gap)
+                                            .border(edit_border)
+                                            .opacity(1.)
+                                    })
+                                    .focus_visible(move |style| {
+                                        style
+                                            .w(edit_size)
+                                            .ml(edit_gap)
+                                            .border(edit_border)
+                                            .opacity(1.)
+                                            .border_color(ring)
+                                    })
+                                    .disabled(disabled)
+                                    .tooltip({
+                                        let label = t(translator, "accountNicknameEditTooltip");
+                                        move |window, cx| {
+                                            Tooltip::new(label.clone()).build(window, cx)
+                                        }
+                                    })
+                                    .on_click(cx.listener(
+                                        |view, _: &ClickEvent, window, cx| {
+                                            view.open_profile_edit(
+                                                ProfileField::Nickname,
+                                                window,
+                                                cx,
+                                            )
+                                        },
+                                    )),
+                                ),
                         )
                         .when_some(plan_badge, |this, badge| this.child(badge)),
                 )
-                .child(origin_id_pill(
-                    tokens,
-                    &extended,
-                    origin_id,
-                    origin_id_copied,
-                    copied_label,
-                    cx,
-                )),
+                .child(
+                    h_flex()
+                        .group("account-origin-id")
+                        .gap(tokens.spacing.xs)
+                        .child(origin_id_pill(
+                            tokens,
+                            &extended,
+                            origin_id,
+                            origin_id_copied,
+                            copied_label,
+                            cx,
+                        ))
+                        .when(can_edit_origin_id(session), |row| {
+                            row.child(
+                                icon_button(
+                                    "account-origin-id-edit",
+                                    t(translator, "accountOriginIdEditTooltip"),
+                                    Icon::new(FluxIcon::Pen).size(extended.icon.sm),
+                                    ButtonVariant::Ghost,
+                                    cx,
+                                )
+                                .size(extended.icon.lg * 1.5)
+                                .flex_none()
+                                .opacity(0.)
+                                .group_hover("account-origin-id", |style| style.opacity(1.))
+                                .focus_visible(move |style| style.opacity(1.).border_color(ring))
+                                .disabled(disabled)
+                                .tooltip({
+                                    let label = t(translator, "accountOriginIdEditTooltip");
+                                    move |window, cx| Tooltip::new(label.clone()).build(window, cx)
+                                })
+                                .on_click(cx.listener(
+                                    |view, _: &ClickEvent, window, cx| {
+                                        view.open_profile_edit(ProfileField::OriginId, window, cx)
+                                    },
+                                )),
+                            )
+                        }),
+                ),
         )
         .child(
             h_flex()

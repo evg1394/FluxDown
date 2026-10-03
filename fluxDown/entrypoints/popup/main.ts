@@ -23,6 +23,7 @@
 import { browser } from 'wxt/browser';
 import { initI18n, applyI18nToDOM, t, getLocale, saveLocale } from '@/utils/i18n';
 import { checkFluxDownAvailable } from '@/utils/download-dispatch';
+import { exportConnectionDiagnostics } from "@/utils/connection-diagnostics";
 import { loadSettings, saveSettings } from '@/utils/settings';
 import {
   isDomainExcluded,
@@ -56,6 +57,21 @@ import {
 } from '@/utils/file-icons';
 
 const $ = <T extends HTMLElement>(sel: string) => document.querySelector<T>(sel)!;
+
+const exportDiagnosticsBtn = $<HTMLButtonElement>("#exportDiagnosticsBtn");
+exportDiagnosticsBtn.addEventListener("click", async () => {
+  exportDiagnosticsBtn.disabled = true;
+  exportDiagnosticsBtn.textContent = t("diagnostics.exporting");
+  try {
+    await exportConnectionDiagnostics();
+    showToast(t("diagnostics.exportStarted"));
+  } catch {
+    showToast(t("diagnostics.exportFailed"), "error");
+  } finally {
+    exportDiagnosticsBtn.disabled = false;
+    exportDiagnosticsBtn.textContent = t("diagnostics.export");
+  }
+});
 
 // ===== DOM 元素 =====
 const statusBadge = $('#statusBadge')!;

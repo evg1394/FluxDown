@@ -20,7 +20,8 @@ import type { ReactNode } from 'react'
 import { useT } from '../../../i18n'
 import { categoryIconByKey } from '../../../lib/category-icons'
 import { cn } from '../../../lib/cn'
-import { LATER_QUEUE_ID, MAIN_QUEUE_ID, rpc, useAgent, usePref, usePrefBool } from '../../../lib/rpc'
+import { LATER_QUEUE_ID, MAIN_QUEUE_ID, rpc, useAgent, useConnection, usePref, usePrefBool } from '../../../lib/rpc'
+import { cloudPresenceKnown } from '../../../lib/cloud-presence'
 import type { CustomCategoryDto, QueueDto } from '../../../lib/rpc'
 import { ContextMenuArea, Icon, confirmDialog } from '../../../ui'
 import { toastRpcError } from '../../../lib/rpcToast'
@@ -185,6 +186,9 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
   const navigate = useNavigate()
   const d = useDownloads()
   const { views, categories, queues, cloudDevices, linkedDevices, sidebarSelection: current } = d
+  const cloudConnection = useAgent((snapshot) => snapshot.cloudConnection, undefined)
+  const localReady = useConnection().phase === 'ready'
+  const cloudReady = cloudPresenceKnown(cloudConnection, localReady)
 
   const [sectionOpen, setSectionOpen] = useState<Record<Section, boolean>>({ status: true, queues: true, devices: true })
   const [expanded, setExpanded] = useState<DownloadStatusFilter | null>('all')
@@ -289,17 +293,17 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
     return entries
   }
 
-  const devices: { id: string; label: string; online: boolean }[] = [
+  const devices: { id: string; label: string; online: boolean | null }[] = [
     { id: LOCAL_DEVICE, label: t('thisDevice'), online: true },
     ...otherDevices(cloudDevices).map((device) => ({
       id: device.deviceId,
       label: device.name || device.deviceId,
-      online: device.isOnline,
+      online: cloudReady ? device.isOnline : null,
     })),
     ...linkedDevices.map((device) => ({
       id: device.fingerprint,
       label: device.name || device.fingerprint,
-      online: device.online,
+      online: localReady ? device.online : null,
     })),
   ]
   const openAddDevice = () => {
@@ -446,10 +450,10 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
               <NavRow
                 key={device.id}
                 selected={isSelected(selection)}
-                label={device.label}
+                label={device.online === null ? `${device.label} · ${t('devicePresenceUnknown')}` : device.label}
                 icon={device.id === LOCAL_DEVICE ? Cpu : Globe}
                 count={counts.deviceCounts.get(device.id) ?? 0}
-                dot={device.online && device.id !== LOCAL_DEVICE}
+                dot={device.online === true && device.id !== LOCAL_DEVICE}
                 onClick={() => select(selection)}
               />
             )

@@ -132,6 +132,7 @@ export const METHOD = {
   AGENT_GATEWAY_PATCH: 'agent.gateway.patch',
   AGENT_GATEWAY_REVEAL_TOKEN: 'agent.gateway.revealToken',
   AGENT_DEVICE_LIST: 'agent.device.list',
+  AGENT_REMOTE_RECONNECT: 'agent.remote.reconnect',
   AGENT_DEVICE_RENAME: 'agent.device.rename',
   AGENT_DEVICE_DELETE: 'agent.device.delete',
   AGENT_PREFERENCES_PATCH: 'agent.preferences.patch',

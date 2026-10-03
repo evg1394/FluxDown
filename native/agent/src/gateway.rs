@@ -321,6 +321,16 @@ impl GatewayService {
                 .await
             }
             method::AGENT_DEVICE_LIST => self.device_list().await,
+            method::AGENT_REMOTE_RECONNECT => {
+                if !self.cloud.is_authenticated().await {
+                    return Err(RpcErrorData::new(
+                        fluxdown_protocol::ApplicationErrorCode::Unauthorized,
+                        false,
+                    ));
+                }
+                self.remote.request_reconnect();
+                Ok(serde_json::json!({"accepted": true}))
+            }
             method::AGENT_DEVICE_RENAME => {
                 self.device_rename(params_or_empty(request.params)).await
             }
@@ -524,22 +534,25 @@ impl GatewayService {
         body: Option<serde_json::Value>,
         persist: bool,
     ) -> Result<serde_json::Value, RpcErrorData> {
+        let epoch = self.cloud.request_epoch();
         let value = self
             .cloud
+            .at_epoch(epoch)
             .profile_call(method, suffix, body.as_ref())
             .await
             .map_err(cloud_error_data)?;
         if persist {
-            let session = self
-                .cloud
-                .persist_profile(value.clone())
+            self.cloud
+                .persist_profile(epoch, value.clone())
                 .await
                 .map_err(cloud_error_data)?;
-            self.events
-                .publish(fluxdown_protocol::AgentEvent::SessionChanged(Box::new(
-                    Some(session),
-                )));
         }
+        drop(
+            self.cloud
+                .lock_epoch(epoch)
+                .await
+                .map_err(cloud_error_data)?,
+        );
         Ok(value)
     }
 
@@ -743,13 +756,20 @@ impl GatewayService {
     }
 
     async fn device_list(&self) -> Result<serde_json::Value, RpcErrorData> {
+        let epoch = self.cloud.request_epoch();
         let device_id = self.state.lock().await.device_id.clone();
         let value = self
             .cloud
+            .at_epoch(epoch)
             .devices(&device_id)
             .await
             .map_err(cloud_error_data)?;
         let devices = cloud_devices_from_value(&value)?;
+        let _state = self
+            .cloud
+            .lock_epoch(epoch)
+            .await
+            .map_err(cloud_error_data)?;
         self.events
             .publish(fluxdown_protocol::AgentEvent::CloudDevicesChanged(devices));
         Ok(value)
@@ -759,6 +779,7 @@ impl GatewayService {
         &self,
         params: serde_json::Value,
     ) -> Result<serde_json::Value, RpcErrorData> {
+        let epoch = self.cloud.request_epoch();
         let id = required_string(&params, "id")?;
         let name = required_string(&params, "name")?;
         if name.chars().count() > 64 {
@@ -766,15 +787,19 @@ impl GatewayService {
         }
         let value = self
             .cloud
+            .at_epoch(epoch)
             .rename_device(&id, &name)
             .await
             .map_err(cloud_error_data)?;
         let updated = serde_json::from_value::<fluxdown_protocol::CloudDevice>(value.clone())
             .map_err(|error| internal_error("device rename response", error))?;
-        if updated.is_current
-            && let Err(error) = self.cloud.set_device_name(&updated.name).await
-        {
-            tracing::warn!(error = %error, "persisting the renamed local device name failed");
+        let mut state = self
+            .cloud
+            .lock_epoch(epoch)
+            .await
+            .map_err(cloud_error_data)?;
+        if updated.is_current {
+            state.device_name.clone_from(&updated.name);
         }
         let mut devices = agent_snapshot(&self.events)?.cloud_devices;
         if let Some(existing) = devices.iter_mut().find(|device| device.id == updated.id) {
@@ -784,6 +809,11 @@ impl GatewayService {
         }
         self.events
             .publish(fluxdown_protocol::AgentEvent::CloudDevicesChanged(devices));
+        drop(state);
+        self.store
+            .persist(&self.state)
+            .await
+            .map_err(|error| internal_error("persist renamed device", error))?;
         Ok(value)
     }
 
@@ -791,23 +821,35 @@ impl GatewayService {
         &self,
         params: serde_json::Value,
     ) -> Result<serde_json::Value, RpcErrorData> {
+        let epoch = self.cloud.request_epoch();
         let id = required_string(&params, "id")?;
-        let mut devices = agent_snapshot(&self.events)?.cloud_devices;
+        let devices = agent_snapshot(&self.events)?.cloud_devices;
         let deleting_current = devices
             .iter()
             .find(|device| device.id == id)
             .is_some_and(|device| device.is_current);
         let value = self
             .cloud
+            .at_epoch(epoch)
             .delete_device(&id)
             .await
             .map_err(cloud_error_data)?;
-        devices.retain(|device| device.id != id);
-        self.events
-            .publish(fluxdown_protocol::AgentEvent::CloudDevicesChanged(devices));
         if deleting_current {
             // `clear_session` 自身投影 `SessionChanged(None)`。
-            self.cloud.clear_session().await.map_err(cloud_error_data)?;
+            self.cloud
+                .clear_session_epoch(epoch)
+                .await
+                .map_err(cloud_error_data)?;
+        } else {
+            let _state = self
+                .cloud
+                .lock_epoch(epoch)
+                .await
+                .map_err(cloud_error_data)?;
+            let mut devices = agent_snapshot(&self.events)?.cloud_devices;
+            devices.retain(|device| device.id != id);
+            self.events
+                .publish(fluxdown_protocol::AgentEvent::CloudDevicesChanged(devices));
         }
         Ok(value)
     }
@@ -1740,6 +1782,9 @@ enum Lane {
 }
 
 fn lane_for(method_name: &str) -> Lane {
+    if method_name == method::AGENT_REMOTE_RECONNECT {
+        return Lane::Local;
+    }
     if method_name.starts_with("daemon.") {
         return if fluxdown_protocol::method::is_slow_daemon_method(method_name) {
             Lane::DaemonSlow
@@ -2021,6 +2066,164 @@ mod tests {
         server_task: tokio::task::JoinHandle<Result<(), std::io::Error>>,
     }
 
+    #[tokio::test]
+    async fn independent_connections_discard_profile_and_dispatch_from_previous_account() {
+        use axum::routing::{get, post};
+        use serde_json::json;
+
+        for profile in [true, false] {
+            let started = Arc::new(tokio::sync::Notify::new());
+            let release = Arc::new(tokio::sync::Notify::new());
+            let delayed = {
+                let started = started.clone();
+                let release = release.clone();
+                move || {
+                    let started = started.clone();
+                    let release = release.clone();
+                    async move {
+                        started.notify_one();
+                        release.notified().await;
+                        axum::Json(if profile {
+                            json!({"id": "A", "email": "", "nickname": "", "plan": "free", "status": "active", "createdAt": "", "entitlements": {}})
+                        } else {
+                            json!({"task": {"id": "A-task"}})
+                        })
+                    }
+                }
+            };
+            let app = axum::Router::new()
+                .route("/api/v1/me", get(delayed.clone()))
+                .route("/api/v1/tasks/dispatch", post(delayed))
+                .route("/api/v1/auth/logout", post(|| async { axum::http::StatusCode::NO_CONTENT }))
+                .route("/api/v1/auth/login", post(|axum::Json(body): axum::Json<serde_json::Value>| async move {
+                    let account = body["account"].as_str().expect("account");
+                    axum::Json(json!({
+                        "accessToken": format!("access-{account}"),
+                        "refreshToken": format!("refresh-{account}"),
+                        "expiresIn": 3600,
+                        "user": {"id": account, "email": "", "nickname": "", "plan": "free", "status": "active", "createdAt": ""},
+                        "entitlements": {},
+                        "device": {"id": "row", "deviceId": "device", "name": "", "createdAt": "", "lastSeenAt": ""}
+                    }))
+                }));
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind");
+            let address = listener.local_addr().expect("address");
+            let server =
+                tokio::spawn(async move { axum::serve(listener, app).await.expect("serve") });
+            let gateway = TestGateway::new("account_response_epoch").await;
+            gateway
+                .service
+                .cloud
+                .set_endpoint(&format!("http://{address}"))
+                .await
+                .expect("endpoint");
+            gateway
+                .service
+                .auth
+                .login(&json!({"account": "A"}))
+                .await
+                .expect("login A");
+            let response_epoch = gateway.service.cloud.request_epoch();
+            let already_decoded_profile = {
+                let state = gateway.state.lock().await;
+                let session = state
+                    .credentials
+                    .as_ref()
+                    .expect("A credentials")
+                    .session
+                    .as_ref()
+                    .expect("A session");
+                serde_json::to_value(fluxdown_protocol::CloudProfile {
+                    user: session.user.clone(),
+                    entitlements: session.entitlements.clone(),
+                    current_plan: session.current_plan.clone(),
+                    purchase_credit_minor: 0,
+                })
+                .expect("decoded profile fixture")
+            };
+            // Two independent WS connections have independent lanes. Invoke their
+            // shared service concurrently, without an artificial global lane lock.
+            let old_connection = async {
+                if profile {
+                    gateway
+                        .service
+                        .profile_request(reqwest::Method::GET, "", None, true)
+                        .await
+                        .is_err()
+                } else {
+                    gateway
+                        .service
+                        .remote
+                        .dispatch(
+                            serde_json::from_value(json!({
+                                "toDevice": "other", "url": "https://example.test/file"
+                            }))
+                            .expect("dispatch params"),
+                        )
+                        .await
+                        .is_err()
+                }
+            };
+            let new_connection = async {
+                started.notified().await;
+                gateway.service.auth.logout().await.expect("logout A");
+                gateway
+                    .service
+                    .auth
+                    .login(&json!({"account": "B"}))
+                    .await
+                    .expect("login B");
+                release.notify_one();
+            };
+            let (rejected, ()) = tokio::time::timeout(Duration::from_secs(5), async {
+                tokio::join!(old_connection, new_connection)
+            })
+            .await
+            .expect("independent connections complete");
+            assert!(rejected);
+            // Also exercise the final commit boundary: transport may already
+            // have accepted A's response before B logs in. A transport-only
+            // epoch check cannot protect this separate state-lock acquisition.
+            let stale_error = gateway
+                .service
+                .cloud
+                .persist_profile(response_epoch, already_decoded_profile)
+                .await
+                .expect_err("decoded A profile cannot commit to B");
+            assert_eq!(stale_error.code.as_deref(), Some("session_changed"));
+            let state = gateway.state.lock().await;
+            assert_eq!(
+                state
+                    .credentials
+                    .as_ref()
+                    .expect("B credentials")
+                    .session
+                    .as_ref()
+                    .expect("B session")
+                    .user
+                    .id,
+                "B"
+            );
+            assert!(state.remote_tasks.is_empty());
+            drop(state);
+            let snapshot = super::agent_snapshot(&gateway.service.events).expect("snapshot");
+            assert_eq!(snapshot.session.expect("projected B").user.id, "B");
+            assert!(snapshot.remote_tasks.is_empty());
+            assert!(
+                gateway
+                    .store
+                    .load()
+                    .await
+                    .expect("reload")
+                    .remote_tasks
+                    .is_empty()
+            );
+            server.abort();
+        }
+    }
+
     impl TestGateway {
         async fn new(label: &str) -> Self {
             Self::new_mode(label, false).await
@@ -2065,7 +2268,8 @@ mod tests {
                 state.clone(),
                 store.clone(),
             )
-            .expect("build agent test cloud client");
+            .expect("build agent test cloud client")
+            .with_events(events.clone());
             let cloud_api = crate::cloud::CloudApi::new(cloud_client.clone());
             let auth = Arc::new(crate::cloud::CloudAuthService::new(
                 cloud_client,
@@ -2801,6 +3005,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn remote_reconnect_requires_login_and_only_acknowledges_the_request() {
+        let harness = TestGateway::new("remote_reconnect").await;
+        let method = fluxdown_protocol::method::AGENT_REMOTE_RECONNECT;
+        let response = harness.call(method, serde_json::json!({})).await;
+        assert!(matches!(response, RpcResponse::Failure(_)));
+        harness.state.lock().await.credentials = Some(crate::state::CloudCredentials {
+            access_token: "access".to_owned(),
+            refresh_token: "refresh".to_owned(),
+            expires_at_unix: i64::MAX,
+            session: None,
+        });
+        let response = tokio::time::timeout(
+            Duration::from_secs(1),
+            harness.call(method, serde_json::json!({})),
+        )
+        .await
+        .expect("immediate acknowledgement");
+        let RpcResponse::Success(success) = response else {
+            panic!("reconnect failed: {response:?}");
+        };
+        assert_eq!(success.result, serde_json::json!({"accepted": true}));
+        let fluxdown_protocol::SnapshotBody::Agent(snapshot) =
+            harness.service.events.snapshot().body
+        else {
+            panic!("agent snapshot");
+        };
+        assert_eq!(
+            snapshot.cloud_connection.state,
+            fluxdown_protocol::CloudConnectionState::Disconnected
+        );
+        harness.finish().await;
+    }
+
+    #[tokio::test]
     async fn gateway_patch_persists_lan_flag_and_regenerates_token() {
         let harness = TestGateway::new("gateway_patch").await;
         let response = harness
@@ -3202,6 +3440,99 @@ mod tests {
         assert!(matches!(lane_for("agent.link.pairFinish"), Lane::Slow));
         assert!(matches!(lane_for("agent.diagnostics.run"), Lane::Slow));
         assert!(matches!(lane_for("system.ping"), Lane::Local));
+        assert!(matches!(lane_for("agent.remote.reconnect"), Lane::Local));
+    }
+
+    #[tokio::test]
+    async fn reconnect_lane_bypasses_an_inflight_cloud_request() {
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener");
+        let address = listener.local_addr().expect("address");
+        let app = axum::Router::new().route(
+            "/api/v1/tasks/remote",
+            axum::routing::get({
+                let entered = entered.clone();
+                let release = release.clone();
+                move || {
+                    let entered = entered.clone();
+                    let release = release.clone();
+                    async move {
+                        entered.notify_one();
+                        release.notified().await;
+                        axum::Json(serde_json::json!({"tasks":[]}))
+                    }
+                }
+            }),
+        );
+        let server = tokio::spawn(async move { axum::serve(listener, app).await });
+        let harness = TestGateway::new("reconnect_lane").await;
+        harness
+            .service
+            .cloud
+            .set_endpoint(&format!("http://{address}"))
+            .await
+            .expect("endpoint");
+        harness.state.lock().await.credentials = Some(crate::state::CloudCredentials {
+            access_token: "access".to_owned(),
+            refresh_token: "refresh".to_owned(),
+            expires_at_unix: i64::MAX,
+            session: None,
+        });
+        let service = Arc::new(harness.service);
+        let (responses, mut receiver) = tokio::sync::mpsc::channel(4);
+        let lanes = super::RequestLanes::spawn(&service, responses);
+        assert!(
+            lanes
+                .submit(RpcRequest::new(
+                    RequestId::Integer(1),
+                    "agent.remote.list",
+                    None,
+                ))
+                .is_none()
+        );
+        tokio::time::timeout(Duration::from_secs(2), entered.notified())
+            .await
+            .expect("cloud request blocked");
+        assert!(
+            lanes
+                .submit(RpcRequest::new(
+                    RequestId::Integer(2),
+                    "agent.remote.reconnect",
+                    None,
+                ))
+                .is_none()
+        );
+        let response = tokio::time::timeout(Duration::from_secs(1), receiver.recv())
+            .await
+            .expect("reconnect is not queued behind cloud")
+            .expect("response");
+        let RpcResponse::Success(response) = response else {
+            panic!("reconnect failed")
+        };
+        assert_eq!(response.id, RequestId::Integer(2));
+        assert_eq!(response.result, serde_json::json!({"accepted":true}));
+        release.notify_one();
+        tokio::time::timeout(Duration::from_secs(2), receiver.recv())
+            .await
+            .expect("cloud unblocked")
+            .expect("cloud response");
+        drop(lanes);
+        drop(service);
+        server.abort();
+        assert!(
+            server
+                .await
+                .expect_err("stopped mock server")
+                .is_cancelled()
+        );
+        drop(harness.state);
+        drop(harness.store);
+        tokio::fs::remove_dir_all(harness.dir)
+            .await
+            .expect("cleanup");
     }
 
     #[test]

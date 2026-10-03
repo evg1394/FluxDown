@@ -67,6 +67,12 @@ pub enum ErrorReason {
     RateLimited,
     /// FluxCloud：邮箱已被注册。
     EmailTaken,
+    /// FluxCloud：目标 Origin ID 已被占用。
+    OriginIdTaken,
+    /// FluxCloud：当前权益不允许自助修改 Origin ID。
+    OriginIdChangeNotAllowed,
+    /// FluxCloud：Origin ID 的一次修改机会已使用。
+    OriginIdAlreadyChanged,
     /// FluxCloud：账号已被停用。
     AccountDisabled,
     /// FluxCloud：服务端关闭了注册。

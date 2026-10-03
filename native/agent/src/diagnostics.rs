@@ -1114,7 +1114,7 @@ fn notification_check(
         ),
         Some(NotificationAvailability::Unverifiable) => (
             DiagnosticLevel::Info,
-            "the system does not expose notification permission".to_owned(),
+            "notification permission is not yet determined or cannot be verified".to_owned(),
             HINT_NOTIFICATIONS_UNVERIFIED,
             test,
         ),

@@ -1,7 +1,7 @@
 ---
 /**
  * 单个下载文件行。服务端渲染时指向 GitHub Releases(无 JS 也能下载);
- * 客户端脚本按 `data-asset` 路径从 /api/release 取到资产后改写为 /api/download/<file>,
+ * 客户端脚本按 `data-asset` 路径从 /api/release 取到资产后设置 GitHub 直链和备用入口,
  * 本次发布没有该资产时整行隐藏。
  */
 import { Download } from "lucide-react";

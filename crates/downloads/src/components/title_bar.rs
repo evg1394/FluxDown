@@ -746,6 +746,7 @@ fn display_page(menu: &ViewMenuContext<'_>, style: MenuStyle, cx: &App) -> Vec<A
     for (density, key) in [
         (ViewDensity::Compact, "viewDensityCompact"),
         (ViewDensity::Comfortable, "viewDensityComfortable"),
+        (ViewDensity::Relaxed, "viewDensityRelaxed"),
     ] {
         let view = menu.view.clone();
         rows.push(

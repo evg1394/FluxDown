@@ -4,9 +4,11 @@ import { Info, Pencil, RefreshCw, Trash2 } from 'lucide-react'
 import { useState } from 'react'
 import { useT } from '../../../../i18n'
 import { rpc } from '../../../../lib/rpc'
-import type { CloudDevice } from '../../../../lib/rpc'
+import type { CloudConnectionDto, CloudDevice } from '../../../../lib/rpc'
+import { cloudConnectionLabelKey, cloudPresenceKnown, devicePresenceKey } from '../../../../lib/cloud-presence'
 import { Badge, Button, Card, ConfirmFooter, Dialog, FieldError, Form, FormField, Icon, Input, confirmDialog, toast } from '../../../../ui'
-import { accountErrorKey } from './errorText'
+import { accountErrorKey, REASON_KEYS } from './errorText'
+import { sortedDevices } from './deviceList'
 
 const PLATFORM_KEYS: Record<string, string> = {
   windows: 'accountDevicePlatformWindows',
@@ -61,7 +63,7 @@ function formatDate(value: string): string {
   return Number.isNaN(Date.parse(value)) ? '—' : new Date(value).toLocaleString()
 }
 
-function DetailDialog({ device, onClose }: { device: CloudDevice; onClose: () => void }) {
+function DetailDialog({ device, presenceKnown, onClose }: { device: CloudDevice; presenceKnown: boolean; onClose: () => void }) {
   const t = useT()
   const platformKey = device.platform ? PLATFORM_KEYS[device.platform.toLowerCase()] : undefined
   const rows: [string, string][] = [
@@ -70,7 +72,7 @@ function DetailDialog({ device, onClose }: { device: CloudDevice; onClose: () =>
     [t('accountDeviceFieldLastIp'), device.lastIp ?? '—'],
     [t('accountDeviceFieldCreatedAt'), formatDate(device.createdAt)],
     [t('accountDeviceFieldLastSeenAt'), formatDate(device.lastSeenAt)],
-    [t('accountDeviceFieldOnline'), device.isOnline ? t('deviceOnline') : t('deviceOffline')],
+    [t('accountDeviceFieldOnline'), t(devicePresenceKey(device, presenceKnown))],
     [t('accountDeviceFieldId'), device.deviceId],
   ]
   if (device.defaultSaveDir) rows.push([t('accountDeviceFieldSaveDir'), device.defaultSaveDir])
@@ -88,14 +90,14 @@ function DetailDialog({ device, onClose }: { device: CloudDevice; onClose: () =>
   )
 }
 
-function DeviceRow({ device, disabled }: { device: CloudDevice; disabled: boolean }) {
+function DeviceRow({ device, disabled, presenceKnown }: { device: CloudDevice; disabled: boolean; presenceKnown: boolean }) {
   const t = useT()
   const [renaming, setRenaming] = useState(false)
   const [detail, setDetail] = useState(false)
   const platformKey = device.platform ? PLATFORM_KEYS[device.platform.toLowerCase()] : undefined
   const platform = platformKey ? t(platformKey) : (device.platform ?? '')
   const lastSeen = Number.isNaN(Date.parse(device.lastSeenAt)) ? '' : new Date(device.lastSeenAt).toLocaleString()
-  const meta = [platform, device.appVersion, lastSeen].filter((part): part is string => Boolean(part)).join(' · ')
+  const meta = [t(devicePresenceKey(device, presenceKnown)), platform, device.appVersion, lastSeen].filter((part): part is string => Boolean(part)).join(' · ')
 
   const remove = async () => {
     const description = device.isCurrent
@@ -117,7 +119,7 @@ function DeviceRow({ device, disabled }: { device: CloudDevice; disabled: boolea
 
   return (
     <div className="flex items-center gap-2 px-3 py-2 coarse:min-h-touch">
-      <span className={`size-2 shrink-0 rounded-full ${device.isOnline ? 'bg-success' : 'bg-text-tertiary/50'}`} aria-hidden />
+      <span className={`size-2 shrink-0 rounded-full ${presenceKnown && device.isOnline ? 'bg-success' : 'bg-text-tertiary/50'}`} aria-hidden />
       <div className="flex min-w-0 flex-1 flex-col gap-0.5">
         <div className="flex min-w-0 items-center gap-2">
           <span className="min-w-0 truncate text-sm font-medium text-foreground">{device.name}</span>
@@ -144,24 +146,33 @@ function DeviceRow({ device, disabled }: { device: CloudDevice; disabled: boolea
           <Icon icon={Trash2} size="md" />
         </Button>
       </div>
-      {detail ? <DetailDialog device={device} onClose={() => setDetail(false)} /> : null}
+      {detail ? <DetailDialog device={device} presenceKnown={presenceKnown} onClose={() => setDetail(false)} /> : null}
       {renaming ? <RenameDialog device={device} onClose={() => setRenaming(false)} /> : null}
     </div>
   )
 }
 
-export function DevicesCard({ devices, disabled }: { devices: readonly CloudDevice[]; disabled: boolean }) {
+export function DevicesCard({ devices, disabled, connection }: {
+  devices: readonly CloudDevice[]
+  disabled: boolean
+  connection: CloudConnectionDto | undefined
+}) {
   const t = useT()
   const [refreshing, setRefreshing] = useState(false)
   const [errorKey, setErrorKey] = useState<string | null>(null)
+  const presenceKnown = cloudPresenceKnown(connection, !disabled)
+  const connectionErrorKey = connection?.lastErrorReason
+    ? (REASON_KEYS[connection.lastErrorReason] ?? 'accountErrorNetwork')
+    : connection?.lastError ? 'accountErrorNetwork' : null
 
   const refresh = async () => {
-    if (refreshing) return
+    if (refreshing || disabled) return
     setRefreshing(true)
     setErrorKey(null)
     try {
+      if (!presenceKnown) await rpc.agent.remote.reconnect()
       await rpc.agent.device.list()
-      toast.key('accountCloudRefreshDone', 'success')
+      toast.key(presenceKnown ? 'accountCloudRefreshDone' : 'cloudConnectionRetryStarted', 'success')
     } catch (error) {
       setErrorKey(accountErrorKey(error))
     } finally {
@@ -177,15 +188,22 @@ export function DevicesCard({ devices, disabled }: { devices: readonly CloudDevi
           <div className="text-xs text-muted-foreground">{t('accountDevicesDesc')}</div>
         </div>
         <Button icon={RefreshCw} disabled={disabled} loading={refreshing} onClick={() => void refresh()}>
-          {t('accountDevicesRetry')}
+          {t(presenceKnown ? 'accountDevicesRetry' : 'cloudConnectionRetry')}
         </Button>
+      </div>
+      <div className="flex flex-col gap-1 text-xs" role="status" aria-live="polite">
+        <span className={presenceKnown ? 'text-success' : 'text-muted-foreground'}>
+          {t(cloudConnectionLabelKey(connection, !disabled))}
+        </span>
+        {!presenceKnown ? <span className="text-muted-foreground">{t('cloudConnectionStatusHint')}</span> : null}
+        {!disabled && connectionErrorKey ? <FieldError>{t(connectionErrorKey)}</FieldError> : null}
       </div>
       {errorKey ? <FieldError>{t(errorKey)}</FieldError> : null}
       <Card className="w-full overflow-hidden [&>*+*]:border-t [&>*+*]:border-hairline">
         {devices.length === 0 ? (
           <div className="flex justify-center p-4 text-xs text-muted-foreground">{t('accountDevicesEmpty')}</div>
         ) : (
-          devices.map((device) => <DeviceRow key={device.id} device={device} disabled={disabled} />)
+          sortedDevices(devices, presenceKnown).map((device) => <DeviceRow key={device.id} device={device} disabled={disabled} presenceKnown={presenceKnown} />)
         )}
       </Card>
     </section>

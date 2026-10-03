@@ -6,7 +6,7 @@ import type { DownloadTaskView, TaskState } from './task'
 
 export const VIEW_PREFS_KEY = 'desktop.downloads.view'
 
-export type ViewDensity = 'comfortable' | 'compact'
+export type ViewDensity = 'comfortable' | 'compact' | 'relaxed'
 export type ViewGroupBy = 'none' | 'status' | 'date' | 'type' | 'queue' | 'site' | 'group'
 export type ViewSortKey = 'smart' | 'created' | 'name' | 'size' | 'progress' | 'speed' | 'status'
 export type SortDir = 'asc' | 'desc'
@@ -176,7 +176,7 @@ export function parseViewPrefs(value: unknown): ViewPrefs {
       })
     : []
   return {
-    density: oneOf(['comfortable', 'compact'], json.density, defaults.density),
+    density: oneOf(['comfortable', 'compact', 'relaxed'], json.density, defaults.density),
     group_by: oneOf(GROUP_BY_OPTIONS, json.group_by, defaults.group_by),
     sort_key: oneOf(SORT_KEY_OPTIONS, json.sort_key, defaults.sort_key),
     sort_dir: oneOf(['asc', 'desc'], json.sort_dir, defaults.sort_dir),

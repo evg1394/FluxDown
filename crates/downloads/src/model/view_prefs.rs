@@ -17,26 +17,29 @@ pub(crate) enum ViewDensity {
     #[default]
     Comfortable,
     Compact,
+    Relaxed,
 }
 
 impl ViewDensity {
     /// 任务行高：舒适双行取 `density.taskRow`（默认 44 = 13/18 正文 + 12/16 元信息 + 上下留白），
-    /// 紧凑单行取 `density.taskRowCompact`（默认 30）。
+    /// 紧凑单行取 `density.taskRowCompact`（默认 30），宽松双行取舒适的 1.5 倍（默认 66）。
     pub(crate) fn row_height(self, density: &DensityTokens) -> Pixels {
         match self {
             Self::Comfortable => density.task_row,
             Self::Compact => density.task_row_compact,
+            Self::Relaxed => density.task_row * 1.5,
         }
     }
 
     /// 是否渲染第二行元信息（名称列的类别 · 域名、状态列的详情）。
     pub(crate) fn two_line(self) -> bool {
-        self == Self::Comfortable
+        self != Self::Compact
     }
 
     pub(crate) fn next(self) -> Self {
         match self {
-            Self::Comfortable => Self::Compact,
+            Self::Comfortable => Self::Relaxed,
+            Self::Relaxed => Self::Compact,
             Self::Compact => Self::Comfortable,
         }
     }
@@ -496,6 +499,24 @@ mod tests {
             (prefs.sort_key, prefs.sort_dir),
             (ViewSortKey::Size, SortDir::Desc)
         );
+    }
+
+    #[test]
+    fn density_cycle_preserves_each_choice_across_reload() {
+        let mut prefs = ViewPrefs {
+            density: ViewDensity::Compact,
+            ..ViewPrefs::default()
+        };
+        for density in [
+            ViewDensity::Comfortable,
+            ViewDensity::Relaxed,
+            ViewDensity::Compact,
+        ] {
+            prefs.cycle_density();
+            prefs = ViewPrefs::from_value(&prefs.to_value());
+            assert_eq!(prefs.density, density);
+            assert_eq!(prefs.density.two_line(), density != ViewDensity::Compact);
+        }
     }
 
     #[test]

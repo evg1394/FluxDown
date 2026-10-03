@@ -34,6 +34,7 @@ const title = t.hero.title.replace(/<em>(.*?)<\/em>/g, '<span class="serif">$1</
           {t.channel.previewHint}
         </p>
         <p class="eyebrow-plain">{t.hero.free}</p>
+        <p class="max-w-[56ch] text-[13px] leading-relaxed text-muted" data-js hidden>{t.source.note}</p>
       </div>
     </div>
 
@@ -58,7 +59,9 @@ const title = t.hero.title.replace(/<em>(.*?)<\/em>/g, '<span class="serif">$1</
           <span class="kbd ml-auto" aria-hidden="true" data-js hidden>D</span>
         </a>
         <p class="sr-only" data-js hidden>{t.hero.pressD}</p>
+        <a class="link self-start text-[13px]" data-primary-backup target="_blank" rel="noopener nofollow" hidden>{t.source.backup}</a>
         <a href="#desktop" class="link self-start text-[13px]" data-alt hidden></a>
+        <a class="link self-start text-[13px]" data-alt-backup target="_blank" rel="noopener nofollow" hidden></a>
 
         <dl class="meta">
           <div>

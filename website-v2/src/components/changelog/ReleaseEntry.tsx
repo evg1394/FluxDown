@@ -3,6 +3,8 @@ import { useState } from "react";
 import { Check, ChevronDown, Download, FileCode, FileText, Link2 } from "lucide-react";
 import type { Lang } from "@/i18n/config";
 import { changelog } from "@/i18n/messages/changelog";
+import { download } from "@/i18n/messages/download";
+import { assetDownloadUrl } from "@/lib/download-source";
 import { formatSize, versionAnchor, type ChangelogRelease } from "@/lib/release-format";
 import { groupAssets, pickLocaleBody, renderMarkdown, toPlainText } from "./release-body";
 
@@ -109,13 +111,24 @@ export default function ReleaseEntry({ release, lang, dateLabel, relativeLabel }
                   {items.map(({ asset, sub }) => (
                     <li key={asset.name}>
                       <a
-                        href={asset.download_url}
+                        href={assetDownloadUrl(asset, "github")}
+                        target="_blank"
+                        rel="noopener nofollow"
                         title={asset.name}
                         className="flex items-center gap-3 border-b border-line py-2 text-[13.5px] transition-colors hover:text-accent-ink"
                       >
                         <span className="min-w-0 flex-1 truncate">{sub}</span>
                         <span className="num font-mono text-[12px] text-subtle">{formatSize(asset.size)}</span>
                         <Download size={13} strokeWidth={1.75} className="text-subtle" aria-hidden="true" />
+                      </a>
+                      <a
+                        href={assetDownloadUrl(asset, "oss")}
+                        target="_blank"
+                        rel="noopener nofollow"
+                        title={`${download[lang].source.backup}: ${asset.name}`}
+                        className="link text-[12px]"
+                      >
+                        {download[lang].source.backup}
                       </a>
                     </li>
                   ))}

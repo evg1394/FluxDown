@@ -443,6 +443,11 @@ begin
     RemoveProtocolHandler('ed2k');
     RemoveProtocolHandler('magnet');
 
+    { Completion notifications target the agent, not the desktop executable.
+      Leave a handler installed by another copy (including portable) untouched. }
+    if ProtocolHandlerTargets('fluxdown-notification', ExpandConstant('{app}\{#MyAgentExeName}')) then
+      RegDeleteKeyIncludingSubkeys(HKCU, 'Software\Classes\fluxdown-notification');
+
     { .torrent association + autostart Run value — runtime-written variants
       of the [Registry] task entries, invisible to the uninstall log. }
     RemoveTorrentAssociation;

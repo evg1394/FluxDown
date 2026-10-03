@@ -58,7 +58,7 @@ pub struct DeviceEntry {
     pub kind: DeviceKind,
     /// 显示名；与其他设备同名时追加短码。
     pub label: String,
-    pub online: bool,
+    pub online: Option<bool>,
     /// 目标自报的默认下载目录（远程下发不填目录时使用）。
     pub default_save_dir: Option<String>,
     /// 目标的路径风格；未上报时已按平台推断，仍未知则为 `None`。
@@ -105,7 +105,12 @@ fn paired_style(device: &LinkDeviceInfo) -> Option<PathStyle> {
 /// - 按 id 去重（同一 id 保留首条）；
 /// - 名称为空用短码代替；多台同名（忽略大小写与首尾空白）时全部追加 ` · 短码`。
 #[must_use]
-pub(crate) fn other_devices(cloud: &[CloudDevice], linked: &[LinkDeviceInfo]) -> Vec<DeviceEntry> {
+pub(crate) fn other_devices(
+    cloud: &[CloudDevice],
+    linked: &[LinkDeviceInfo],
+    cloud_current: bool,
+    service_current: bool,
+) -> Vec<DeviceEntry> {
     let mut seen = HashSet::new();
     let mut entries = Vec::with_capacity(cloud.len() + linked.len());
     for device in cloud
@@ -119,7 +124,7 @@ pub(crate) fn other_devices(cloud: &[CloudDevice], linked: &[LinkDeviceInfo]) ->
             id: device.device_id.clone(),
             kind: DeviceKind::Cloud,
             label: device.name.trim().to_owned(),
-            online: device.is_online,
+            online: (service_current && cloud_current).then_some(device.is_online),
             default_save_dir: device
                 .default_save_dir
                 .as_deref()
@@ -140,7 +145,7 @@ pub(crate) fn other_devices(cloud: &[CloudDevice], linked: &[LinkDeviceInfo]) ->
             id: device.fingerprint.clone(),
             kind: DeviceKind::Paired,
             label: device.name.trim().to_owned(),
-            online: device.online,
+            online: service_current.then_some(device.online),
             default_save_dir: device
                 .default_save_dir
                 .as_deref()
@@ -219,6 +224,28 @@ mod tests {
     }
 
     #[test]
+    fn cloud_disconnect_does_not_hide_targets_or_invalidate_lan_presence() {
+        let cloud_devices = [cloud(json!({"id":"1","deviceId":"cloud","isOnline":true}))];
+        let paired = [linked(
+            json!({"fingerprint":"lan","name":"LAN","online":true,"pairedAt":0,"lastSeenAt":0}),
+        )];
+        let entries = other_devices(&cloud_devices, &paired, false, true);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].online, None);
+        assert_eq!(
+            entries[0].target(),
+            DispatchTarget::Cloud("cloud".to_owned())
+        );
+        assert_eq!(entries[1].online, Some(true));
+        let stale = other_devices(&cloud_devices, &paired, false, false);
+        assert!(stale.iter().all(|entry| entry.online.is_none()));
+        assert_eq!(
+            other_devices(&cloud_devices, &paired, true, true)[0].online,
+            Some(true)
+        );
+    }
+
+    #[test]
     fn other_devices_drop_current_and_duplicate_ids() {
         let devices = [
             cloud(json!({"id":"1","deviceId":"dev-me","name":"Me","isCurrent":true})),
@@ -228,11 +255,11 @@ mod tests {
             cloud(json!({"id":"3","deviceId":"dev-a","name":"Mac dup"})),
             cloud(json!({"id":"4","deviceId":"","name":"No id"})),
         ];
-        let entries = other_devices(&devices, &[]);
+        let entries = other_devices(&devices, &[], true, true);
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].id, "dev-a");
         assert_eq!(entries[0].label, "Mac");
-        assert!(entries[0].online);
+        assert_eq!(entries[0].online, Some(true));
         assert_eq!(entries[0].path_style, Some(PathStyle::Posix));
     }
 
@@ -244,7 +271,7 @@ mod tests {
             cloud(json!({"id":"3","deviceId":"cccc-3333","name":"Laptop"})),
             cloud(json!({"id":"4","deviceId":"dddd-4444","name":""})),
         ];
-        let entries = other_devices(&devices, &[]);
+        let entries = other_devices(&devices, &[], true, true);
         let labels: Vec<_> = entries.iter().map(|entry| entry.label.as_str()).collect();
         assert_eq!(labels, ["PC · 1111", "pc · 2222", "Laptop", "4444"]);
     }
@@ -261,7 +288,7 @@ mod tests {
                 json!({"fingerprint":"same","name":"Box again","online":false,"pairedAt":0,"lastSeenAt":0}),
             ),
         ];
-        let entries = other_devices(&cloud_devices, &paired);
+        let entries = other_devices(&cloud_devices, &paired, true, true);
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].kind, DeviceKind::Cloud);
         assert_eq!(entries[1].kind, DeviceKind::Paired);

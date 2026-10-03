@@ -286,6 +286,12 @@ pub fn sync_system_theme(window: &mut Window, cx: &mut App) {
     }
 }
 
+/// 重新查询平台可用字体并重装当前主题（不修改保存的偏好）。
+pub fn refresh_font_family(cx: &mut App) {
+    let state = active_theme(cx);
+    install(state.documents.clone(), state.appearance.clone(), None, cx);
+}
+
 fn install(
     documents: ThemeDocuments,
     appearance: AppearancePreferences,
@@ -298,7 +304,14 @@ fn install(
         ensure_primary_contrast: true,
     };
     let (values, diagnostics) = resolve_with(documents.get(mode), mode, &options);
-    let theme = values.to_theme(appearance.ui_scale());
+    let mut theme = values.to_theme(appearance.ui_scale());
+    if appearance.font_family.is_some() {
+        crate::fonts::apply_font_family(
+            &mut theme,
+            appearance.font_family.as_deref(),
+            &crate::available_font_families(cx),
+        );
+    }
     let tokens = &theme.base;
     let extended = &theme.extended;
 

@@ -77,7 +77,12 @@ pub(crate) fn page(ctx: &SectionContext, _cx: &mut App) -> SettingsPage {
             ),
         SettingsSection::new()
             .title(ctx.t("settingsGroupInterface"))
-            .row(ctx.item("uiScale", Some("uiScaleDesc"), ui_scale_field(ctx))),
+            .row(ctx.item("uiScale", Some("uiScaleDesc"), ui_scale_field(ctx)))
+            .row(ctx.item(
+                "fontFamily",
+                Some("fontFamilyDesktopHint"),
+                super::font_family::field(ctx),
+            )),
     ])
 }
 

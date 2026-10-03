@@ -156,29 +156,11 @@ mod inner {
 mod inner {
     use std::path::Path;
 
-    use crate::platform::macos_cf::{
-        CFArrayRef, CFStringRef, CfOwned, cf_string, cf_string_array, cf_to_string,
-    };
+    use crate::platform::macos_cf;
     use crate::platform::{PlatformError, host_bundle_id, successor_handler};
 
     /// Info.plist 中声明的 `.torrent` UTI。
     const TORRENT_UTI: &str = "org.bittorrent.torrent";
-    /// `kLSRolesAll`。
-    const LS_ROLES_ALL: u32 = 0xFFFF_FFFF;
-
-    #[link(name = "CoreServices", kind = "framework")]
-    unsafe extern "C" {
-        fn LSCopyDefaultRoleHandlerForContentType(
-            content_type: CFStringRef,
-            role: u32,
-        ) -> CFStringRef;
-        fn LSSetDefaultRoleHandlerForContentType(
-            content_type: CFStringRef,
-            role: u32,
-            handler_bundle_id: CFStringRef,
-        ) -> i32;
-        fn LSCopyAllRoleHandlersForContentType(content_type: CFStringRef, role: u32) -> CFArrayRef;
-    }
 
     pub fn supported(_desktop: Option<&Path>) -> bool {
         host_bundle_id().is_some()
@@ -186,15 +168,7 @@ mod inner {
 
     /// `.torrent` 当前是否关联到本 bundle。
     pub fn is_associated() -> bool {
-        let Ok(uti) = cf_string(TORRENT_UTI) else {
-            return false;
-        };
-        // SAFETY: `uti.raw()` 是有效 CFStringRef；返回的 handler 引用归我们所有，
-        // 由 `CfOwned` 释放。
-        let handler = CfOwned::new(unsafe {
-            LSCopyDefaultRoleHandlerForContentType(uti.raw(), LS_ROLES_ALL)
-        });
-        let Some(handler_id) = cf_to_string(handler.raw()) else {
+        let Ok(Some(handler_id)) = macos_cf::default_content_handler(TORRENT_UTI) else {
             return false;
         };
         host_bundle_id().is_some_and(|mine| handler_id.eq_ignore_ascii_case(&mine))
@@ -208,16 +182,8 @@ mod inner {
         let bundle_id = host_bundle_id().ok_or(PlatformError::Unsupported(
             "fluxdown-agent is not running inside an app bundle",
         ))?;
-        let uti = cf_string(TORRENT_UTI)?;
-        let id = cf_string(&bundle_id)?;
-        // SAFETY: 两个 CFStringRef 在调用期间存活；函数不接管所有权。
-        let status =
-            unsafe { LSSetDefaultRoleHandlerForContentType(uti.raw(), LS_ROLES_ALL, id.raw()) };
-        if status != 0 {
-            return Err(PlatformError::Failed(format!(
-                "LSSetDefaultRoleHandlerForContentType failed (OSStatus={status})"
-            )));
-        }
+        macos_cf::set_content_handler(TORRENT_UTI, &bundle_id)
+            .map_err(|error| PlatformError::Failed(error.to_string()))?;
         tracing::info!(bundle_id, "associated .torrent with FluxDown");
         Ok(())
     }
@@ -234,25 +200,15 @@ mod inner {
             tracing::info!(".torrent not associated to FluxDown, skipping removal");
             return Ok(());
         }
-        let uti = cf_string(TORRENT_UTI)?;
-        // SAFETY: `uti.raw()` 是有效 CFStringRef；返回的数组引用归我们所有，由 `CfOwned` 释放。
-        let candidates =
-            CfOwned::new(unsafe { LSCopyAllRoleHandlersForContentType(uti.raw(), LS_ROLES_ALL) });
-        let Some(successor) = successor_handler(cf_string_array(&candidates), &mine) else {
+        let candidates = macos_cf::content_handlers(TORRENT_UTI)?;
+        let Some(successor) = successor_handler(candidates, &mine) else {
             tracing::info!(
                 "no other .torrent handler installed; FluxDown stays the system default"
             );
             return Ok(());
         };
-        let id = cf_string(&successor)?;
-        // SAFETY: 两个 CFStringRef 在调用期间存活；函数不接管所有权。
-        let status =
-            unsafe { LSSetDefaultRoleHandlerForContentType(uti.raw(), LS_ROLES_ALL, id.raw()) };
-        if status != 0 {
-            return Err(PlatformError::Failed(format!(
-                "LSSetDefaultRoleHandlerForContentType (hand over) failed (OSStatus={status})"
-            )));
-        }
+        macos_cf::set_content_handler(TORRENT_UTI, &successor)
+            .map_err(|error| PlatformError::Failed(error.to_string()))?;
         tracing::info!(successor, "handed .torrent association over");
         Ok(())
     }

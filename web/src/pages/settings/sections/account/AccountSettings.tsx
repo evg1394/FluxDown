@@ -49,15 +49,16 @@ export function AccountSettings() {
   const devices = useAgent((snapshot) => snapshot.cloudDevices, NO_DEVICES)
   const linked = useAgent((snapshot) => snapshot.linkedDevices, NO_LINKED)
   const sync = useAgent((snapshot) => snapshot.sync, NO_SYNC)
+  const cloudConnection = useAgent((snapshot) => snapshot.cloudConnection, undefined)
   const disabled = useConnection().phase !== 'ready'
 
   return (
     <SettingsPage title={t('settingsCatAccount')} description={t('settingsCatAccountDesc')}>
       {session ? <ProfileCard session={session} disabled={disabled} /> : <HeroCard disabled={disabled} />}
       {session ? <SecurityCard session={session} disabled={disabled} /> : null}
-      {session ? <DevicesCard devices={devices} disabled={disabled} /> : null}
+      {session ? <DevicesCard devices={devices} disabled={disabled} connection={cloudConnection} /> : null}
       <PairedDevicesCard devices={linked} disabled={disabled} />
-      <CloudFeaturesCard loggedIn={session !== null} sync={sync} devices={devices} disabled={disabled} />
+      <CloudFeaturesCard loggedIn={session !== null} sync={sync} devices={devices} disabled={disabled} connection={cloudConnection} />
     </SettingsPage>
   )
 }

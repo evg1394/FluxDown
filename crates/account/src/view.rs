@@ -115,6 +115,23 @@ impl AccountView {
         self.host.read(cx).port()
     }
 
+    pub(crate) fn open_profile_edit(
+        &mut self,
+        field: crate::profile_edit::ProfileField,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.signing_out {
+            crate::dialogs::profile::open(&self.host, field, window, cx);
+        }
+    }
+
+    pub(crate) fn open_email_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.signing_out {
+            crate::dialogs::email::open(&self.host, window, cx);
+        }
+    }
+
     /// 通用「发起命令 → 失败提示」；成功结果由快照/事件驱动的重渲染呈现。
     pub(crate) fn spawn_action(
         &mut self,
@@ -260,23 +277,45 @@ impl AccountView {
         .detach();
     }
 
-    /// 设备卡片「重试」：只重拉受信任设备名册，同样带在途态与结果 toast。
     pub(crate) fn refresh_devices(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.devices_refreshing {
+        if self.devices_refreshing || self.host.read(cx).controller.is_stale() {
             return;
         }
-        let future = self.port(cx).execute(AccountCommand::Device {
-            method: method::AGENT_DEVICE_LIST,
-            params: serde_json::json!({}),
-        });
+        let reconnect = !self.host.read(cx).controller.cloud_connected();
+        let port = self.port(cx);
         self.devices_refreshing = true;
         self.last_error = None;
         cx.notify();
         cx.spawn_in(window, async move |this, cx| {
-            let result = future.await;
+            let result = async {
+                if reconnect {
+                    port.execute(AccountCommand::Device {
+                        method: method::AGENT_REMOTE_RECONNECT,
+                        params: serde_json::json!({}),
+                    })
+                    .await?;
+                }
+                port.execute(AccountCommand::Device {
+                    method: method::AGENT_DEVICE_LIST,
+                    params: serde_json::json!({}),
+                })
+                .await
+            }
+            .await;
             let Ok(()) = this.update_in(cx, |this, window, cx| {
                 this.devices_refreshing = false;
-                this.notify_refresh_result(result.map(|_| ()), window, cx);
+                if reconnect && result.is_ok() {
+                    window.push_notification(
+                        Notification::success(crate::t(
+                            this.translator.read(cx),
+                            "cloudConnectionRetryStarted",
+                        )),
+                        cx,
+                    );
+                    cx.notify();
+                } else {
+                    this.notify_refresh_result(result.map(|_| ()), window, cx);
+                }
             }) else {
                 // 对话框或窗口已释放，停止回写异步结果。
                 return;
@@ -496,7 +535,13 @@ impl Render for AccountView {
 
         let logged_in = session.is_some();
         if let Some(session) = &session {
-            column = column.child(pages::security::render(&translator, &tokens, session, cx));
+            column = column.child(pages::security::render(
+                &translator,
+                &tokens,
+                session,
+                disabled || self.signing_out,
+                cx,
+            ));
         }
         // 已配对设备与账号无关：未登录也能管理；云设备仅登录后显示。
         column = column.child(pages::devices::render(
@@ -518,7 +563,9 @@ impl Render for AccountView {
             &tokens,
             logged_in,
             &sync,
-            &devices,
+            (!self.host.read(cx).controller.is_stale()
+                && self.host.read(cx).controller.cloud_connected())
+            .then_some(devices.as_slice()),
             disabled,
             cx,
         ));

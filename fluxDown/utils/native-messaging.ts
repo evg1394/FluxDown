@@ -19,6 +19,7 @@
  */
 
 import { browser } from "wxt/browser";
+import { recordConnectionDiagnostic } from "./connection-diagnostics";
 
 const NMH_NAME = "com.fluxdown.nmh";
 
@@ -130,8 +131,10 @@ export interface TaskBrief {
 
 let _port: chrome.runtime.Port | null = null;
 let _nextMsgId = 1;
+let _connected = false;
 
 interface PendingRequest {
+  action: string;
   resolve: (value: ApiResponse) => void;
   timer: ReturnType<typeof setTimeout>;
 }
@@ -150,6 +153,7 @@ function getPort(): chrome.runtime.Port | null {
   } catch (e) {
     // connectNative() throws synchronously if the API is unavailable (e.g. permission denied).
     console.error("[FluxDown NMH] connectNative() threw:", e);
+    recordConnectionDiagnostic({ event: "native.connect_failed", detail: e instanceof Error ? e.message : String(e) });
     return null;
   }
 
@@ -162,6 +166,14 @@ function getPort(): chrome.runtime.Port | null {
 
     _pendingRequests.delete(msgId);
     clearTimeout(pending.timer);
+    if (msg.success === true && pending.action !== "warmup") {
+      if (!_connected) recordConnectionDiagnostic({ event: "native.connected", action: pending.action });
+      _connected = true;
+    } else if (msg.success !== true) {
+      if (msg.message === "app_not_running") _connected = false;
+      recordConnectionDiagnostic({ event: "native.request_failed", action: pending.action,
+        detail: msg.message === "app_not_running" ? "app_not_running" : "host_rejected_request" });
+    }
 
     pending.resolve({
       success: msg.success ?? false,
@@ -179,6 +191,8 @@ function getPort(): chrome.runtime.Port | null {
     // Common errors: "No such native application", "Access to the specified
     // native messaging host is forbidden" (extension ID mismatch).
     const err = (p as any).error ?? browser.runtime.lastError;
+    _connected = false;
+    recordConnectionDiagnostic({ event: "native.disconnected", detail: err?.message || "port disconnected (no error reason)" });
     if (err?.message) {
       console.error("[FluxDown NMH] port disconnected, reason:", err.message);
     } else {
@@ -197,6 +211,7 @@ function getPort(): chrome.runtime.Port | null {
 }
 
 function disconnectPort() {
+  _connected = false;
   if (_port) {
     try {
       _port.disconnect();
@@ -226,10 +241,12 @@ function sendMessage(
     const msgId = _nextMsgId++;
     const timer = setTimeout(() => {
       _pendingRequests.delete(msgId);
+      _connected = false;
+      recordConnectionDiagnostic({ event: "native.request_failed", action, detail: "timeout" });
       resolve({ success: false, message: "timeout" });
     }, timeoutMs);
 
-    _pendingRequests.set(msgId, { resolve, timer });
+    _pendingRequests.set(msgId, { action, resolve, timer });
 
     try {
       port.postMessage({ action, msg_id: msgId, ...payload });
@@ -237,6 +254,7 @@ function sendMessage(
       _pendingRequests.delete(msgId);
       clearTimeout(timer);
       disconnectPort();
+      recordConnectionDiagnostic({ event: "native.request_failed", action, detail: "postMessage failed" });
       resolve({ success: false, message: "postMessage failed" });
     }
   });
@@ -264,6 +282,7 @@ async function sendWithRetry(
     result.message === "timeout";
 
   if (!retryable) return result;
+  recordConnectionDiagnostic({ event: "native.retry", action, detail: result.message });
 
   disconnectPort();
 

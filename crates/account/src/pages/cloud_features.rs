@@ -24,7 +24,7 @@ pub(crate) fn render(
     tokens: &SemanticThemeTokens,
     logged_in: bool,
     sync: &SyncStatusDto,
-    devices: &[CloudDevice],
+    devices: Option<&[CloudDevice]>,
     disabled: bool,
     cx: &mut Context<AccountView>,
 ) -> impl IntoElement {
@@ -293,12 +293,13 @@ fn multi_device_row(
     translator: &Translator,
     tokens: &SemanticThemeTokens,
     logged_in: bool,
-    devices: &[CloudDevice],
+    devices: Option<&[CloudDevice]>,
     cx: &App,
 ) -> impl IntoElement {
     let title = t(translator, "multiDeviceTitle");
     let desc = t(translator, "multiDeviceDesc");
     let online_count = devices
+        .unwrap_or_default()
         .iter()
         .filter(|device| device.is_online && !device.is_current)
         .count();
@@ -323,11 +324,15 @@ fn multi_device_row(
                     .line_height(caption.line_height)
                     .font_features(tabular_numbers())
                     .text_color(tokens.colors.muted_foreground)
-                    .child(t_with(
-                        translator,
-                        "devicesOnlineCount",
-                        &[("count", &online_count.to_string())],
-                    )),
+                    .child(if devices.is_some() {
+                        t_with(
+                            translator,
+                            "devicesOnlineCount",
+                            &[("count", &online_count.to_string())],
+                        )
+                    } else {
+                        t(translator, "devicePresenceUnknown")
+                    }),
             )
         })
 }

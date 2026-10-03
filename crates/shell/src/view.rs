@@ -7,16 +7,14 @@ use fluxdown_ui_components::{
 use fluxdown_ui_i18n::Translator;
 use fluxdown_ui_theme::active_theme;
 use gpui::{
-    AnyElement, AnyView, App, Context, Div, Entity, Font, FontWeight, InteractiveElement as _,
-    IntoElement, MouseButton, ParentElement, Pixels, Render, SharedString,
-    StatefulInteractiveElement as _, Styled, TextRun, Window, div, img, percentage, px,
+    AnyElement, AnyView, App, Context, Div, Entity, FontWeight, InteractiveElement as _,
+    IntoElement, MouseButton, ParentElement, Render, SharedString, StatefulInteractiveElement as _,
+    Styled, Window, div, img, percentage, px,
 };
-use gpui_component::{
-    Icon, TITLE_BAR_HEIGHT, TitleBar, h_flex, menu::AppMenuBar, tooltip::Tooltip, v_flex,
-};
+use gpui_component::{Icon, TitleBar, h_flex, menu::AppMenuBar, tooltip::Tooltip, v_flex};
 
 use crate::assets::APP_LOGO_PATH;
-use crate::window_controls::{FixedSizeTitleBar, controls_width};
+use crate::window_controls::FixedSizeTitleBar;
 
 /// shell 路由的稳定标识。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -261,52 +259,6 @@ impl AuxiliaryWindowView {
             .child(title_row)
             .into_any_element()
     }
-}
-
-/// macOS 交通灯占位：gpui-component `TitleBar` 在 macOS 的默认左内边距。
-const MACOS_TRAFFIC_LIGHT_INSET: Pixels = px(80.);
-
-/// 辅助窗口标题栏完整显示 `title`（单行）所需的最小窗口宽度：标题文字宽度（按标题栏实际
-/// 字体 / 字号 / 字重量得）加上左右内边距与窗口控制区。供宿主按内容自适应窗口宽度时使用；
-/// `resizable` 须与 [`AuxiliaryWindowView::resizable`] 一致（决定控制按钮个数）。
-#[must_use]
-pub fn auxiliary_title_min_width(
-    title: &str,
-    resizable: bool,
-    window: &Window,
-    cx: &App,
-) -> Pixels {
-    let theme = active_theme(cx);
-    let tokens = theme.tokens();
-    let line = title.lines().next().unwrap_or_default();
-    let run = TextRun {
-        len: line.len(),
-        font: Font {
-            family: tokens.typography.sans.clone(),
-            weight: FontWeight::MEDIUM,
-            ..Font::default()
-        },
-        ..TextRun::default()
-    };
-    let text_width = window
-        .text_system()
-        .layout_line(line, tokens.typography.sm.size, &[run], None)
-        .width;
-
-    let spacing = tokens.spacing;
-    let title_padding = spacing.sm + spacing.md;
-    let chrome = if cfg!(target_os = "macos") {
-        MACOS_TRAFFIC_LIGHT_INSET + title_padding
-    } else {
-        let controls = if resizable {
-            TITLE_BAR_HEIGHT * 3.
-        } else {
-            controls_width()
-        };
-        // 标题栏自身左内边距 + 标题行内边距 + 控制区。
-        spacing.sm + title_padding + controls
-    };
-    text_width + chrome
 }
 
 impl Render for AuxiliaryWindowView {

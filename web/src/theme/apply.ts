@@ -3,6 +3,7 @@
 import { APPEARANCE_KEYS, parseAppearance } from './appearance'
 import type { ThemeModeName, ThemePreference } from './appearance'
 import { themeVariables } from './tokens'
+import { applyFontFamily, fontPreference } from './fontFamily'
 
 const CACHE_KEY = 'fluxdown.web.appearance'
 
@@ -56,4 +57,5 @@ export function applyInitialTheme(): void {
   const prefs = parseAppearance(loadCache())
   const mode = resolveMode(prefs.themeMode, systemPrefersDark())
   applyToDocument(themeVariables(prefs, mode), mode, prefs.uiScalePercent)
+  applyFontFamily(fontPreference.load(), document.documentElement.style)
 }

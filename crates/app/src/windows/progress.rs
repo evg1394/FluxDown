@@ -1,5 +1,5 @@
 //! 独立下载进度 / 完成窗口：每个任务一个，FluxDown 辅助窗口标题栏；标题随进度刷新，
-//! 宽高由视图按内容自行校正（窗口不可由用户调整，可最小化；Windows / Linux 标题栏无最大化）。
+//! 可调整大小、可最小化，所有任务共用一份设备本地的尺寸、位置与显示器记忆。
 //! 开关时机由 [`crate::progress_windows`] 决定。
 //!
 //! 层级：界面常是后台应用（下载由浏览器捕获 / 静默建成时浏览器在前台），只在本应用内排序
@@ -12,26 +12,20 @@
 use std::{sync::Arc, time::Duration};
 
 use fluxdown_ui_downloads::{
-    PROGRESS_WINDOW_INITIAL_HEIGHT, PROGRESS_WINDOW_WIDTH, ProgressWindowEvent, ProgressWindowView,
+    COMPLETION_WINDOW_PREF, PROGRESS_WINDOW_INITIAL_HEIGHT, PROGRESS_WINDOW_WIDTH,
+    ProgressWindowEvent, ProgressWindowPrefs, ProgressWindowView,
 };
-use fluxdown_ui_shell::{AuxiliaryWindowView, auxiliary_title_min_width, auxiliary_window_options};
-use gpui::{
-    App, AppContext as _, Bounds, Context, SharedString, Window, WindowBounds, WindowKind, point,
-    px, size,
-};
+use fluxdown_ui_shell::{AuxiliaryWindowView, auxiliary_window_options};
+use gpui::{App, AppContext as _, Context, SharedString, Window, WindowKind, px, size};
 use gpui_component::Root;
 
 use crate::{
     app::Desktop,
     downloads_port::AgentDownloadsPort,
     session::attach,
-    windows::{WindowKey, WindowRegistry},
+    windows::{RememberedWindow, WindowKey, WindowRegistry},
 };
 
-/// 同时打开多个窗口时逐个错开的距离，避免完全重叠。
-const CASCADE_STEP: f32 = 28.;
-/// 错开的最大档数：更多窗口回到同一位置循环。
-const CASCADE_MAX: usize = 5;
 /// 打开文件 / 文件夹后等待对方接管前台的上限。
 const HANDOFF_CLOSE_TIMEOUT: Duration = Duration::from_millis(1500);
 
@@ -42,29 +36,19 @@ pub fn open(cx: &mut App, task_id: String, activate: bool) {
     let session = desktop.session.clone();
     let client = desktop.client.clone();
     let title = translator.read(cx).text("progressWindowTitle").to_owned();
-    let show_completion = crate::progress_windows::show_completion(cx, &task_id);
-
-    let cascade =
-        WindowRegistry::count(cx, |key| matches!(key, WindowKey::Progress(_))) % (CASCADE_MAX + 1);
-    let offset = px(CASCADE_STEP * cascade as f32);
-    let display_id = WindowRegistry::main_display_id(cx);
-    let mut bounds = Bounds::centered(
-        display_id,
-        size(
-            px(PROGRESS_WINDOW_WIDTH),
-            px(PROGRESS_WINDOW_INITIAL_HEIGHT),
-        ),
-        cx,
-    );
-    bounds.origin = point(bounds.origin.x + offset, bounds.origin.y + offset);
+    let settings = desktop.settings_store.clone();
+    let show_completion =
+        ProgressWindowPrefs::from_preferences(settings.read(cx).preferences()).completion;
 
     let mut options = auxiliary_window_options(title);
-    options.display_id = display_id;
-    options.window_bounds = Some(WindowBounds::Windowed(bounds));
-    // 辅助窗口默认最小尺寸（720×520）会阻止按内容收缩，这里宽高完全由内容决定。
-    options.window_min_size = None;
-    options.is_resizable = false;
+    let min_size = size(
+        px(PROGRESS_WINDOW_WIDTH),
+        px(PROGRESS_WINDOW_INITIAL_HEIGHT),
+    );
+    options.window_min_size = Some(min_size);
+    options.is_resizable = true;
     options.is_minimizable = true;
+    WindowRegistry::restore_bounds(RememberedWindow::Progress, &mut options, min_size, cx);
     options.focus = activate;
     if !activate && cfg!(any(target_os = "macos", target_os = "windows")) {
         options.kind = WindowKind::PopUp;
@@ -74,6 +58,13 @@ pub fn open(cx: &mut App, task_id: String, activate: bool) {
     let opened = WindowRegistry::open_or_focus(cx, key.clone(), options, move |window, cx| {
         let port = Arc::new(AgentDownloadsPort::new(client.clone()));
         let view = cx.new(|cx| {
+            cx.observe(&settings, |view: &mut ProgressWindowView, settings, cx| {
+                let completion =
+                    ProgressWindowPrefs::from_preferences(settings.read(cx).preferences())
+                        .completion;
+                view.set_show_completion(completion, cx);
+            })
+            .detach();
             ProgressWindowView::new(
                 translator.clone(),
                 task_id.clone(),
@@ -90,19 +81,15 @@ pub fn open(cx: &mut App, task_id: String, activate: bool) {
                 view.clone().into(),
                 cx,
             )
-            .resizable(false)
         });
 
-        cx.new(|cx| {
+        let root = cx.new(|cx| {
             let root = Root::new(window_view.clone(), window, cx);
             cx.observe_in(&view, window, move |_, view, window, cx| {
                 let Some(title) = view.read(cx).title() else {
                     return;
                 };
                 window.set_window_title(&title);
-                // 标题栏要完整放下标题：把所需宽度交给视图并入窗口宽度的计算。
-                let title_width = auxiliary_title_min_width(&title, false, window, cx);
-                view.update(cx, |view, cx| view.set_title_bar_width(title_width, cx));
                 window_view.update(cx, |chrome, cx| {
                     chrome.set_title(Some(SharedString::from(title)), cx);
                 });
@@ -112,12 +99,14 @@ pub fn open(cx: &mut App, task_id: String, activate: bool) {
                 ProgressWindowEvent::Close => window.remove_window(),
                 ProgressWindowEvent::HandedOff => close_after_handoff(window, cx),
                 ProgressWindowEvent::ShowCompletionChanged(value) => {
-                    crate::progress_windows::set_completion_override(cx, &task_id, *value);
+                    Desktop::set_pref(cx, COMPLETION_WINDOW_PREF, (*value).into());
                 }
             })
             .detach();
             root
-        })
+        });
+        WindowRegistry::persist_bounds(RememberedWindow::Progress, client, &root, window, cx);
+        root
     });
     let handle = opened
         .map(Into::into)

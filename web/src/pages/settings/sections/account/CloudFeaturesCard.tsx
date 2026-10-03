@@ -4,7 +4,8 @@ import { Network, RefreshCw } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
 import { useT } from '../../../../i18n'
 import { rpc } from '../../../../lib/rpc'
-import type { CloudDevice, SyncStatusDto } from '../../../../lib/rpc'
+import type { CloudConnectionDto, CloudDevice, SyncStatusDto } from '../../../../lib/rpc'
+import { cloudPresenceKnown } from '../../../../lib/cloud-presence'
 import { Badge, Button, Card, Icon, Switch, Tooltip, toast } from '../../../../ui'
 import { otherDevices } from '../../../downloads/model/devices'
 import { accountErrorKey, REASON_KEYS } from './errorText'
@@ -47,11 +48,13 @@ export function CloudFeaturesCard({
   sync,
   devices,
   disabled,
+  connection,
 }: {
   loggedIn: boolean
   sync: SyncStatusDto
   devices: readonly CloudDevice[]
   disabled: boolean
+  connection: CloudConnectionDto | undefined
 }) {
   const t = useT()
   const active = loggedIn && sync.enabled
@@ -133,7 +136,9 @@ export function CloudFeaturesCard({
             <div className="text-sm font-medium text-foreground">{t('multiDeviceTitle')}</div>
             <div className="text-xs text-muted-foreground">{t('multiDeviceDesc')}</div>
           </div>
-          {loggedIn ? <Badge>{t('devicesOnlineCount', { count: online })}</Badge> : null}
+          {loggedIn ? (
+            <Badge>{cloudPresenceKnown(connection, !disabled) ? t('devicesOnlineCount', { count: online }) : t('devicePresenceUnknown')}</Badge>
+          ) : null}
         </div>
       </Card>
     </section>

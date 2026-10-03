@@ -7,6 +7,7 @@ export interface ReleaseAsset {
   name: string;
   size: number;
   download_url: string;
+  github_download_url?: string;
 }
 
 type Assets<K extends string> = Record<K, ReleaseAsset | null>;

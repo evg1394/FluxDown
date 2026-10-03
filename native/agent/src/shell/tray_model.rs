@@ -91,6 +91,7 @@ fn build(translator: &Translator, inputs: &Inputs) -> TrayModel {
     TrayModel {
         visible: inputs.visible,
         show_window: translator.text("trayShowWindow").to_owned(),
+        settings: translator.text("settings").to_owned(),
         pause_all: translator.text("pauseAll").to_owned(),
         resume_all: translator.text("resumeAll").to_owned(),
         cancel_shutdown: inputs

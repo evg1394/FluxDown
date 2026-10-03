@@ -1,23 +1,31 @@
-//! 系统通知投递（下载完成）。三个平台「由谁来发这条通知」各不相同，不显式处理就会出错：
-//!
-//! - **macOS**：不用 `notify-rust`。它的 macOS 后端走已废弃的 `NSUserNotification` 并伪装
-//!   成某个 bundle 投递：未指定时会用 AppleScript 查找名为 `use_default` 的应用（弹出
-//!   「Where is use_default?」选择框）；指定了也会被新版 macOS 拒收——`usernoted` 对已接入
-//!   `UNUserNotificationCenter` 的 bundle（Finder、Flutter 版 `com.fluxdown.app`）记录
-//!   「Legacy client … connecting to modern client … Denying message」，通知静默丢失。
-//!   agent 是裸二进制 / 与界面同处未签名包内，没有可用的现代通知身份，改由系统自带的
-//!   `osascript` `display notification` 投递（由「脚本编辑器」身份显示，各版本 macOS 可靠送达）。
-//! - **Windows**：WinRT toast 必须带 AppUserModelID；`notify-rust` 缺省借用 PowerShell 的
-//!   AUMID，通知会显示成「Windows PowerShell」。在
-//!   `HKCU\Software\Classes\AppUserModelId\<AUMID>` 登记 `DisplayName` + `IconUri`
-//!   （未打包 Win32 应用发送本地 toast 的官方做法，不需要开始菜单快捷方式）。
-//! - **Linux**：freedesktop 通知的 `app_name` 缺省是可执行文件名 `fluxdown-agent`。设置
-//!   应用名、`desktop-entry` hint（GNOME / KDE 据此归组通知设置并取应用图标）与图标
-//!   （数据目录下 PNG 的绝对路径：AppImage / 调试包没有安装主题图标时同样能显示）。
-//!
-//! 所有函数同步阻塞（子进程 / 注册表 / D-Bus / 文件写入），调用方放进 `spawn_blocking`。
+//! 系统通知统一入口：macOS 使用 agent helper bundle 的 UserNotifications 身份；
+//! Windows 使用 FluxDown AUMID 与持久化的受限操作令牌；Linux 保持 D-Bus 通知。
+//! 完成通知点击正文定位文件，两个按钮分别打开文件 / 所在文件夹。
+//! 投递与权限查询同步阻塞，调用方放进 `spawn_blocking`；macOS delegate 在主线程初始化。
 
 use std::path::PathBuf;
+
+mod actions;
+use actions::CompletionActions;
+pub(crate) use actions::completion_path;
+#[cfg(target_os = "macos")]
+mod macos;
+#[cfg(any(windows, test))]
+mod windows;
+
+/// 在 macOS 主线程、事件循环启动前安装原生通知 delegate；此处不请求权限。
+#[cfg(all(target_os = "macos", feature = "desktop"))]
+pub(crate) fn initialize() {
+    if let Err(error) = macos::initialize() {
+        tracing::warn!(%error, "native notification initialization unavailable");
+    }
+}
+
+/// Windows 通知激活只执行持久化令牌指向的文件操作，不启动下载服务。
+#[cfg(windows)]
+pub fn handle_activation(args: &[String]) -> Option<Result<(), String>> {
+    windows::handle_activation(args)
+}
 #[cfg(not(target_os = "macos"))]
 use std::{path::Path, sync::OnceLock};
 
@@ -51,15 +59,16 @@ pub struct Notifier {
 
 /// 首次发送前准备好的平台身份。
 #[cfg(not(target_os = "macos"))]
-#[derive(Default)]
 struct Prepared {
+    #[cfg(windows)]
+    identity: Result<(), String>,
     /// 已落盘的通知图标（写入失败为 `None`，此时退回主题图标名）。
     #[cfg(all(unix, not(target_os = "macos")))]
     icon: Option<PathBuf>,
 }
 
 impl Notifier {
-    /// `data_dir`：Windows / Linux 通知图标的落盘目录（macOS 经 osascript 投递，不用图标）。
+    /// `data_dir`：Windows / Linux 的通知身份资源与操作令牌目录。
     #[must_use]
     pub fn new(data_dir: PathBuf) -> Self {
         #[cfg(target_os = "macos")]
@@ -79,10 +88,58 @@ impl Notifier {
         }
     }
 
-    /// 阻塞发送一条通知并返回投递结果（Doctor 的「发送测试通知」）。成功只代表系统接收了
-    /// 请求；用户在系统设置里关闭通知时系统仍会静默接收。
-    #[cfg(not(target_os = "macos"))]
+    /// 阻塞发送测试或信息通知；成功表示系统接收请求，不保证横幅可见。
     pub fn try_show(&self, title: &str, body: &str) -> Result<(), String> {
+        self.send(title, body, None)
+    }
+
+    pub(crate) fn show_completion(
+        &self,
+        title: &str,
+        body: &str,
+        path: Option<PathBuf>,
+        open_file_label: String,
+        open_folder_label: String,
+    ) {
+        let actions = path.map(|path| CompletionActions {
+            path,
+            open_file_label,
+            open_folder_label,
+        });
+        if let Err(error) = self.send(title, body, actions.as_ref()) {
+            tracing::warn!(%error, "could not show completion notification");
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn send(
+        &self,
+        title: &str,
+        body: &str,
+        actions: Option<&CompletionActions>,
+    ) -> Result<(), String> {
+        macos::show(title, body, actions)
+    }
+
+    #[cfg(windows)]
+    fn send(
+        &self,
+        title: &str,
+        body: &str,
+        actions: Option<&CompletionActions>,
+    ) -> Result<(), String> {
+        let prepared = self.prepared.get_or_init(|| prepare(&self.data_dir));
+        prepared.identity.as_ref().map_err(Clone::clone)?;
+        windows::show(&self.data_dir, title, body, actions)
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    fn send(
+        &self,
+        title: &str,
+        body: &str,
+        _actions: Option<&CompletionActions>,
+    ) -> Result<(), String> {
         let prepared = self.prepared.get_or_init(|| prepare(&self.data_dir));
         let mut notification = notify_rust::Notification::new();
         notification.appname(APP_NAME).summary(title).body(body);
@@ -91,26 +148,6 @@ impl Notifier {
             .show()
             .map(|_| ())
             .map_err(|error| error.to_string())
-    }
-
-    /// 阻塞发送一条通知并返回投递结果（Doctor 的「发送测试通知」）。成功只代表系统接收了
-    /// 请求；用户在系统设置里关闭通知时系统仍会静默接收。
-    #[cfg(target_os = "macos")]
-    pub fn try_show(&self, title: &str, body: &str) -> Result<(), String> {
-        let output = std::process::Command::new(OSASCRIPT)
-            .args(osascript_notification_args(title, body))
-            .stdin(std::process::Stdio::null())
-            .output()
-            .map_err(|error| format!("could not spawn osascript: {error}"))?;
-        if output.status.success() {
-            Ok(())
-        } else {
-            Err(format!(
-                "osascript exited with {}: {}",
-                output.status,
-                String::from_utf8_lossy(&output.stderr).trim()
-            ))
-        }
     }
 }
 
@@ -123,7 +160,7 @@ pub enum NotificationAvailability {
     Blocked(String),
     /// 系统没有可用的通知服务（如 Linux 会话里没有通知守护进程）。
     Unavailable(String),
-    /// 系统不提供可读的通知授权状态（macOS：经 osascript 投递，授权挂在「脚本编辑器」名下）。
+    /// 系统尚未获得授权决定，或没有可识别的授权状态。
     Unverifiable,
 }
 
@@ -176,40 +213,24 @@ pub fn availability() -> NotificationAvailability {
     }
 }
 
-/// macOS 没有可读的授权状态（见 [`NotificationAvailability::Unverifiable`]）。
+/// 只读查询 FluxDown helper 的 macOS 通知授权，不触发权限弹窗。
 #[cfg(target_os = "macos")]
 #[must_use]
 pub fn availability() -> NotificationAvailability {
-    NotificationAvailability::Unverifiable
-}
-
-#[cfg(target_os = "macos")]
-const OSASCRIPT: &str = "/usr/bin/osascript";
-
-/// `osascript` 参数：标题 / 正文经 `argv` 传入，不拼进脚本源码（文件名里的引号、反斜杠
-/// 不会破坏脚本，也无从注入）。标题在前且非空，osascript 在它之后停止解析选项，正文以
-/// `-` 开头也安全。
-#[cfg(target_os = "macos")]
-fn osascript_notification_args<'a>(title: &'a str, body: &'a str) -> [&'a str; 8] {
-    [
-        "-e",
-        "on run argv",
-        "-e",
-        "display notification (item 2 of argv) with title (item 1 of argv)",
-        "-e",
-        "end run",
-        title,
-        body,
-    ]
+    macos::availability()
 }
 
 #[cfg(windows)]
 fn prepare(data_dir: &Path) -> Prepared {
-    let icon = write_icon(data_dir);
-    if let Err(error) = register_windows_aumid(icon.as_deref()) {
-        tracing::warn!(error = %error, "could not register notification AppUserModelID");
+    Prepared {
+        identity: write_icon(data_dir)
+            .ok_or_else(|| "could not prepare FluxDown notification icon".to_owned())
+            .and_then(|icon| {
+                register_windows_aumid(Some(&icon)).map_err(|error| {
+                    format!("could not register notification AppUserModelID: {error}")
+                })
+            }),
     }
-    Prepared::default()
 }
 
 #[cfg(all(unix, not(target_os = "macos")))]
@@ -217,12 +238,6 @@ fn prepare(data_dir: &Path) -> Prepared {
     Prepared {
         icon: write_icon(data_dir),
     }
-}
-
-#[cfg(windows)]
-fn apply_platform_identity(notification: &mut notify_rust::Notification, _prepared: &Prepared) {
-    // 图标由注册表 `IconUri` 提供；toast 正文不再附图。
-    notification.app_id(WINDOWS_AUMID);
 }
 
 #[cfg(all(unix, not(target_os = "macos")))]
@@ -307,6 +322,8 @@ pub fn rss_auto_download_text(
 pub fn english_text(key: &str, count: Option<usize>) -> String {
     let template = match key {
         "downloadCompleted" => "Download Complete",
+        "openFile" => "Open File",
+        "openFolder" => "Open Folder",
         "rssAutoDownloadedToast" => "RSS added {count} download(s)",
         "batchDownloadCompleted" => "{count} Downloads Complete",
         "andMoreFiles" => "and {count} more",

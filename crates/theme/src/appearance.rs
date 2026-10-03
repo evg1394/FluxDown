@@ -258,6 +258,8 @@ impl ThemeSelection {
 /// 用户在外观页可调的全部选项；与偏好快照一一对应。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppearancePreferences {
+    /// 本机界面字体；空值沿用主题，不覆盖等宽字体。
+    pub font_family: Option<String>,
     pub theme_mode: ThemePreference,
     pub dark_theme: ThemeSelection,
     pub light_theme: ThemeSelection,
@@ -271,6 +273,7 @@ pub struct AppearancePreferences {
 impl Default for AppearancePreferences {
     fn default() -> Self {
         Self {
+            font_family: None,
             theme_mode: ThemePreference::System,
             dark_theme: ThemeSelection::Builtin(BuiltinThemeId::DefaultDark),
             light_theme: ThemeSelection::Builtin(BuiltinThemeId::DefaultLight),
@@ -287,6 +290,11 @@ impl AppearancePreferences {
     pub fn from_values(values: &BTreeMap<String, Value>) -> Self {
         let defaults = Self::default();
         Self {
+            font_family: values
+                .get(crate::FONT_FAMILY_KEY)
+                .and_then(Value::as_str)
+                .filter(|name| !name.trim().is_empty())
+                .map(str::to_owned),
             theme_mode: values
                 .get(THEME_MODE_KEY)
                 .and_then(Value::as_str)

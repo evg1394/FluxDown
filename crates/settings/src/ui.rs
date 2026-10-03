@@ -35,8 +35,6 @@ use gpui_component::{
 
 /// 行内文本输入框宽度档位。
 pub(crate) const INPUT_WIDTH: f32 = 240.;
-/// 长文本输入框宽度档位（User-Agent 等整串值）。
-pub(crate) const INPUT_WIDE_WIDTH: f32 = 420.;
 /// 行内数字输入框宽度档位。
 pub(crate) const NUMBER_WIDTH: f32 = 132.;
 /// 行内下拉按钮的最小宽度档位（文案更长时自然撑开）。

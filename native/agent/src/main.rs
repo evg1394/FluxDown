@@ -8,6 +8,15 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 fn main() -> fluxdown_agent::runtime::AgentResult {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    #[cfg(windows)]
+    if let Some(result) = fluxdown_agent::notification::handle_activation(&args) {
+        fluxdown_agent::logging::init_desktop();
+        let result = result.map_err(|error| -> Box<dyn std::error::Error + Send + Sync> {
+            std::io::Error::other(error).into()
+        });
+        fluxdown_agent::logging::finish(&result);
+        return result;
+    }
     // `--server`：headless 服务器形态（NAS / Docker）。不启动托盘、不接入桌面集成，
     // 监听地址、访问密钥、Web UI 等全部来自 `FLUXDOWN_*` 环境变量。
     if args.iter().any(|arg| arg == "--server") {

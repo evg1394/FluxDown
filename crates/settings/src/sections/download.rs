@@ -291,7 +291,7 @@ fn retry_section(ctx: &SectionContext) -> SettingsSection {
 fn advanced_section(ctx: &SectionContext) -> SettingsSection {
     SettingsSection::new()
         .title(ctx.t("settingsGroupAdvanced"))
-        .row(ctx.item("userAgent", Some("userAgentDesc"), user_agent::field(ctx)))
+        .row(user_agent::row(ctx))
         .row(
             ctx.item(
                 "revealFileCmdLabel",

@@ -301,18 +301,6 @@ pub(crate) fn open_detail(
     let platform_text = platform_label_key(&platform)
         .map_or_else(|| platform.clone(), |key| t(&translator, key).to_string());
     let mut rows: Vec<(SharedString, String)> = vec![
-        (
-            t(&translator, "accountDeviceFieldOnline"),
-            t(
-                &translator,
-                if device.is_online {
-                    "deviceOnline"
-                } else {
-                    "deviceOffline"
-                },
-            )
-            .to_string(),
-        ),
         (t(&translator, "accountDeviceFieldPlatform"), platform_text),
         (
             t(&translator, "accountDeviceFieldAppVersion"),
@@ -344,10 +332,18 @@ pub(crate) fn open_detail(
     ));
     let name = device.name.clone();
     let close = t(&translator, "close");
+    let presence = cx.new(|cx| {
+        cx.observe(host, |_, _, cx| cx.notify()).detach();
+        DevicePresence {
+            host: host.clone(),
+            device_id: device.id.clone(),
+        }
+    });
     window.open_dialog(cx, move |dialog, _, cx| {
         let rows = rows.clone();
         let name = name.clone();
         let close = close.clone();
+        let presence = presence.clone();
         dialog
             .title(dialog_title(title.clone(), cx))
             .w(px(480.))
@@ -367,6 +363,7 @@ pub(crate) fn open_detail(
                                 .text_color(tokens.colors.foreground)
                                 .child(name.clone()),
                         )
+                        .child(presence.clone())
                         .children(rows.iter().filter(|(_, value)| !value.is_empty()).map(
                             |(label, value)| {
                                 h_flex()
@@ -398,6 +395,30 @@ pub(crate) fn open_detail(
 }
 
 // ───────────────────────── 管理全部 ─────────────────────────
+
+struct DevicePresence {
+    host: Entity<AccountHost>,
+    device_id: String,
+}
+
+impl Render for DevicePresence {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let host = self.host.read(cx);
+        let translator = host.translator().read(cx);
+        let key = host
+            .controller
+            .devices()
+            .iter()
+            .find(|device| device.id == self.device_id)
+            .map_or("devicePresenceUnknown", |device| {
+                host.controller.device_presence_key(device)
+            });
+        v_flex()
+            .child(field_hint(t(translator, "accountDeviceFieldOnline"), cx))
+            .child(field_hint(t(translator, key), cx))
+            .child(field_hint(t(translator, "cloudConnectionStatusHint"), cx))
+    }
+}
 
 struct ManageAllDialog {
     host: Entity<AccountHost>,
@@ -432,7 +453,12 @@ impl Render for ManageAllDialog {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let tokens = active_theme(cx).tokens().clone();
         let query = self.search.read(cx).value().to_string();
-        let devices = filtered(self.host.read(cx).controller.devices(), &query);
+        let controller = &self.host.read(cx).controller;
+        let devices = filtered(
+            controller.devices(),
+            &query,
+            !controller.is_stale() && controller.cloud_connected(),
+        );
         let translator = self.host.read(cx).translator().read(cx).clone();
         let empty = devices.is_empty();
         let no_results = t(&translator, "accountDevicesSearchNoResults");

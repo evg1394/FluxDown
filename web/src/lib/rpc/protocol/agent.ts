@@ -8,6 +8,15 @@ import type { CreateTaskRequest } from './task';
 
 // ── 账号 ──
 
+export type CloudConnectionState = 'disconnected' | 'connecting' | 'connected' | 'reconnecting';
+
+/** 任务 SSE + 在线租约 + 最新设备名册均成功才 connected；独立于配置同步连接。 */
+export interface CloudConnectionDto {
+  state: CloudConnectionState;
+  lastError?: string;
+  lastErrorReason?: ErrorReason;
+}
+
 export type CloudUserStatus = 'active' | 'disabled' | 'pending' | 'unknown';
 
 /** FluxCloud 用户公开资料。 */

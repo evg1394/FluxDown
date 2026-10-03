@@ -79,6 +79,13 @@ const zhCN = {
   "options.tokenDesc": "服务端首次启动时生成的管理令牌",
   "footer.settings": "全部设置",
 
+  "diagnostics.title": "连接诊断",
+  "diagnostics.description": "导出最近 7 天、最多 200 条连接事件及扩展信息，不包含 Cookie、令牌或下载链接。日志仅存本机，不会自动上传。",
+  "diagnostics.export": "导出日志",
+  "diagnostics.exporting": "正在导出…",
+  "diagnostics.exportStarted": "诊断日志已开始下载",
+  "diagnostics.exportFailed": "导出诊断日志失败，请在「全部设置」中重试。",
+
   // 任务发送通知开关
   "options.general.notifyLocalTitle": "本地任务通知",
   "options.general.notifyLocalDesc":

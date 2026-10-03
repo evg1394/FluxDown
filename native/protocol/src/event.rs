@@ -121,6 +121,8 @@ pub struct AgentSnapshot {
     pub daemon_connected: bool,
     pub session: Option<AgentSessionDto>,
     pub sync: SyncStatusDto,
+    #[serde(default)]
+    pub cloud_connection: crate::CloudConnectionDto,
     pub preferences: AgentPreferencesDto,
     pub gateway: GatewayStatusDto,
     pub cloud_devices: Vec<CloudDevice>,
@@ -213,6 +215,7 @@ pub enum AgentEvent {
     DaemonConnectionChanged(bool),
     SessionChanged(Box<Option<AgentSessionDto>>),
     SyncChanged(SyncStatusDto),
+    CloudConnectionChanged(crate::CloudConnectionDto),
     PreferencesChanged(AgentPreferencesDto),
     GatewayChanged(GatewayStatusDto),
     CloudDevicesChanged(Vec<CloudDevice>),
@@ -268,9 +271,20 @@ pub fn apply_agent_event(snapshot: &mut AgentSnapshot, event: &AgentEvent) {
             if snapshot.session.is_none() {
                 snapshot.cloud_devices.clear();
                 snapshot.remote_tasks.clear();
+                snapshot.cloud_connection = crate::CloudConnectionDto::default();
             }
         }
         AgentEvent::SyncChanged(sync) => snapshot.sync.clone_from(sync),
+        AgentEvent::CloudConnectionChanged(connection) => {
+            snapshot.cloud_connection.clone_from(connection);
+            if connection.state != crate::CloudConnectionState::Connected {
+                for device in &mut snapshot.cloud_devices {
+                    if device.is_current {
+                        device.is_online = false;
+                    }
+                }
+            }
+        }
         AgentEvent::PreferencesChanged(preferences) => snapshot.preferences.clone_from(preferences),
         AgentEvent::GatewayChanged(gateway) => snapshot.gateway.clone_from(gateway),
         AgentEvent::CloudDevicesChanged(devices) => snapshot.cloud_devices.clone_from(devices),
@@ -579,6 +593,39 @@ mod tests {
     use serde_json::json;
 
     use super::{DaemonEvent, EventFrame, ServiceEvent, Snapshot, SnapshotBody};
+
+    #[test]
+    fn cloud_connection_defaults_for_old_snapshot_and_resets_on_logout() {
+        let mut wire = serde_json::to_value(super::AgentSnapshot::default()).expect("snapshot");
+        wire.as_object_mut()
+            .expect("object")
+            .remove("cloudConnection");
+        let mut snapshot: super::AgentSnapshot =
+            serde_json::from_value(wire).expect("old snapshot");
+        assert_eq!(
+            snapshot.cloud_connection,
+            crate::CloudConnectionDto::default()
+        );
+        let connection = crate::CloudConnectionDto {
+            state: crate::CloudConnectionState::Connected,
+            ..Default::default()
+        };
+        let event = super::AgentEvent::CloudConnectionChanged(connection.clone());
+        assert_eq!(
+            serde_json::to_value(&event).expect("event")["type"],
+            "cloudConnectionChanged"
+        );
+        super::apply_agent_event(&mut snapshot, &event);
+        assert_eq!(snapshot.cloud_connection, connection);
+        super::apply_agent_event(
+            &mut snapshot,
+            &super::AgentEvent::SessionChanged(Box::new(None)),
+        );
+        assert_eq!(
+            snapshot.cloud_connection,
+            crate::CloudConnectionDto::default()
+        );
+    }
 
     #[test]
     fn snapshot_carries_atomic_epoch_and_sequence() -> Result<(), serde_json::Error> {

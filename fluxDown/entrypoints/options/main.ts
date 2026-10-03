@@ -34,8 +34,24 @@ import {
   DEFAULT_SETTINGS,
 } from '@/utils/settings';
 import { normalizeDomain } from '@/utils/domain-exclusion';
+import { exportConnectionDiagnostics } from "@/utils/connection-diagnostics";
 
 const $ = <T extends HTMLElement>(sel: string) => document.querySelector<T>(sel)!;
+
+const exportDiagnosticsBtn = $<HTMLButtonElement>("#exportDiagnosticsBtn");
+exportDiagnosticsBtn.addEventListener("click", async () => {
+  exportDiagnosticsBtn.disabled = true;
+  exportDiagnosticsBtn.textContent = t("diagnostics.exporting");
+  try {
+    await exportConnectionDiagnostics();
+    showToast(t("diagnostics.exportStarted"));
+  } catch {
+    showToast(t("diagnostics.exportFailed"), "error");
+  } finally {
+    exportDiagnosticsBtn.disabled = false;
+    exportDiagnosticsBtn.textContent = t("diagnostics.export");
+  }
+});
 
 const navItems = document.querySelectorAll<HTMLButtonElement>('.opt-nav-item');
 const panels = document.querySelectorAll<HTMLElement>('.opt-panel');

@@ -29,6 +29,7 @@
  */
 
 import { browser } from 'wxt/browser';
+import { installConnectionDiagnostics } from "@/utils/connection-diagnostics-background";
 import { defineBackground } from 'wxt/utils/define-background';
 import {
   sendDownloadRequest,
@@ -127,6 +128,7 @@ function extractSelectionDownloadUrl(raw: string | undefined): string | null {
 }
 
 export default defineBackground(() => {
+  const handleDiagnostics = installConnectionDiagnostics();
   console.log("[FluxDown] Background service worker started");
 
   // ===== P3: settings 内存缓存 =====
@@ -2892,6 +2894,9 @@ export default defineBackground(() => {
     message: any,
     sender: chrome.runtime.MessageSender,
   ): Promise<any> {
+    if (message.type === "diagnostics-record" || message.type === "diagnostics-export") {
+      return handleDiagnostics(message, sender);
+    }
     // --- 任务面板（popup ↔ background）：消息用 `type` 字段区分，与其余
     //     历史消息的 `action` 字段并存，互不冲突。---
     switch (message.type) {

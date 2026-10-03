@@ -62,12 +62,15 @@ pub(crate) fn session_revoked_key(reason: ErrorReason) -> &'static str {
     }
 }
 
-fn reason_key(reason: ErrorReason, context: ErrorContext) -> Option<&'static str> {
+pub(crate) fn reason_key(reason: ErrorReason, context: ErrorContext) -> Option<&'static str> {
     Some(match reason {
         ErrorReason::InvalidCredentials => "accountErrorInvalidCredentials",
         ErrorReason::InvalidVerificationCode => "accountErrorInvalidCode",
         ErrorReason::RateLimited => "accountErrorRateLimited",
         ErrorReason::EmailTaken => "accountErrorEmailTaken",
+        ErrorReason::OriginIdTaken => "accountOriginIdErrorTaken",
+        ErrorReason::OriginIdChangeNotAllowed => "accountOriginIdErrorNotAllowed",
+        ErrorReason::OriginIdAlreadyChanged => "accountOriginIdErrorAlreadyChanged",
         ErrorReason::AccountDisabled => "accountErrorAccountDisabled",
         ErrorReason::RegistrationClosed => "accountErrorRegistrationClosed",
         ErrorReason::RegistrationIncomplete => "accountErrorRegistrationIncomplete",
@@ -330,6 +333,9 @@ mod tests {
             ErrorReason::InvalidVerificationCode,
             ErrorReason::RateLimited,
             ErrorReason::EmailTaken,
+            ErrorReason::OriginIdTaken,
+            ErrorReason::OriginIdChangeNotAllowed,
+            ErrorReason::OriginIdAlreadyChanged,
             ErrorReason::AccountDisabled,
             ErrorReason::RegistrationClosed,
             ErrorReason::RegistrationIncomplete,
