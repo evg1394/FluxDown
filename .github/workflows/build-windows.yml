@@ -66,6 +66,8 @@ jobs:
 
       - name: Build FluxDown
         shell: bash
+        env:
+          FLUXDOWN_APP_VERSION: ${{ steps.version.outputs.VERSION }}
         run: |
           cargo build --locked --release \
             --target x86_64-pc-windows-msvc \
@@ -166,9 +168,6 @@ jobs:
             -Force
 
           $installer = Join-Path "build\installer" $installerName
-
-          Write-Host "Installer created:"
-          Get-Item $installer
 
           Write-Host "Installer created:"
           Get-Item $installer
