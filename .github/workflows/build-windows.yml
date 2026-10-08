@@ -2,6 +2,8 @@ name: Build Windows Release
 
 on:
   push:
+    branches:
+      - "v0.5.4"
     tags:
       - "v*"
 
