@@ -3,7 +3,7 @@ title: 服务器部署
 description: 从源码构建并运行 headless FluxDown 服务器(fluxdown-agent --server + fluxdownd),了解全部环境变量并安全地对外暴露。
 section: headless-server
 order: 1
-sourceHash: "e16e0ec39ab1"
+sourceHash: "f2915bfc0e0e"
 ---
 
 headless 服务器 = `fluxdown-agent --server` 加上同级的 `fluxdownd` 下载守护进程:没有桌面界面、托盘或文件关联。它把同一套 Rust 引擎(HTTP/HTTPS、FTP、BitTorrent、HLS、DASH)通过编译进 `fluxdown-agent` 的 Web 界面和 JSON-RPC 端点(`/rpc`,与桌面客户端同一协议)暴露出来,因此你可以把它跑在 NAS、家庭服务器或 VPS 上,在浏览器里远程管理下载。发行版是**同一目录下的两个二进制**——`fluxdown-agent`(内嵌 Web 界面)与 `fluxdownd`。请把它们放在同一目录:agent 会把 `fluxdownd` 作为子进程拉起,并在收到 `SIGTERM`/`SIGINT` 时一并关停它。
@@ -61,6 +61,7 @@ cargo build --release -p fluxdown_agent --features web-ui   # 把 web/dist 嵌�
 | `FLUXDOWN_WEBROOT` | 未设置——托管内嵌的 Web 界面 | 可选覆盖:改从该目录托管 SPA,而不用内嵌那份(自定义前端,或热替换 `bun run build` 产物)。**不再**隐式探测可执行文件同级的 `./web`。 |
 | `FLUXDOWN_TOKEN` | 未设置——走 Web 首次运行向导 | 可选的预置管理访问密钥(即 Web 界面与 API 使用的 gateway 用户密钥)。仅当尚未设置密钥时采纳(会 trim 首尾空白;须满足下文密钥规则,否则忽略并打警告)。用于 docker-compose / k8s / CI 等无人值守部署跳过向导。若要覆盖已存在的密钥,见下方 `FLUXDOWN_TOKEN_FORCE`。 |
 | `FLUXDOWN_TOKEN_FORCE` | 未设置——`FLUXDOWN_TOKEN` 仅播种空密钥 | 真值(`1`/`true`/`yes`/`on`)时,`FLUXDOWN_TOKEN` 每次启动都覆盖库中已存的密钥,而不仅是库中还没有密钥时才生效。适合把密钥完全交给编排系统(Kubernetes Secret、docker-compose env)管理、不希望 Web 界面改的密钥跨重启保留的场景。 |
+| `FLUXDOWN_ALLOW_LOCAL_PLATFORM` | 未设置(关闭) | 允许所有已鉴权 WebSocket 客户端在服务器系统上执行「打开文件」/「在文件夹中显示」。浏览器直接连接字面 `localhost` 或环回地址时自动获得该能力,公网反代来源不会。**可远程访问的服务器请保持未设置**:开启后远程用户可触发系统打开已下载文件。 |
 | `FLUXDOWN_DEMO` | 未设置(关闭) | 真值(`1`/`true`/`yes`/`on`)开启演示模式:仅允许下载内置生成的 64 MiB 演示文件,适合公开演示。 |
 | `FLUXDOWN_DEMO_URL` | 未设置(关闭) | 用指定 URL 覆盖演示模式的内置生成文件,仅该 URL 可下载。 |
 | `FLUXDOWN_LANG` | 未设置(回退浏览器语言) | `/ping` 返回的回退语言(`en`/`zh`),供 Web 界面首次加载使用。在浏览器里选过语言的用户始终以本人选择为准。 |

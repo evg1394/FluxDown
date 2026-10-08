@@ -6,17 +6,19 @@
 
 use std::path::PathBuf;
 
-use fluxdown_ui_components::FluxIcon;
+use fluxdown_ui_icon_pack::FileKind;
 use fluxdown_ui_theme::active_theme;
 use gpui::{
     App, AppContext as _, Context, Entity, ExternalDragPayload, FileDragPaths, IntoElement,
     ParentElement, Pixels, Point, Render, SharedString, Styled, WeakEntity, Window, div,
     prelude::FluentBuilder as _, px,
 };
-use gpui_component::{Icon, h_flex, table::TableState};
+use gpui_component::{h_flex, table::TableState};
 
 use crate::{
-    components::task_table::DownloadTableDelegate, model::RowKey, pages::downloads::DownloadView,
+    components::{file_icon::named_file_icon, task_table::DownloadTableDelegate},
+    model::RowKey,
+    pages::downloads::DownloadView,
 };
 
 /// 预览与光标的间距。
@@ -29,7 +31,9 @@ const PREVIEW_MAX_WIDTH: f32 = 320.;
 #[derive(Clone)]
 pub(crate) struct DraggedTasks {
     pub(crate) anchor: RowKey,
-    pub(crate) icon: FluxIcon,
+    pub(crate) kind: FileKind,
+    /// 小写文件名（图标包按它匹配）。
+    pub(crate) name_fold: SharedString,
     pub(crate) name: SharedString,
     pub(crate) table: WeakEntity<TableState<DownloadTableDelegate>>,
     pub(crate) host: Option<WeakEntity<DownloadView>>,
@@ -46,7 +50,8 @@ impl DraggedTasks {
             table.read(cx).delegate().drag_paths(&self.anchor).len()
         });
         let preview = TaskDragPreview {
-            icon: self.icon,
+            kind: self.kind,
+            name_fold: self.name_fold.clone(),
             name: self.name.clone(),
             extra: count.saturating_sub(1),
             click_offset,
@@ -86,7 +91,8 @@ fn probe_drag_entries(paths: Vec<PathBuf>) -> (Vec<(PathBuf, bool)>, bool) {
 
 /// 窗口内拖拽时跟随光标的预览。
 pub(crate) struct TaskDragPreview {
-    icon: FluxIcon,
+    kind: FileKind,
+    name_fold: SharedString,
     name: SharedString,
     /// 除锚点外同时拖出的文件数。
     extra: usize,
@@ -95,7 +101,9 @@ pub(crate) struct TaskDragPreview {
 }
 
 impl Render for TaskDragPreview {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let icon_size = active_theme(cx).extended().icon.md;
+        let icon = named_file_icon(&self.name_fold, self.kind, icon_size, window, cx);
         let theme = active_theme(cx);
         let tokens = theme.tokens();
         let extended = theme.extended();
@@ -104,7 +112,7 @@ impl Render for TaskDragPreview {
             .pt(self.click_offset.y + px(PREVIEW_CURSOR_GAP))
             .child(
                 h_flex()
-                    .max_w(px(PREVIEW_MAX_WIDTH))
+                    .max_w(theme.text_extent(PREVIEW_MAX_WIDTH))
                     .px(tokens.spacing.md)
                     .py(tokens.spacing.xs)
                     .gap(tokens.spacing.sm)
@@ -116,7 +124,7 @@ impl Render for TaskDragPreview {
                     .text_size(tokens.typography.sm.size)
                     .line_height(tokens.typography.sm.line_height)
                     .text_color(tokens.colors.surface_foreground)
-                    .child(Icon::new(self.icon).size(extended.icon.md))
+                    .child(icon)
                     .child(div().min_w_0().truncate().child(self.name.clone()))
                     .when(self.extra > 0, |this| {
                         this.child(

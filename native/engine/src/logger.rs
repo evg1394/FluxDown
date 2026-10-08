@@ -674,18 +674,6 @@ pub fn write(message: &str) {
     }
 }
 
-/// 直接写入一条错误日志并立即刷盘。
-pub fn write_error(message: &str) {
-    if let Some(logger) = LOGGER.get() {
-        logger.write_impl(message, true);
-    } else {
-        eprintln!(
-            "{} [logger-uninitialized] {message}",
-            Local::now().format("%H:%M:%S%.3f")
-        );
-    }
-}
-
 #[doc(hidden)]
 pub fn trace_info(arguments: fmt::Arguments<'_>) {
     tracing::info!("{arguments}");

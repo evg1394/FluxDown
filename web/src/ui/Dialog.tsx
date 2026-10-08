@@ -29,6 +29,8 @@ export interface DialogProps {
   children?: ReactNode
   /** 禁止点遮罩 / Esc 关闭（进行中的操作）。 */
   modalLocked?: boolean
+  /** 点遮罩不关闭（Esc / 关闭按钮 / 取消仍可关闭）；用于填写验证码等误触代价高的表单。 */
+  persistent?: boolean
   className?: string
 }
 
@@ -49,7 +51,7 @@ function pressedInside(content: HTMLElement | null, event: { detail: { originalE
  * 对话框：桌面居中（`components.dialog.radius`），移动端（<=820px）全屏——
  * 顶部标题栏带关闭按钮，底栏吸底并避开安全区。标题栏 15/20 半粗（GPUI `dialog_title`）。
  */
-export function Dialog({ open, onOpenChange, title, description, footer, size = 'md', children, modalLocked, className }: DialogProps) {
+export function Dialog({ open, onOpenChange, title, description, footer, size = 'md', children, modalLocked, persistent, className }: DialogProps) {
   const t = useT()
   const mobile = useIsMobile()
   const contentRef = useRef<HTMLDivElement>(null)
@@ -60,7 +62,7 @@ export function Dialog({ open, onOpenChange, title, description, footer, size = 
         <RadixDialog.Content
           ref={contentRef}
           onPointerDownOutside={(event) => pressedInside(contentRef.current, event) && event.preventDefault()}
-          onInteractOutside={(event) => modalLocked && event.preventDefault()}
+          onInteractOutside={(event) => (modalLocked || persistent) && event.preventDefault()}
           onEscapeKeyDown={(event) => modalLocked && event.preventDefault()}
           {...(description ? {} : { 'aria-describedby': undefined })}
           className={cn(

@@ -54,6 +54,24 @@ impl CloudAuthService {
             .await
     }
 
+    /// 重置密码发码（未登录）。
+    pub async fn send_password_reset_code<P: Serialize>(
+        &self,
+        request: &P,
+    ) -> Result<Value, CloudError> {
+        self.client
+            .public(Method::POST, "/api/v1/auth/password/code", Some(request))
+            .await
+    }
+
+    /// 重置密码（未登录）；云端 204 空正文，按 JSON null 解码后丢弃。不触碰本机会话。
+    pub async fn reset_password<P: Serialize>(&self, request: &P) -> Result<(), CloudError> {
+        self.client
+            .public::<P, Value>(Method::POST, "/api/v1/auth/password/reset", Some(request))
+            .await
+            .map(|_| ())
+    }
+
     pub async fn verify_code<P: Serialize>(
         &self,
         request: &P,

@@ -471,6 +471,8 @@ fn select_subtree(
     }
 }
 
+/// 清单分组默认名：清单自带名；为空时取来源 URL 路径末段并百分号解码（与 Web
+/// `manifestDefaultGroupName` 一致；解码失败 → 空串，交调用方套用占位符）。
 pub(crate) fn default_group_name(manifest_name: &str, source_url: &str) -> String {
     if !manifest_name.trim().is_empty() {
         return manifest_name.trim().to_owned();
@@ -481,8 +483,8 @@ pub(crate) fn default_group_name(manifest_name: &str, source_url: &str) -> Strin
         .and_then(|url| url.split_once("://"))
         .and_then(|(_, rest)| rest.split_once('/'))
         .and_then(|(_, path)| path.split('/').rfind(|part| !part.is_empty()))
+        .and_then(super::new_download::percent_decode_utf8)
         .unwrap_or_default()
-        .to_owned()
 }
 
 fn extension_label(name: &str) -> String {

@@ -8,17 +8,21 @@ import { ChevronDown, ChevronRight } from 'lucide-react'
 import { useMemo, useState } from 'react'
 import { useT } from '../../../i18n'
 import { rpc, useTasks } from '../../../lib/rpc'
-import type { BtFileDto, HlsQualityOptionDto, ResolveVariantOptionDto, SelectionOutcome, SelectionRequestDto } from '../../../lib/rpc'
+import type { BtFileDto, HlsQualityOptionDto, ResolveVariantOptionDto, SelectionKind, SelectionOutcome, SelectionRequestDto } from '../../../lib/rpc'
 import { Button, Checkbox, Dialog, DialogFooter, FieldHint, Icon, Input } from '../../../ui'
 import { toastRpcError } from '../../../lib/rpcToast'
 import { cn } from '../../../lib/cn'
 import { formatBytes, useNow } from './utils'
 
-/** 一次只展示队首请求；其余排队，前一个解决后自动轮到下一个。 */
+type ChoiceKind = Exclude<SelectionKind, { type: 'fileExists' }>
+
+/** 一次只展示队首请求；其余排队，前一个解决后自动轮到下一个。`fileExists` 由 `FileConflictDialog` 聚合处理，这里跳过。 */
 export function SelectionHost({ requests }: { requests: readonly SelectionRequestDto[] }) {
-  const request = requests[0]
-  if (!request) return null
-  return <SelectionDialog key={request.requestId} request={request} />
+  for (const request of requests) {
+    const kind = request.kind
+    if (kind.type !== 'fileExists') return <SelectionDialog key={request.requestId} request={request} kind={kind} />
+  }
+  return null
 }
 
 function defaultIndex(request: SelectionRequestDto, kind: 'hls' | 'variant', first: number): number {
@@ -26,12 +30,11 @@ function defaultIndex(request: SelectionRequestDto, kind: 'hls' | 'variant', fir
   return choice.kind === kind ? choice.index : first
 }
 
-function SelectionDialog({ request }: { request: SelectionRequestDto }) {
+function SelectionDialog({ request, kind }: { request: SelectionRequestDto; kind: ChoiceKind }) {
   const t = useT()
   const tasks = useTasks()
   const now = useNow(1000)
   const [submitting, setSubmitting] = useState(false)
-  const kind = request.kind
   const [hlsIndex, setHlsIndex] = useState(() => defaultIndex(request, 'hls', kind.type === 'hls' ? (kind.options[0]?.index ?? 0) : 0))
   const [variantIndex, setVariantIndex] = useState(() => defaultIndex(request, 'variant', kind.type === 'variant' ? (kind.options[0]?.index ?? 0) : 0))
   const [btSelected, setBtSelected] = useState<ReadonlySet<number>>(() => {

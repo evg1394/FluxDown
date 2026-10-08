@@ -1,10 +1,11 @@
-//! 桌面（非 `--server`）模式的诊断日志：把 agent 的 `tracing` 事件与 panic 落盘到
+//! 桌面（非 `--server`）与移动端嵌入模式的诊断日志：把 agent 的 `tracing` 事件与 panic 落盘到
 //! `<agent_data_dir>/logs/agent.log`（有界轮转、去重限流，见 `fluxdown_logfile`）。
 //!
-//! GUI 子系统没有 stderr，不装订阅者时所有事件都会丢失。
+//! GUI 子系统 / 移动 App 没有可读的 stderr，不装订阅者时所有事件都会丢失。
 
 use std::fmt::Write as _;
 use std::io;
+use std::path::Path;
 
 use fluxdown_logfile::Level;
 use tracing_subscriber::EnvFilter;
@@ -13,8 +14,10 @@ use tracing_subscriber::fmt::MakeWriter;
 use crate::runtime::AgentResult;
 
 /// 一等公民 crate：默认按用户级别输出；第三方（hyper / reqwest / tungstenite / axum）只保留 warn+。
-const FIRST_PARTY_TARGETS: [&str; 4] = [
+/// 嵌入模式下 daemon 与 agent 同进程，daemon 事件也写进这份日志。
+const FIRST_PARTY_TARGETS: [&str; 5] = [
     "fluxdown_agent",
+    "fluxdown_daemon",
     "fluxdown_link",
     "fluxdown_api",
     "fluxdown_protocol",
@@ -30,8 +33,18 @@ pub fn init_desktop() {
             return;
         }
     };
-    let dir = crate::log_export::agent_log_dir(&agent_data_dir);
-    let header = build_header(&agent_data_dir);
+    init_at(&agent_data_dir, &crate::runtime::engine_data_dir());
+}
+
+/// 初始化移动端嵌入模式日志（进程内 daemon + agent）。必须在启动 daemon 之前调用：daemon
+/// 只在没有全局订阅者时才装自己的 stderr 订阅者。进程内只生效一次，重复调用沿用首次的目录。
+pub fn init_embedded(agent_data_dir: &Path, engine_data_dir: &Path) {
+    init_at(agent_data_dir, engine_data_dir);
+}
+
+fn init_at(agent_data_dir: &Path, engine_data_dir: &Path) {
+    let dir = crate::log_export::agent_log_dir(agent_data_dir);
+    let header = build_header(agent_data_dir, engine_data_dir);
     let log = match fluxdown_logfile::init_global(&dir, "agent", header) {
         Ok(log) => log,
         Err(error) => {
@@ -131,7 +144,7 @@ fn default_directives(level: Level) -> String {
     directives
 }
 
-fn build_header(agent_data_dir: &std::path::Path) -> String {
+fn build_header(agent_data_dir: &Path, engine_data_dir: &Path) -> String {
     let mut header = String::new();
     let mut line = |key: &str, value: String| {
         header.push_str("  ");
@@ -158,10 +171,7 @@ fn build_header(agent_data_dir: &std::path::Path) -> String {
         format!("{}/{}", std::env::consts::OS, std::env::consts::ARCH),
     );
     line("agent data dir", agent_data_dir.display().to_string());
-    line(
-        "engine data dir",
-        crate::runtime::engine_data_dir().display().to_string(),
-    );
+    line("engine data dir", engine_data_dir.display().to_string());
     #[cfg(windows)]
     {
         let portable = exe
@@ -259,7 +269,7 @@ mod tests {
     fn default_filter_keeps_third_party_quiet() {
         assert_eq!(
             default_directives(Level::Info),
-            "warn,fluxdown_agent=info,fluxdown_link=info,fluxdown_api=info,fluxdown_protocol=info"
+            "warn,fluxdown_agent=info,fluxdown_daemon=info,fluxdown_link=info,fluxdown_api=info,fluxdown_protocol=info"
         );
         assert_eq!(default_directives(Level::Error), "error");
     }

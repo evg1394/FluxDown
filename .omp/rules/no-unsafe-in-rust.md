@@ -52,10 +52,10 @@ repeatGap: 2
 |`native/agent/src/platform/`|系统图标、Shell 定位/关联变更、COM 生命周期；每项遵守上述约束|
 |`native/agent/src/notification/`|macOS UserNotifications ABI 与 Windows WinRT apartment；已有安全接口优先|
 
-`native/{api,protocol,daemon,server}`、`crates/*`（GPUI）、`native/nmh`、`scripts/desktop-dev` 的项目源码保持零 unsafe；冻结 server 不改动。测试不自动豁免：先用安全 API，确需独立平台 oracle 才保留最小 FFI 并检查失败。
+`native/{api,protocol,daemon,server,mobile}`、`crates/*`（GPUI）、`native/nmh`、`scripts/desktop-dev` 的项目源码保持零 unsafe；冻结 server 不改动。测试不自动豁免：先用安全 API，确需独立平台 oracle 才保留最小 FFI 并检查失败。
 
 ## 防止回归
 
 - workspace deny `unsafe_op_in_unsafe_fn` 与 `clippy::undocumented_unsafe_blocks`；NMH 以 `forbid(unsafe_code)` 锁定安全实现。不得 allow/命令行关闭这些检查来消音。
-- 源码扫描不覆盖第三方实现及宏展开。hub 的 Rinf ABI 宏是独立审计边界，不能把手写源码零 unsafe 宣称为整个产物零 unsafe，也不要另写第二套 ABI。
+- 源码扫描不覆盖第三方实现及宏展开。hub 的 Rinf ABI 宏与 `native/mobile`（`fluxdown_mobile`）的 UniFFI 导出宏是独立审计边界：手写源码仍零 unsafe，宏生成的 FFI 胶水不计入“零 unsafe”声明；若 workspace lint 命中宏展开，只允许在该 crate 针对具体生成 lint 局部放行并注明边界，不得全局关闭。也不要另写第二套 ABI。
 - 验证实际目标与 feature：macOS 编译通过不证明 Windows cfg 已编译；没有目标运行环境时明确报告限制。规则准入变更同步根 AGENTS.md、RULES.md 与 WATCHDOG.md，避免相互矛盾。

@@ -1147,7 +1147,7 @@ impl TaskDetailView {
             .child(
                 list.flex_grow_1()
                     .flex_shrink_1()
-                    .flex_basis(px(GENERAL_INFO_MIN_WIDTH))
+                    .flex_basis(active_theme(cx).text_extent(GENERAL_INFO_MIN_WIDTH))
                     .min_w_0(),
             )
             .children(self.render_sources_section(cx))
@@ -1345,16 +1345,18 @@ impl TaskDetailView {
             .collect();
         // 单切片（100%）不留分隔缝，否则整环出现一道缺口。
         let pad_angle = if arcs.len() > 1 { 0.02 } else { 0. };
+        // 环形图随文字缩放：中心的「已下载」与字节数需要装得下内圈（默认倍率 1，尺寸不变）。
+        let donut_scale = f32::from(active_theme(cx).text_extent(1.));
         let donut = div()
             .relative()
             .flex_none()
-            .size(px(140.))
+            .size(active_theme(cx).text_extent(140.))
             .child(
                 PieChart::new(arcs)
                     .value(|arc: &(Hsla, f32)| arc.1)
                     .color(|arc: &(Hsla, f32)| arc.0)
-                    .outer_radius(66.)
-                    .inner_radius(46.)
+                    .outer_radius(66. * donut_scale)
+                    .inner_radius(46. * donut_scale)
                     .pad_angle(pad_angle)
                     .interactive(false),
             )
@@ -1385,7 +1387,7 @@ impl TaskDetailView {
         let legend =
             v_flex()
                 .flex_1()
-                .min_w(px(180.))
+                .min_w(active_theme(cx).text_extent(180.))
                 .children(composition.slices.iter().map(|slice| {
                     h_flex()
                         .items_center()
@@ -1414,7 +1416,7 @@ impl TaskDetailView {
                         ))
                         .child(
                             div()
-                                .min_w(px(64.))
+                                .min_w(active_theme(cx).text_extent(64.))
                                 .text_right()
                                 .text_color(tokens.colors.muted_foreground)
                                 .child(SharedString::from(format_bytes(slice.bytes))),
@@ -1437,7 +1439,7 @@ impl TaskDetailView {
         Some(
             v_flex()
                 .flex_none()
-                .w(px(SOURCES_SECTION_WIDTH))
+                .w(active_theme(cx).text_extent(SOURCES_SECTION_WIDTH))
                 .max_w_full()
                 .gap(tokens.spacing.sm)
                 .child(
@@ -1709,7 +1711,7 @@ impl TaskDetailView {
                 .child(
                     div()
                         .flex_none()
-                        .w(px(ACTIVITY_TIME_WIDTH))
+                        .w(active_theme(cx).text_extent(ACTIVITY_TIME_WIDTH))
                         .font_features(tabular_numbers())
                         .text_color(extended.colors.text_tertiary)
                         .child(format_activity_timestamp(entry.timestamp_ms)),
@@ -1854,7 +1856,7 @@ pub(crate) fn detail_row(label: SharedString, value: impl IntoElement, cx: &App)
         .child(
             div()
                 .flex_none()
-                .w(px(DETAIL_LABEL_WIDTH))
+                .w(theme.text_extent(DETAIL_LABEL_WIDTH))
                 .text_size(tokens.typography.xs.size)
                 .line_height(tokens.typography.sm.line_height)
                 .text_color(theme.extended().colors.text_tertiary)

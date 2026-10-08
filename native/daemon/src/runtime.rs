@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
+use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -14,6 +15,7 @@ use fluxdown_engine::selection::HostSelection;
 use fluxdown_engine::{Engine, EngineConfig};
 use fluxdown_protocol::{DaemonConfigSnapshot, DaemonSnapshot};
 use tokio::net::TcpListener;
+use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
 use crate::actor::EngineReceivers;
@@ -26,11 +28,29 @@ use crate::http::{load_or_create_token, serve};
 use crate::selection::DaemonSelection;
 use crate::service::DaemonService;
 
+/// 控制面绑定成功后报告给嵌入方的信息：真实监听地址（含临时端口）与控制 token。
+#[derive(Clone, Debug)]
+pub struct DaemonReady {
+    pub addr: SocketAddr,
+    pub token: String,
+}
+
 /// 运行 daemon 直到收到取消信号。
 pub async fn run(
     cancel: CancellationToken,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let process_config = DaemonConfig::from_env()?;
+    run_with(DaemonConfig::from_env()?, cancel, None).await
+}
+
+/// 与 [`run`] 相同，但使用显式配置；控制面开始监听后通过 `ready` 报告真实地址与 token。
+///
+/// 进程租约已被其它 daemon 持有时：`ready` 为 `None`（独立进程）按原语义静默返回 `Ok(())`；
+/// `ready` 为 `Some`（嵌入方）返回错误，让嵌入方能够暴露该失败而不是永远等不到 ready。
+pub async fn run_with(
+    process_config: DaemonConfig,
+    cancel: CancellationToken,
+    ready: Option<oneshot::Sender<DaemonReady>>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let data_dir =
         fluxdown_engine::data_dir::resolve_data_dir(process_config.data_dir_override.as_deref())?;
     fluxdown_engine::logger::init_with_dir(&data_dir)?;
@@ -48,6 +68,13 @@ pub async fn run(
                 data_dir = %data_dir.display(),
                 "another fluxdownd owns the daemon process lease"
             );
+            if ready.is_some() {
+                return Err(std::io::Error::other(format!(
+                    "another fluxdownd owns the daemon process lease for {}",
+                    data_dir.display()
+                ))
+                .into());
+            }
             return Ok(());
         }
     };
@@ -117,7 +144,9 @@ pub async fn run(
     let maintenance_actor = actor.clone();
     let startup_config = all_config.clone();
     let startup_maintenance_task = tokio::spawn(async move {
-        if config_enabled(&startup_config, "bt_tracker_sub_enabled", true) {
+        if config_enabled(&startup_config, "bt_enabled", true)
+            && config_enabled(&startup_config, "bt_tracker_sub_enabled", true)
+        {
             match maintenance_actor
                 .execute(crate::actor::ActorOperation::RefreshTrackerSubscription)
                 .await
@@ -178,7 +207,18 @@ pub async fn run(
         .await
         .map_err(|error| std::io::Error::other(error.message))?;
     let listener = TcpListener::bind(process_config.bind_addr).await?;
-    tracing::info!(address = %process_config.bind_addr, "fluxdownd control plane listening");
+    let bound_addr = listener.local_addr()?;
+    tracing::info!(address = %bound_addr, "fluxdownd control plane listening");
+    if let Some(ready) = ready
+        && ready
+            .send(DaemonReady {
+                addr: bound_addr,
+                token: token.clone(),
+            })
+            .is_err()
+    {
+        tracing::debug!("daemon embedder dropped the ready receiver before startup completed");
+    }
 
     let sweep_task = spawn_blob_sweeper(blobs.clone(), cancel.clone());
     let mut lease_task = spawn_lease_monitor(lease_guard, cancel.clone());

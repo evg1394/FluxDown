@@ -230,7 +230,7 @@ fn make_params(
         audio_url: Some(format!("{base}/audio")),
         auto_max_connections: 0,
         use_server_time: false,
-        allow_overwrite: false,
+        overwrite: fluxdown_engine::file_exists::OverwritePolicy::Never,
         ffmpeg_path: None,
         cdn: fluxdown_engine::cdn::CdnTaskInput::default(),
     }

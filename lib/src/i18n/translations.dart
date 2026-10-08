@@ -1430,6 +1430,8 @@ class S {
   // ─────────────────────────────────────────────
   String get btSettings => _r('btSettings');
   String get btSettingsDesc => _r('btSettingsDesc');
+  String get btEnabled => _r('btEnabled');
+  String get btEnabledDesc => _r('btEnabledDesc');
   String get btEnableDht => _r('btEnableDht');
   String get btEnableDhtDesc => _r('btEnableDhtDesc');
   String get btEnableUpnp => _r('btEnableUpnp');

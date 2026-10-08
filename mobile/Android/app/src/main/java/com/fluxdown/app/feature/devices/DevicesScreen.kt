@@ -1,0 +1,316 @@
+package com.fluxdown.app.feature.devices
+
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.asPaddingValues
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBars
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.Immutable
+import androidx.compose.runtime.derivedStateOf
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.input.nestedscroll.nestedScroll
+import androidx.compose.ui.unit.dp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.fluxdown.app.R
+import com.fluxdown.app.actions.LocalTaskActions
+import com.fluxdown.app.i18n.str
+import com.fluxdown.app.nav.LocalNavigator
+import com.fluxdown.app.nav.SheetRoute
+import com.fluxdown.app.shell.LocalAppContainer
+import com.fluxdown.app.shell.hostState
+import com.fluxdown.core.format.Format
+import com.fluxdown.core.model.CloudDevice
+import com.fluxdown.core.model.HostRef
+import com.fluxdown.core.model.LinkDevice
+import com.fluxdown.core.model.TaskStatus
+import com.fluxdown.core.store.Connection
+import com.fluxdown.fluxui.chrome.FluxHeader
+import com.fluxdown.fluxui.controls.ButtonSize
+import com.fluxdown.fluxui.controls.ButtonVariant
+import com.fluxdown.fluxui.controls.FluxButton
+import com.fluxdown.fluxui.controls.FluxDivider
+import com.fluxdown.fluxui.controls.FluxListRow
+import com.fluxdown.fluxui.controls.FluxPresenceDot
+import com.fluxdown.fluxui.controls.FluxSectionFoot
+import com.fluxdown.fluxui.controls.FluxStatRow
+import com.fluxdown.fluxui.controls.FluxTag
+import com.fluxdown.fluxui.controls.GlassSection
+import com.fluxdown.fluxui.controls.StatItem
+import com.fluxdown.fluxui.controls.Tone
+import com.fluxdown.fluxui.feedback.FluxEmpty
+import com.fluxdown.fluxui.feedback.FluxGlyph
+import com.fluxdown.fluxui.icons.FluxIcons
+import com.fluxdown.fluxui.material.FluxGlass
+import com.fluxdown.fluxui.material.FluxGlassKind
+import com.fluxdown.fluxui.material.fluxFlowIn
+import com.fluxdown.fluxui.material.fluxGlass
+import com.fluxdown.fluxui.material.rememberFlowInGate
+import com.fluxdown.fluxui.overlay.LocalSwipeRevealCoordinator
+import com.fluxdown.fluxui.theme.FluxText
+import com.fluxdown.fluxui.theme.FluxTheme
+
+/**
+ * V1 设备页（Dock 目的地）：当前主机卡 + 云端已信任设备 + 局域网已配对设备。
+ * 配对 / 添加设备 / 设备详情依赖桥接层接口（端口内尚无），本页只读展示。
+ */
+@Composable
+fun DevicesScreen() {
+    val container = LocalAppContainer.current
+    val nav = LocalNavigator.current
+    val space = FluxTheme.space
+    val host = hostState()
+    val hostRef by container.host.collectAsStateWithLifecycle()
+    val cloud by remember { derivedStateOf { host.value.cloudDevices } }
+    val link by remember { derivedStateOf { host.value.linkDevices } }
+    val facts = remember { derivedStateOf { host.value.toFacts() } }
+
+    val cloudSorted = remember(cloud) {
+        cloud.sortedWith(
+            compareByDescending<CloudDevice> { it.isCurrent }
+                .thenByDescending { it.isOnline }
+                .thenBy(String.CASE_INSENSITIVE_ORDER) { it.name },
+        )
+    }
+    val linkSorted = remember(link) {
+        link.sortedWith(compareByDescending<LinkDevice> { it.online }.thenBy(String.CASE_INSENSITIVE_ORDER) { it.name })
+    }
+
+    val listState = rememberLazyListState()
+    DockMiniEffect(listState)
+    val swipe = LocalSwipeRevealCoordinator.current
+    val gate = rememberFlowInGate()
+    val margin = space.screenMargin
+    val topInset = WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
+
+    LazyColumn(
+        state = listState,
+        modifier = Modifier
+            .fillMaxSize()
+            .then(if (swipe != null) Modifier.nestedScroll(swipe.nestedScrollConnection) else Modifier),
+        contentPadding = PaddingValues(top = topInset, bottom = space.dockClearance),
+    ) {
+        item(key = "header") {
+            FluxHeader(
+                title = str(R.string.mobileNavDevices),
+                modifier = Modifier.padding(horizontal = margin).fluxFlowIn(0, gate, "header"),
+            )
+        }
+        item(key = "host") {
+            HostCard(
+                hostRef = hostRef,
+                facts = facts.value,
+                onSwitch = { nav.openSheet(SheetRoute.HostSwitch) },
+                modifier = Modifier.padding(horizontal = margin, vertical = 6.dp).fluxFlowIn(1, gate, "host"),
+            )
+        }
+        if (cloudSorted.isNotEmpty()) {
+            item(key = "cloud") {
+                GlassSection(
+                    modifier = Modifier.padding(horizontal = margin).fluxFlowIn(2, gate, "cloud"),
+                    title = str(R.string.accountDevicesTitle),
+                    footer = str(R.string.accountDevicesDesc),
+                ) {
+                    cloudSorted.forEach { d ->
+                        row(hasIcon = true) {
+                            DeviceRow(d.name, d.platform, d.isOnline, d.appVersion, d.isCurrent)
+                        }
+                    }
+                }
+            }
+        }
+        if (linkSorted.isNotEmpty()) {
+            item(key = "link") {
+                GlassSection(
+                    modifier = Modifier.padding(horizontal = margin).fluxFlowIn(3, gate, "link"),
+                    title = str(R.string.linkedDevicesTitle),
+                    footer = str(R.string.linkedDevicesDesc),
+                ) {
+                    linkSorted.forEach { d ->
+                        row(hasIcon = true) {
+                            DeviceRow(d.name, d.platform, d.online, null, false)
+                        }
+                    }
+                }
+            }
+        }
+        if (cloudSorted.isEmpty() && linkSorted.isEmpty()) {
+            item(key = "empty") {
+                Box(Modifier.fillMaxWidth().padding(top = 24.dp), contentAlignment = Alignment.Center) {
+                    FluxEmpty(glyph = FluxGlyph.Device, title = str(R.string.mobileDevicesEmptyTitle))
+                }
+            }
+        }
+        item(key = "footnote") {
+            FluxSectionFoot(
+                str(R.string.mobileDevicesFootnote),
+                Modifier.padding(horizontal = margin + 8.dp, vertical = 8.dp),
+            )
+        }
+    }
+}
+
+// ── 主机事实（派生，结构相等才触发重组）──────────────────────────────────
+
+@Immutable
+private data class HostFacts(
+    val connection: Connection,
+    val version: String?,
+    val diskFree: Long?,
+    val active: Int,
+    val waiting: Int,
+    val completed: Int,
+    val paused: Int,
+    val failed: Int,
+)
+
+private fun com.fluxdown.core.store.HostState.toFacts(): HostFacts {
+    var completed = 0
+    var paused = 0
+    var failed = 0
+    for (t in tasks) {
+        when (t.status) {
+            TaskStatus.Completed -> completed++
+            TaskStatus.Paused -> paused++
+            TaskStatus.Failed -> failed++
+            else -> Unit
+        }
+    }
+    return HostFacts(
+        connection = connection,
+        version = info?.serviceVersion,
+        diskFree = stats.diskFreeBytes,
+        active = stats.activeTasks,
+        waiting = stats.pendingTasks,
+        completed = completed,
+        paused = paused,
+        failed = failed,
+    )
+}
+
+// ── 当前主机卡 ──────────────────────────────────────────────────────────
+
+@Composable
+private fun HostCard(hostRef: HostRef, facts: HostFacts, onSwitch: () -> Unit, modifier: Modifier = Modifier) {
+    val c = FluxTheme.colors
+    val t = FluxTheme.type
+    val actions = LocalTaskActions.current
+
+    val (connText, connTone) = when (facts.connection) {
+        Connection.Live -> str(R.string.mobileHostConnLive) to Tone.Mint
+        Connection.Connecting -> str(R.string.mobileHostConnConnecting) to Tone.Amber
+        Connection.Stale -> str(R.string.mobileHostConnStale) to Tone.Amber
+        is Connection.Failed -> str(R.string.mobileHostConnFailed) to Tone.Coral
+    }
+    val connError = (facts.connection as? Connection.Failed)?.let { actions.errorText(it.error) }
+
+    Column(
+        modifier
+            .fillMaxWidth()
+            .fluxGlass(FluxGlass.G3, FluxTheme.shapes.card, kind = FluxGlassKind.Flat),
+    ) {
+        Column(Modifier.padding(start = 20.dp, end = 12.dp, top = 18.dp, bottom = 14.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                FluxPresenceDot(tone = connTone, size = 9.dp)
+                FluxText(hostRef.localizedName(), Modifier.weight(1f), style = t.h1, color = c.ink, maxLines = 2)
+                FluxButton(
+                    text = str(R.string.mobileDevicesSwitchHost),
+                    onClick = onSwitch,
+                    variant = ButtonVariant.Ghost,
+                    size = ButtonSize.Xs,
+                    trailingIcon = FluxIcons.ChevronDown,
+                )
+            }
+            FluxText(hostRef.localizedSubtitle(), style = t.sm, color = c.inkMuted, maxLines = 2)
+            FluxText(
+                connText,
+                style = t.weight(t.sm, 500),
+                color = when (connTone) {
+                    Tone.Mint -> c.mintText
+                    Tone.Amber -> c.amberText
+                    else -> c.coralText
+                },
+            )
+            if (connError != null) FluxText(connError, style = t.sm, color = c.coralText)
+        }
+        FluxDivider()
+        val disk = facts.diskFree?.let { Format.bytes(it) }
+        FluxStatRow(
+            listOf(
+                StatItem(disk?.value ?: "—", str(R.string.mobileDevicesStatDisk), disk?.unit),
+                StatItem(facts.version ?: "—", str(R.string.mobileDevicesStatVersion)),
+                StatItem(facts.active.toString(), str(R.string.statusDownloading), tone = if (facts.active > 0) Tone.Accent else Tone.Neutral),
+            ),
+        )
+        if (facts.waiting + facts.completed + facts.paused + facts.failed > 0) {
+            FluxDivider()
+            Row(
+                Modifier.horizontalScroll(rememberScrollState()).padding(horizontal = 16.dp, vertical = 12.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                if (facts.waiting > 0) FluxTag("${str(R.string.statusPending)} ${facts.waiting}")
+                if (facts.paused > 0) FluxTag("${str(R.string.statusPaused)} ${facts.paused}")
+                if (facts.completed > 0) FluxTag("${str(R.string.statusCompleted)} ${facts.completed}", tone = Tone.Mint)
+                if (facts.failed > 0) FluxTag("${str(R.string.tabError)} ${facts.failed}", tone = Tone.Coral)
+            }
+        }
+    }
+}
+
+// ── 设备行 ──────────────────────────────────────────────────────────────
+
+@Composable
+private fun DeviceRow(name: String, platform: String?, online: Boolean, version: String?, current: Boolean) {
+    val c = FluxTheme.colors
+    val subtitle = listOfNotNull(
+        str(if (online) R.string.deviceOnline else R.string.deviceOffline),
+        platformLabel(platform),
+        version?.takeIf { it.isNotBlank() }?.let { "v$it" },
+    ).joinToString(" · ")
+    FluxListRow(
+        title = name,
+        subtitle = subtitle,
+        leading = {
+            Box(Modifier.size(44.dp)) {
+                GlyphTile(
+                    icon = platformIcon(platform),
+                    tint = if (online) c.ink else c.inkFaint,
+                    modifier = Modifier.align(Alignment.TopStart),
+                )
+                PresenceMark(online, Modifier.align(Alignment.BottomEnd))
+            }
+        },
+        trailing = if (current) ({ FluxTag(str(R.string.thisDevice), tone = Tone.Accent) }) else null,
+    )
+}
+
+/** 在线 = mint 实心 + 辉光；离线 = 1.5dp 空心环（永远伴随文字状态）。 */
+@Composable
+private fun PresenceMark(online: Boolean, modifier: Modifier = Modifier) {
+    val c = FluxTheme.colors
+    Box(modifier.size(14.dp).background(c.canvas, CircleShape), contentAlignment = Alignment.Center) {
+        if (online) {
+            FluxPresenceDot(size = 8.dp)
+        } else {
+            Box(Modifier.size(8.dp).border(1.5.dp, c.inkFaint, CircleShape))
+        }
+    }
+}

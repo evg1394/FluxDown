@@ -13,7 +13,8 @@
 [![License: AGPL-3.0](https://img.shields.io/badge/license-AGPL--3.0-blue?style=flat-square)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux%20%7C%20NAS%20%7C%20Android-8b5cf6?style=flat-square)](#installation)
 [![Rust](https://img.shields.io/badge/engine-Rust-f74c00?style=flat-square&logo=rust)](native/engine)
-[![Flutter](https://img.shields.io/badge/UI-Flutter-02569B?style=flat-square&logo=flutter)](lib)
+[![GPUI](https://img.shields.io/badge/desktop-GPUI-f74c00?style=flat-square&logo=rust)](crates/app)
+[![Flutter](https://img.shields.io/badge/mobile-Flutter-02569B?style=flat-square&logo=flutter)](lib)
 [![MCP Server](https://glama.ai/mcp/servers/zerx-lab/FluxDown/badges/score.svg)](https://glama.ai/mcp/servers/zerx-lab/FluxDown)
 
 [![Awesome Rust](https://img.shields.io/badge/Awesome-Rust-orange?logo=rust&style=flat-square)](https://github.com/rust-unofficial/awesome-rust#utilities)
@@ -35,27 +36,30 @@
 
 ## Highlights
 
-- **Up to 10x faster** — Rust + Tokio engine with IDM-style dynamic segmentation
+- **Dynamic download acceleration** — Rust + Tokio engine with adaptive segmentation and slow-segment rescue
 - **Multi-protocol** — HTTP/HTTPS, FTP, BitTorrent, eD2K, HLS & DASH streaming
-- **Browser integration** — Chrome / Edge / Firefox extension with a 3-layer interception engine
+- **One engine, multiple clients** — native GPUI desktop, Flutter Android app, React Web UI and CLI
+- **Browser integration** — Chrome / Edge / Firefox extension with a 3-layer interception engine, plus a userscript
 - **AI-agent ready** — built-in MCP (Model Context Protocol) server: let Claude, Cursor & other AI clients manage your downloads
-- **Resume anywhere** — full download state persisted in SQLite; survive crashes and reboots
-- **Beautiful UI** — light/dark themes, 13 color schemes, responsive three-pane layout
-- **Clean & private** — free and open source, no ads, no tracking, no account required, local-first
+- **Automation & remote management** — RSS subscriptions, scheduled queues, webhooks, plugins and optional FluxCloud device collaboration
+- **Local-first** — free and open source, no ads, no account required for local downloads; resumable state stored locally by default
 
 ## Features
 
 | Feature | Description |
 |---|---|
-| **Rust-Powered Engine** | Built on Rust and Tokio with zero-cost abstractions — memory-safe concurrency at maximum throughput |
-| **Smart Segmentation** | Segments split dynamically at runtime; idle threads rescue slow segments, just like IDM — but smarter |
+| **Rust-Powered Engine** | Shared Rust + Tokio engine, independent of UI and FFI, used by desktop, mobile, server and standalone CLI hosts |
+| **Smart Segmentation** | Segments split dynamically at runtime; idle workers take over slow segments |
 | **Multi-Protocol** | Dedicated engines for HTTP/HTTPS, FTP, BitTorrent (DHT/UPnP/magnet), eD2K (server + Kad DHT source finding, MD4 verification), HLS (AES-decrypt) and DASH |
-| **Speed Control** | Token-bucket global rate limiting — download in the background without killing your browsing |
-| **Resume Anywhere** | Every byte tracked in SQLite with WAL; power loss never costs you progress |
-| **Browser Integration** | Three-layer download interception, streaming media sniffing, Alt+Click bypass, right-click send |
-| **MCP Server** | Built-in Model Context Protocol endpoint (Streamable HTTP) with 12 tools — AI agents can add, monitor and control downloads |
-| **Beautiful Interface** | shadcn-style widgets, IDM-style segment visualization, named queues, system tray |
-| **Clean & Private** | Zero ads, zero telemetry lock-in, zero accounts — your data never leaves your machine |
+| **Queues & Speed Control** | Named queues, scheduling and token-bucket global rate limiting |
+| **Persistence & Resume** | SQLite with WAL by default; server deployments can use PostgreSQL; recover downloads from persisted state |
+| **Browser Integration** | Download interception, streaming media sniffing, Alt+Click bypass, right-click send and connection diagnostics |
+| **Desktop & Web UI** | GPUI desktop and React Web management, light/dark themes, custom themes, task details and segment visualization; desktop tray keeps the service available after the UI closes |
+| **RSS & Automation** | Feed filters, unattended downloads, JavaScript plugins, managed FFmpeg/yt-dlp components and task-event webhooks |
+| **Remote Devices** | Optional FluxCloud account, settings sync and remote task management, plus LAN device pairing and direct connections |
+| **APIs & CLI** | REST/OpenAPI, aria2-compatible JSON-RPC, MCP with 12 tools, and a CLI for scripts or standalone downloads |
+
+**Privacy:** local downloads do not require a FluxCloud account. Cloud features are optional. Anonymous installation and daily-active statistics are controlled by `analytics_enabled` and can be disabled; they do not collect download/task information. This is not a zero-telemetry application.
 
 ## FluxDown vs. IDM
 
@@ -69,7 +73,7 @@
 | HLS / DASH streaming | Yes | Partial |
 | Dynamic segmentation | Yes | Yes |
 | Browser extension | Chrome / Edge / Firefox | Yes |
-| Ads & tracking | **None** | — |
+| Ads | **None** | — |
 
 ## Installation
 
@@ -91,11 +95,56 @@ Install the extension so FluxDown takes over browser downloads automatically:
 [<img src="https://img.shields.io/badge/Edge-Add--ons-0078D4?style=for-the-badge&logo=microsoftedge&logoColor=white" alt="Edge Add-ons" />](https://microsoftedge.microsoft.com/addons/detail/fluxdown/nglkkjbogjghekbhhcnccnpfedjbdhhd)
 [<img src="https://img.shields.io/badge/Firefox-Add--ons-FF7139?style=for-the-badge&logo=firefoxbrowser&logoColor=white" alt="Firefox Add-ons" />](https://addons.mozilla.org/firefox/addon/fluxdown)
 
+The extension connects to the desktop agent through Native Messaging. A [Tampermonkey userscript](userscript/) is also available.
+
+### NAS / Server
+
+The current headless service is **`fluxdown-agent --server` + `fluxdownd`**, with an embedded Web UI. The Docker image retains the name `ghcr.io/zerx-lab/fluxdown-server`.
+
+From a checkout, use the supplied [Compose configuration](docker/docker-compose.yml):
+
+```shell
+docker compose -f docker/docker-compose.yml up -d
+```
+
+Open `http://<server>:17800/` and set an access key in the first-run wizard. The key must contain 8–128 visible ASCII characters, including both a letter and a digit. Set it up on a trusted network before exposing the service; use an HTTPS reverse proxy for remote access.
+
+- Server mode listens on `0.0.0.0:17800` by default; override it with `FLUXDOWN_BIND`.
+- For unattended setup, supply `FLUXDOWN_TOKEN` through your deployment environment or secret manager, not a committed file. It initializes the key only if one has not already been set.
+- Persist `/data` for the database, logs and access key, and `/root/Downloads` for downloads. The supplied Compose file uses a named data volume and `docker/downloads/` on the host.
+- Prefer SSD/cache storage for `/data` if download disks need to sleep.
+- Native deployments must keep `fluxdown-agent` and `fluxdownd` in the same directory. The old `native/server` crate is frozen and is not the deployment entry point.
+
+## CLI & HTTP APIs
+
+The `fluxdown` CLI connects to the running desktop or server HTTP API by default. On desktop, enable the management API in Settings → API Service first. Supply the access key via `FLUXDOWN_TOKEN`; use `FLUXDOWN_URL` or `--url` to select a remote server.
+
+```shell
+fluxdown ping
+fluxdown add "https://example.com/file.zip"
+fluxdown --json list
+
+# Standalone mode: embed the engine instead of connecting to a service
+fluxdown add --local "https://example.com/file.zip"
+```
+
+Standalone mode cannot share a data directory with a running engine: stop the service using that directory first.
+
+| Interface | Endpoint | Purpose |
+|---|---|---|
+| REST management API | `/api/v1/*` | Tasks, queues, RSS and other management operations |
+| OpenAPI | `/api/v1/openapi.json` | Machine-readable API schema |
+| aria2-compatible JSON-RPC | `/jsonrpc` (HTTP / WebSocket) | Integration with aria2-compatible clients |
+| MCP | `/mcp` | AI-agent tools |
+| Official UI protocol | `/rpc` (WebSocket) | GPUI/Web gateway; distinct from the aria2 API |
+
+Desktop defaults to `127.0.0.1:17800`, with management API and MCP disabled until enabled. Server mode enables both by default and requires an access key. See the [OpenAPI specification](website-v2/public/openapi.json) for the REST contract.
+
 ## MCP Server (Model Context Protocol)
 
-FluxDown ships a built-in **MCP server** so AI agents (Claude Desktop, Cursor, Cline, …) can manage downloads via the [Model Context Protocol](https://modelcontextprotocol.io). It speaks **Streamable HTTP** (JSON-RPC 2.0 over a single `POST /mcp`) on the local API port — no extra process needed.
+FluxDown ships a built-in **MCP server** so AI agents (Claude Desktop, Cursor, Cline, …) can manage downloads via the [Model Context Protocol](https://modelcontextprotocol.io). It implements a stateless **Streamable HTTP** subset (JSON-RPC 2.0 over `POST /mcp`) on the same API port — no separate MCP process needed.
 
-- **Endpoint**: `http://127.0.0.1:17800/mcp` (local-only by default)
+- **Endpoint**: `http://127.0.0.1:17800/mcp` for the default desktop configuration; use your server address for headless deployments
 - **Auth**: Bearer token (`Authorization: Bearer <token>` or `X-FluxDown-Token`), shared with the management API
 - **Enable**: Settings → API Service → toggle *MCP endpoint* (a token is generated automatically); the headless server enables it by default
 
@@ -131,64 +180,111 @@ The MCP layer is implemented in [`native/api/src/mcp.rs`](native/api/src/mcp.rs)
 
 ## Architecture
 
-Flutter renders the UI; a zero-FFI Rust engine does the heavy lifting. The two talk through [Rinf](https://rinf.cunarist.org) signals, and the browser extension connects via Native Messaging.
+**One Rust download engine, multiple hosts and clients.** Desktop releases use GPUI, not Flutter. The desktop chain is `fluxdown-desktop → fluxdown-agent → fluxdownd`; headless deployments reuse the agent and daemon with a React Web UI. Flutter remains the mobile client, connected to its `hub` host through [Rinf](https://rinf.cunarist.org).
 
 ```mermaid
 flowchart TD
+    UI["GPUI desktop"] -->|"WebSocket /rpc"| AGENT["fluxdown-agent — UI gateway and desktop shell"]
+    WEB["React Web UI"] -->|"WebSocket /rpc"| AGENT
     EXT["Browser Extension (WXT)"] -->|Native Messaging| NMH["fluxdown_nmh"]
-    NMH -->|Named Pipe / Unix socket| HUB
-    UI["Flutter UI (shadcn_ui)"] <-->|Rinf signals| HUB["hub — FFI adapter"]
+    NMH --> AGENT
+    CLI["fluxdown CLI"] -->|"HTTP API"| AGENT
+    AGENT -->|"Authenticated JSON-RPC"| DAEMON["fluxdownd — download core"]
+    DAEMON --> ENGINE["fluxdown_engine"]
+    MOBILE["Flutter mobile"] -->|"Rinf signals"| HUB["hub — mobile host"]
     HUB --> ENGINE["fluxdown_engine"]
-    ENGINE --> HTTP["HTTP/HTTPS"]
-    ENGINE --> FTP["FTP"]
-    ENGINE --> BT["BitTorrent"]
-    ENGINE --> ED2K["eD2K"]
-    ENGINE --> HLS["HLS / DASH"]
-    ENGINE --> DB[("SQLite")]
+    LOCAL["fluxdown add --local"] --> ENGINE
+    ENGINE --> PROTOCOLS["HTTP/HTTPS, FTP, BitTorrent, eD2K, HLS, DASH"]
+    ENGINE --> DB[("SQLite / PostgreSQL")]
 ```
+
+- **Daemon owns downloads:** engine, download database, queues, RSS, plugins and webhooks.
+- **Agent owns integration:** UI gateway, FluxCloud account/sync, device collaboration, browser capture and desktop tray/lifecycle.
+- **Shared contracts:** `native/protocol` defines transport-independent DTOs, methods and events; `native/api` exposes REST, aria2 and MCP through `ApiHost`, without depending on the engine.
+- **Engine independence:** `EventSink` and `HostSelection` connect the engine to hosts. Only one engine may write to a data directory at a time; the diagram shows alternative hosts, not concurrent writers.
 
 | Layer | Tech | Path |
 |---|---|---|
-| UI | Flutter + shadcn_ui | [`lib/`](lib) |
-| FFI bridge | Rinf (Dart ↔ Rust signals) | [`native/hub/`](native/hub) |
-| Download engine | Rust + Tokio (zero FFI deps) | [`native/engine/`](native/engine) |
-| Browser extension | WXT + TypeScript | [`fluxDown/`](fluxDown) |
-| Website | Astro + React | [`website/`](website) |
+| Desktop UI | Rust + GPUI; app composition and capability crates | [`crates/`](crates), [`crates/app/`](crates/app) |
+| Agent / daemon | UI gateway and headless host / download core | [`native/agent/`](native/agent), [`native/daemon/`](native/daemon) |
+| Shared protocol / HTTP API | JSON-RPC DTOs / REST, aria2, MCP adapters | [`native/protocol/`](native/protocol), [`native/api/`](native/api) |
+| Download engine | Rust + Tokio, no UI or FFI dependencies | [`native/engine/`](native/engine) |
+| Mobile UI / host | Flutter + shadcn_ui / Rinf | [`lib/`](lib), [`native/hub/`](native/hub) |
+| Web management UI | React + TypeScript + Vite | [`web/`](web) |
+| CLI | HTTP client or embedded engine | [`native/cli/`](native/cli) |
+| Browser integration | WXT + TypeScript, Native Messaging, userscript | [`fluxDown/`](fluxDown), [`native/nmh/`](native/nmh), [`userscript/`](userscript) |
+| Website | Astro + React; `website/` is the legacy archive | [`website-v2/`](website-v2) |
 
 ## Building from Source
 
-**Prerequisites**: [Flutter SDK](https://docs.flutter.dev/get-started/install) · [Rust toolchain](https://www.rust-lang.org/tools/install) · [Rinf CLI](https://rinf.cunarist.org)
+Start with the [Rust toolchain](https://www.rust-lang.org/tools/install) and your platform's native build tools (MSVC on Windows, Xcode command-line tools on macOS). Linux desktop builds also need graphics, audio and tray development libraries; the maintained Ubuntu package list is in [CI](.github/workflows/ci.yml). [Bun](https://bun.sh) is needed for the Web UI; Flutter and Rinf are needed **only for mobile**, not GPUI desktop.
 
 ```shell
 # Clone the development branch (main = active development, stable = stable releases)
 git clone -b main https://github.com/zerx-lab/FluxDown.git
 cd FluxDown
+```
 
-# Check your environment
-rustc --version
-flutter doctor
+### Desktop (GPUI)
 
-# Install the Rinf CLI (once)
+```shell
+# Build desktop UI, agent, daemon and browser relay, then launch
+cargo desktop-dev
+
+# Build only (also stages a signed development .app on macOS)
+cargo desktop-dev --build-only
+```
+
+The launcher reuses an existing desktop/service instance rather than forcibly restarting it. Quit the UI and stop its services before testing changes to running code.
+
+### Headless server & Web UI
+
+```shell
+# Build the Web UI BEFORE building the agent
+cd web
+bun install --frozen-lockfile
+bun run build
+cd ..
+
+cargo build -p fluxdown_daemon
+cargo run -p fluxdown_agent --features web-ui -- --server
+```
+
+The `web-ui` feature embeds `web/dist` into the agent binary at compile time. After changing the frontend, rebuild the Web UI and then the agent. `FLUXDOWN_WEBROOT` optionally serves a directory from disk instead.
+
+For frontend development, run `cd web && bun run dev` in a second terminal while the server is running: Vite listens on port 5173 and proxies backend requests to port 17800.
+
+### CLI
+
+```shell
+cargo build -p fluxdown_cli
+cargo run -p fluxdown_cli -- ping
+```
+
+### Mobile (Flutter)
+
+Install the [Flutter SDK](https://docs.flutter.dev/get-started/install) and the Android SDK (or Xcode for iOS development).
+
+```shell
 cargo install rinf_cli
-
-# Fetch dependencies & generate Dart bindings
 flutter pub get
 rinf gen
-
-# Run in debug mode
-flutter run
-
-# Build a release
-flutter build apk --release       # or: ios
+flutter run -d "<mobile-device-id>"
+flutter build apk --release
 ```
+
+Android APKs are published by CI. iOS source is present, but there is no current iOS release job. Flutter desktop runners are no longer part of the desktop build.
 
 <details>
 <summary><b>Running tests</b></summary>
 
 ```shell
-flutter test                          # Dart tests
-cargo test -p fluxdown_engine        # Rust engine tests
-cargo test -p hub                    # FFI adapter tests
+cargo test -p fluxdown_engine        # Engine tests
+cargo test -p fluxdown_api           # HTTP / aria2 / MCP contracts
+cargo test -p fluxdown_agent         # Gateway / server
+cargo test -p fluxdown_cli           # CLI
+cd web && bun test && cd ..          # Web UI
+flutter test                        # Mobile Dart tests
 ```
 
 </details>
@@ -201,8 +297,9 @@ cargo test -p hub                    # FFI adapter tests
 Pull requests are welcome! Branch off `main` and target `main` — it is the development branch, while `stable` only tracks stable releases (maintainers advance it from `main`). Before submitting, please make sure:
 
 ```shell
-cargo fmt --check && cargo clippy -- -D warnings   # Rust
-flutter analyze                                     # Dart
+cargo fmt --check
+cargo clippy --workspace --exclude fluxdown_server --all-targets -- -D warnings
+flutter analyze                     # When changing mobile Dart code
 ```
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the full workflow.

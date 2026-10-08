@@ -1,0 +1,10 @@
+# Rust 核心构建产物（scripts/build-core.sh 生成）
+FluxKit/Artifacts/
+FluxKit/Sources/FluxRustBindings/
+
+# Xcode / SwiftPM
+xcuserdata/
+DerivedData/
+.build/
+.swiftpm/
+*.xcresult

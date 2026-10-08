@@ -16,7 +16,10 @@ use crate::{
         TogglePauseSelected,
     },
     components::{
-        task_table::{DownloadTableDelegate, SelectionSummary, TableFilter, ToolbarCommand},
+        task_table::{
+            DownloadTableDelegate, SelectionSummary, TableFilter, ToolbarCommand,
+            spawn_midnight_refresh,
+        },
         title_bar::{DownloadTitleBar, left_edge_probe},
     },
     controller::{DownloadsCommand, DownloadsController, DownloadsPort},
@@ -93,6 +96,8 @@ pub struct DownloadHostActions {
     pub open_queue_manager: Option<PlainOpener>,
     /// 侧栏「设备」区标题上的「添加设备」入口；`None` 时不显示按钮。
     pub open_add_device: Option<PlainOpener>,
+    /// 任务表「待确认」角标点击：打开 / 置前聚合的「文件已存在」窗口。
+    pub open_file_conflicts: Option<PlainOpener>,
     /// `Some(id)` 编辑现有分类，`None` 新建。
     pub open_category_editor: Option<CategoryEditorOpener>,
     /// 完成后关机的只读状态投影（`None` = Resident 未装配）。
@@ -175,6 +180,7 @@ impl DownloadView {
             .row_selectable(false)
             .col_selectable(false)
         });
+        spawn_midnight_refresh(&table_state, cx);
         let weak_self = cx.weak_entity();
         table_state.update(cx, |table, _| {
             table.delegate_mut().set_host(weak_self);
@@ -368,6 +374,13 @@ impl DownloadView {
         })
     }
 
+    /// 角标点击入口：交给宿主打开 / 置前「文件已存在」窗口。
+    pub(crate) fn open_file_conflicts(&self, window: &mut Window, cx: &mut App) {
+        if let Some(open) = self.host.open_file_conflicts.as_ref() {
+            open(window, cx);
+        }
+    }
+
     /// 只有恰好一个任务被交互式开始时通知宿主（批量不逐个弹窗）。
     pub(crate) fn notify_user_started(&self, task_ids: &[String], cx: &mut App) {
         if let ([task_id], Some(hook)) = (task_ids, self.host.on_user_started.as_ref()) {
@@ -506,8 +519,9 @@ impl DownloadView {
             }
         };
         self.prefs_loaded = true;
-        self.table_state.update(cx, |table, _| {
+        self.table_state.update(cx, |table, cx| {
             table.delegate_mut().set_prefs(prefs);
+            cx.notify();
         });
     }
 
@@ -572,6 +586,8 @@ impl DownloadView {
             if delegate.take_columns_dirty() {
                 table.refresh(cx);
             }
+            // 行从共享的 `TaskStore` 读取：表格必须显式 notify，retained 渲染才会重画行。
+            cx.notify();
         });
         cx.notify();
     }
@@ -642,6 +658,7 @@ impl DownloadView {
             table.delegate_mut().set_strings(strings);
             table.delegate_mut().refresh_view();
             table.refresh(cx);
+            cx.notify();
         });
         cx.notify();
     }
@@ -918,6 +935,7 @@ impl DownloadView {
             mutate(table.delegate_mut().prefs_mut());
             table.delegate_mut().refresh_view();
             table.refresh(cx);
+            cx.notify();
         });
         self.schedule_persist_prefs(cx);
         cx.notify();
@@ -949,6 +967,8 @@ impl DownloadView {
                     table.delegate_mut().set_query(&query);
                     if table.delegate_mut().refresh_view() {
                         table.refresh(cx);
+                        // 空闲时没有别的重绘来源：不 notify 则 retained 表格停在旧结果。
+                        cx.notify();
                     }
                 });
             }) else {
@@ -976,6 +996,7 @@ impl DownloadView {
             table.delegate_mut().set_query("");
             if table.delegate_mut().refresh_view() {
                 table.refresh(cx);
+                cx.notify();
             }
         });
         self.focus_handle.focus(window, cx);
@@ -1827,7 +1848,7 @@ impl DownloadView {
             .child(
                 h_flex()
                     // 面板头：`density.toolbarButton` 的图标按钮上下各留 spacing.xxs。
-                    .h(toolbar_button + tokens.spacing.xs)
+                    .min_h(toolbar_button + tokens.spacing.xs)
                     .flex_none()
                     .items_center()
                     .justify_between()
@@ -1838,6 +1859,7 @@ impl DownloadView {
                     .child(
                         div()
                             .text_size(tokens.typography.sm.size)
+                            .line_height(tokens.typography.sm.line_height)
                             .font_weight(FontWeight::MEDIUM)
                             .child(title),
                     )

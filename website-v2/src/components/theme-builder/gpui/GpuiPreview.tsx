@@ -1,12 +1,15 @@
 /**
- * GPUI 桌面客户端模拟：复刻 `crates/shell`（标题栏 + 活动栏）与 `crates/downloads`
- * （侧栏『状态』文件夹内嵌分类子项、无网格线任务表、浮动选择条、状态栏、新建下载对话框）。
+ * GPUI 桌面客户端模拟：复刻 `crates/shell`（统一顶栏 + 活动栏）与 `crates/downloads`
+ * （顶栏插槽、侧栏『状态』文件夹内嵌分类子项、无网格线任务表、表头选择条、页内状态栏、新建下载对话框）。
+ * 布局与尺寸以源码常量为准：活动栏 48、侧栏默认 200、表头 28、选择列 36、列宽见 `task_table.rs`。
  *
  * 所有颜色 / 尺寸 / 圆角 / 字体 / 阴影都只读根节点上的 CSS 变量（由 resolve 结果生成，
- * 见 `model.ts`），元素挂 `data-token-paths` 供右键检视。
+ * 见 `model.ts`），元素挂 `data-token-paths` 供右键检视。macOS 交通灯是系统绘制，不属于主题。
  */
-import { useState, type CSSProperties, type ReactNode } from "react";
+import { useEffect, useState, type CSSProperties, type ReactNode } from "react";
 import {
+  AppWindow,
+  ArrowDown,
   ArrowDownToLine,
   ArrowUp,
   Check,
@@ -16,22 +19,33 @@ import {
   CircleArrowDown,
   CircleCheck,
   CirclePause,
-  Clock,
+  Cpu,
+  Disc3,
+  Download,
+  ExternalLink,
   File,
   FileArchive,
-  FileAudio,
   FileImage,
+  FileMusic,
+  FilePlay,
   FileText,
-  FileVideo,
+  Film,
   Folder,
+  FolderOpen,
+  Globe,
   HardDrive,
+  Image,
   Layers,
   Minus,
   Moon,
+  Music,
+  Archive,
+  PanelLeft,
   Pause,
   Play,
   Plus,
-  Puzzle,
+  Power,
+  Rows3,
   Rss,
   Search,
   Settings,
@@ -39,6 +53,7 @@ import {
   Square,
   Sun,
   Trash2,
+  Webhook,
   X,
 } from "lucide-react";
 import type { ResolvedTokens } from "@/lib/gpui-theme/resolve";
@@ -52,47 +67,71 @@ import { withBase } from "@/lib/base";
 type PreviewMessages = ThemeBuilderMessages["gpuiMock"];
 
 type Status = "downloading" | "paused" | "failed" | "queued" | "completed";
-type Category = "video" | "audio" | "document" | "image" | "archive" | "other";
+type Category = "video" | "audio" | "document" | "image" | "program" | "archive" | "other";
+type Kind = "video" | "audio" | "document" | "image" | "archive" | "disk" | "app" | "other";
 type StatusFolder = "all" | "downloading" | "completed" | "failed" | "paused";
+type Section = "status" | "queues" | "devices";
+type Icon = typeof File;
 
 interface DemoTask {
   id: string;
   name: string;
   category: Category;
+  kind: Kind;
+  site: string;
   size: string;
+  downloaded: string;
   progress: number;
-  speed: string;
+  speed?: string;
+  etaMinutes?: number;
+  transfers?: number;
+  queuePosition?: number;
   status: Status;
   created: string;
 }
 
 const TASKS: DemoTask[] = [
-  { id: "1", name: "ubuntu-24.04.1-desktop-amd64.iso", category: "archive", size: "5.7 GB", progress: 0.62, speed: "11.4 MB/s", status: "downloading", created: "2026-09-27 10:42" },
-  { id: "2", name: "Big.Buck.Bunny.2160p.mkv", category: "video", size: "2.1 GB", progress: 0.35, speed: "1.4 MB/s", status: "downloading", created: "2026-09-27 10:31" },
-  { id: "3", name: "annual-report-2025.pdf", category: "document", size: "18.4 MB", progress: 0.48, speed: "", status: "paused", created: "2026-09-26 21:07" },
-  { id: "4", name: "lofi-mix-vol3.flac", category: "audio", size: "412 MB", progress: 0.12, speed: "", status: "failed", created: "2026-09-26 18:55" },
-  { id: "5", name: "wallpaper-pack-4k.zip", category: "image", size: "1.3 GB", progress: 0, speed: "", status: "queued", created: "2026-09-26 18:40" },
-  { id: "6", name: "node-v22.9.0-x64.msi", category: "other", size: "28.9 MB", progress: 1, speed: "", status: "completed", created: "2026-09-25 09:12" },
+  { id: "1", name: "ubuntu-24.04.1-desktop-amd64.iso", category: "program", kind: "disk", site: "releases.ubuntu.com", size: "5.7 GB", downloaded: "3.5 GB", progress: 0.62, speed: "11.4 MB/s", etaMinutes: 3, transfers: 16, status: "downloading", created: "2026-09-27 10:42:18" },
+  { id: "2", name: "Big.Buck.Bunny.2160p.mkv", category: "video", kind: "video", site: "download.blender.org", size: "2.1 GB", downloaded: "752.6 MB", progress: 0.35, speed: "1.4 MB/s", etaMinutes: 16, transfers: 8, status: "downloading", created: "2026-09-27 10:31:05" },
+  { id: "3", name: "annual-report-2025.pdf", category: "document", kind: "document", site: "example.com", size: "18.4 MB", downloaded: "8.8 MB", progress: 0.48, status: "paused", created: "2026-09-26 21:07:44" },
+  { id: "4", name: "lofi-mix-vol3.flac", category: "audio", kind: "audio", site: "archive.org", size: "412.0 MB", downloaded: "49.4 MB", progress: 0.12, status: "failed", created: "2026-09-26 18:55:12" },
+  { id: "5", name: "wallpaper-pack-4k.zip", category: "archive", kind: "archive", site: "unsplash.com", size: "1.3 GB", downloaded: "0 B", progress: 0, queuePosition: 1, status: "queued", created: "2026-09-26 18:40:37" },
+  { id: "6", name: "node-v22.9.0-x64.msi", category: "program", kind: "app", site: "nodejs.org", size: "28.9 MB", downloaded: "28.9 MB", progress: 1, status: "completed", created: "2026-09-25 09:12:09" },
+  { id: "7", name: "sunset-coast.png", category: "image", kind: "image", site: "images.example.com", size: "6.2 MB", downloaded: "6.2 MB", progress: 1, status: "completed", created: "2026-09-24 16:20:51" },
 ];
 
-const CATEGORY_ICON: Record<Category, typeof File> = {
-  video: FileVideo,
-  audio: FileAudio,
+/** 侧栏分类图标（`components/src/icons.rs::category_icon`）。 */
+const CATEGORY_ICON: Record<Category, Icon> = {
+  video: Film,
+  audio: Music,
   document: FileText,
-  image: FileImage,
-  archive: FileArchive,
+  image: Image,
+  program: Cpu,
+  archive: Archive,
   other: File,
 };
 
-const CATEGORIES: Category[] = ["video", "audio", "document", "image", "archive", "other"];
+const CATEGORIES: Category[] = ["video", "audio", "document", "image", "program", "archive", "other"];
+
+/** 任务表文件类型回退图标（task_table.rs `kind_icon`）。 */
+const KIND_ICON: Record<Kind, Icon> = {
+  video: FilePlay,
+  audio: FileMusic,
+  document: FileText,
+  image: FileImage,
+  archive: FileArchive,
+  disk: Disc3,
+  app: AppWindow,
+  other: File,
+};
 
 /** 状态文字色（task_table.rs `status_color`）。 */
 const STATUS_TEXT: Record<Status, string> = {
   downloading: "colors.statusDownloading",
-  paused: "colors.mutedForeground",
+  paused: "colors.statusPaused",
   failed: "colors.statusFailed",
-  queued: "colors.textTertiary",
-  completed: "colors.textTertiary",
+  queued: "colors.statusQueued",
+  completed: "colors.statusCompleted",
 };
 
 /** 进度条填充色（task_table.rs `progress_bar_color`）；暂停为 statusPaused 的 40%。 */
@@ -112,7 +151,7 @@ const FOLDER_MATCH: Record<StatusFolder, (task: DemoTask) => boolean> = {
   paused: (task) => task.status === "paused",
 };
 
-const FOLDER_ICON: Record<StatusFolder, typeof Layers> = {
+const FOLDER_ICON: Record<StatusFolder, Icon> = {
   all: Layers,
   downloading: CircleArrowDown,
   completed: CircleCheck,
@@ -121,6 +160,19 @@ const FOLDER_ICON: Record<StatusFolder, typeof Layers> = {
 };
 
 const FOLDERS: StatusFolder[] = ["all", "downloading", "completed", "failed", "paused"];
+
+/** shell 活动栏宽（`ACTIVITY_RAIL_WIDTH`）与下载页侧栏默认宽（`ViewPrefs::sidebar_width`）。 */
+const ACTIVITY_RAIL_WIDTH = 48;
+const SIDEBAR_WIDTH = 200;
+/** macOS `TitleBar` 为交通灯预留的左内边距（gpui-component `TITLE_BAR_LEFT_PADDING`）。 */
+const MAC_TRAFFIC_LIGHT_WIDTH = 80;
+/** Windows / Linux 窗口按钮边长（gpui-component `TITLE_BAR_HEIGHT`）。 */
+const WINDOW_CONTROL_WIDTH = 34;
+/** 任务表：表头高、选择列、右侧留白（task_table.rs 常量）。 */
+const TABLE_HEADER_HEIGHT = 28;
+const SELECTION_COLUMN_WIDTH = 36;
+const TABLE_TRAILING_GUTTER = 8;
+const PROGRESS_LABEL_WIDTH = 32;
 
 /** 文字角色（`typography.<role>.{size,lineHeight,weight}`）。 */
 function text(role: string): CSSProperties {
@@ -132,6 +184,16 @@ function text(role: string): CSSProperties {
 }
 
 const hairline = `${v("stroke.thin")} solid ${v("colors.hairline")}`;
+const iconSm = { width: v("icon.sm"), height: v("icon.sm") };
+const iconMd = { width: v("icon.md"), height: v("icon.md") };
+const iconLg = { width: v("icon.lg"), height: v("icon.lg") };
+
+/** task_table.rs `percent_label`：向下取整，0~1% 之间显示 `<1%`。 */
+function percentLabel(progress: number): string {
+  const percent = Math.min(Math.max(progress, 0), 1) * 100;
+  if (percent > 0 && percent < 1) return "<1%";
+  return `${Math.floor(percent)}%`;
+}
 
 function CheckMark({ checked }: { checked: boolean }) {
   return (
@@ -142,12 +204,12 @@ function CheckMark({ checked }: { checked: boolean }) {
         height: v("density.checkMark"),
         borderRadius: v("components.checkbox.radius"),
         backgroundColor: checked ? v("colors.primary") : "transparent",
-        border: checked ? "none" : `${v("stroke.thin")} solid ${v("colors.border")}`,
+        border: checked ? "none" : `${v("stroke.thin")} solid color-mix(in srgb, ${v("colors.mutedForeground")} 55%, transparent)`,
         color: v("colors.primaryForeground"),
       }}
-      {...tokenAttrs("density.checkMark", "components.checkbox.radius", "colors.primary", "colors.primaryForeground", "colors.border")}
+      {...tokenAttrs("density.checkMark", "components.checkbox.radius", "colors.primary", "colors.primaryForeground", "colors.mutedForeground")}
     >
-      {checked && <Check style={{ width: v("icon.sm"), height: v("icon.sm") }} strokeWidth={3} />}
+      {checked && <Check style={iconSm} strokeWidth={3} />}
     </span>
   );
 }
@@ -156,7 +218,7 @@ function ProgressBar({ task }: { task: DemoTask }) {
   const fill = PROGRESS_FILL[task.status];
   return (
     <div
-      className="w-full overflow-hidden"
+      className="min-w-0 flex-1 overflow-hidden"
       style={{ height: v("components.progress.height"), borderRadius: v("components.progress.radius"), backgroundColor: v("colors.progressTrack") }}
       {...tokenAttrs("components.progress.height", "components.progress.radius", "colors.progressTrack", fill.path)}
     >
@@ -165,6 +227,7 @@ function ProgressBar({ task }: { task: DemoTask }) {
   );
 }
 
+/** `Button::control`（components/src/kit.rs）：高 = density.control，左右 sm + xxs，图标与文字间距 8。 */
 function Button({
   variant,
   children,
@@ -176,33 +239,78 @@ function Button({
   onClick?: () => void;
   paths?: string[];
 }) {
-  const colors: Record<typeof variant, { style: CSSProperties; paths: string[] }> = {
+  const colors: Record<typeof variant, { style: CSSProperties; className: string; paths: string[] }> = {
     primary: {
       style: { backgroundColor: v("colors.primary"), color: v("colors.primaryForeground") },
+      className: "hover:brightness-110",
       paths: ["colors.primary", "colors.primaryForeground"],
     },
     secondary: {
       style: { backgroundColor: v("colors.secondary"), color: v("colors.secondaryForeground"), border: `${v("stroke.thin")} solid ${v("colors.border")}` },
+      className: "hover:brightness-110",
       paths: ["colors.secondary", "colors.secondaryForeground", "colors.border"],
     },
-    ghost: { style: { color: v("colors.foreground") }, paths: ["colors.foreground", "colors.navHover"] },
+    ghost: {
+      style: { color: v("colors.foreground") },
+      className: "hover:bg-[var(--gt-colors-secondary)]",
+      paths: ["colors.foreground", "colors.secondary"],
+    },
   };
   return (
     <button
       type="button"
       onClick={onClick}
-      className="inline-flex shrink-0 items-center hover:brightness-110"
+      className={cn("inline-flex shrink-0 items-center whitespace-nowrap", colors[variant].className)}
       style={{
-        height: v("density.toolbarButton"),
-        paddingInline: v("spacing.md"),
-        gap: v("spacing.xs"),
+        height: v("density.control"),
+        paddingInline: `calc(${v("spacing.sm")} + ${v("spacing.xxs")})`,
+        gap: v("spacing.sm"),
         borderRadius: v("components.button.radius"),
         ...text("sm"),
         ...colors[variant].style,
       }}
-      {...tokenAttrs("components.button.radius", "density.toolbarButton", "spacing.md", ...colors[variant].paths, ...paths)}
+      {...tokenAttrs("components.button.radius", "density.control", "spacing.sm", "spacing.xxs", ...colors[variant].paths, ...paths)}
     >
       {children}
+    </button>
+  );
+}
+
+/** `toolbar_action_button`（components/src/lib.rs）：正方形图标按钮，muted 图标，悬停 navHover。 */
+function ToolbarIconButton({
+  icon: IconComponent,
+  label,
+  size = v("density.toolbarButton"),
+  iconStyle = iconMd,
+  destructive = false,
+  onClick,
+}: {
+  icon: Icon;
+  label: string;
+  size?: string;
+  iconStyle?: CSSProperties;
+  destructive?: boolean;
+  onClick?: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      title={label}
+      aria-label={label}
+      className={cn(
+        "grid shrink-0 place-items-center hover:bg-[var(--gt-colors-navHover)]",
+        !destructive && "hover:text-[var(--gt-colors-foreground)]",
+      )}
+      style={{
+        width: size,
+        height: size,
+        borderRadius: v("components.button.radius"),
+        color: destructive ? v("colors.destructive") : v("colors.mutedForeground"),
+      }}
+      {...tokenAttrs("density.toolbarButton", "components.button.radius", "colors.navHover", destructive ? "colors.destructive" : "colors.mutedForeground")}
+    >
+      <IconComponent style={iconStyle} />
     </button>
   );
 }
@@ -263,6 +371,119 @@ function Input({ value, focused, children }: { value: string; focused?: boolean;
   );
 }
 
+/** 侧栏行（components/src/lib.rs `sidebar_navigation_button` + downloads `nav_trailing`）。 */
+function NavRow({
+  icon,
+  label,
+  count,
+  dot,
+  selected,
+  indent = false,
+  onClick,
+}: {
+  icon: ReactNode;
+  label: string;
+  count: number;
+  dot?: string;
+  selected: boolean;
+  indent?: boolean;
+  onClick?: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={cn(
+        "group/nav flex w-full items-center text-left",
+        !selected && "hover:bg-[var(--gt-colors-navHover)] hover:text-[var(--gt-colors-foreground)]",
+      )}
+      style={{
+        height: v("density.navRow"),
+        borderRadius: v("components.navItem.radius"),
+        backgroundColor: selected ? v("colors.navSelected") : undefined,
+        color: selected ? v("colors.navSelectedForeground") : v("colors.mutedForeground"),
+        paddingLeft: indent ? `calc(${v("spacing.sm")} + ${v("spacing.lg")})` : v("spacing.sm"),
+        paddingRight: v("spacing.sm"),
+        gap: v("spacing.xs"),
+        ...text("sm"),
+        fontWeight: selected ? 500 : v("typography.sm.weight"),
+      }}
+      {...tokenAttrs(
+        "density.navRow",
+        "components.navItem.radius",
+        "colors.navSelected",
+        "colors.navHover",
+        "colors.navSelectedForeground",
+        "colors.mutedForeground",
+        ...(indent ? ["spacing.lg"] : []),
+      )}
+    >
+      <span className="flex min-w-0 flex-1 items-center" style={{ gap: v("spacing.sm") }}>
+        {icon}
+        <span className="min-w-0 flex-1 truncate">{label}</span>
+      </span>
+      {dot && <span className="h-1.5 w-1.5 shrink-0 rounded-full" style={{ backgroundColor: v(dot) }} {...tokenAttrs(dot)} />}
+      {count > 0 && (
+        <span
+          className="shrink-0 tabular-nums"
+          style={{ ...text("caption"), color: selected ? v("colors.mutedForeground") : v("colors.textTertiary") }}
+          {...tokenAttrs("typography.caption.size", "colors.textTertiary")}
+        >
+          {count}
+        </span>
+      )}
+    </button>
+  );
+}
+
+/** 侧栏分区标题：悬停时才显出尾部按钮与展开箭头（sidebar.rs `section_header`）。 */
+function SectionHeader({
+  label,
+  open,
+  onToggle,
+  trailing,
+  first = false,
+}: {
+  label: string;
+  open: boolean;
+  onToggle: () => void;
+  trailing?: { icon: Icon; label: string };
+  first?: boolean;
+}) {
+  const Trailing = trailing?.icon;
+  return (
+    <div style={{ paddingTop: first ? undefined : v("spacing.md") }}>
+      <button
+        type="button"
+        onClick={onToggle}
+        className="group/section flex w-full items-center text-left hover:text-[var(--gt-colors-mutedForeground)]"
+        style={{
+          height: v("density.sectionHeader"),
+          borderRadius: v("radius.md"),
+          paddingInline: v("spacing.sm"),
+          gap: v("spacing.xs"),
+          color: v("colors.textTertiary"),
+          ...text("caption"),
+          fontWeight: 500,
+        }}
+        {...tokenAttrs("density.sectionHeader", "radius.md", "colors.textTertiary", "colors.mutedForeground", "typography.caption.size")}
+      >
+        <span className="min-w-0 flex-1 truncate">{label}</span>
+        {Trailing && (
+          <span
+            title={trailing.label}
+            className="invisible grid place-items-center group-hover/section:visible hover:bg-[var(--gt-colors-navHover)]"
+            style={{ width: `calc(${v("icon.sm")} + 2 * ${v("spacing.xs")})`, height: `calc(${v("icon.sm")} + 2 * ${v("spacing.xs")})`, borderRadius: v("radius.sm"), color: v("colors.mutedForeground") }}
+          >
+            <Trailing style={iconSm} />
+          </span>
+        )}
+        <ChevronRight className="invisible shrink-0 transition-transform group-hover/section:visible" style={{ ...iconSm, transform: open ? "rotate(90deg)" : undefined }} />
+      </button>
+    </div>
+  );
+}
+
 function NewDownloadDialog({ t, onClose }: { t: PreviewMessages; onClose: () => void }) {
   const [tab, setTab] = useState<"basic" | "advanced">("basic");
   const [remember, setRemember] = useState(true);
@@ -293,7 +514,7 @@ function NewDownloadDialog({ t, onClose }: { t: PreviewMessages; onClose: () => 
             {t.dialogTitle}
           </span>
           <button type="button" onClick={onClose} aria-label={t.cancel} style={{ color: v("colors.mutedForeground") }}>
-            <X style={{ width: v("icon.md"), height: v("icon.md") }} />
+            <X style={iconMd} />
           </button>
         </div>
 
@@ -332,7 +553,7 @@ function NewDownloadDialog({ t, onClose }: { t: PreviewMessages; onClose: () => 
           <div className="flex" style={{ gap: v("spacing.xs") }}>
             <Input value="~/Downloads" />
             <Button variant="secondary">
-              <Folder style={{ width: v("icon.md"), height: v("icon.md") }} />
+              <Folder style={iconMd} />
               {t.browse}
             </Button>
           </div>
@@ -362,13 +583,50 @@ function NewDownloadDialog({ t, onClose }: { t: PreviewMessages; onClose: () => 
             {t.cancel}
           </Button>
           <Button variant="primary" onClick={onClose}>
-            <ArrowDownToLine style={{ width: v("icon.md"), height: v("icon.md") }} />
+            <ArrowDownToLine style={iconMd} />
             {t.startDownload}
           </Button>
         </div>
       </div>
     </div>
   );
+}
+
+/** 访客是否在 macOS：决定顶栏走交通灯还是 logo + 应用菜单 + 窗口按钮（shell `render_title_bar`）。 */
+function useIsMac(): boolean {
+  const [isMac, setIsMac] = useState(false);
+  useEffect(() => {
+    const nav = navigator as Navigator & { userAgentData?: { platform?: string } };
+    setIsMac(/mac/i.test(nav.userAgentData?.platform ?? nav.userAgent));
+  }, []);
+  return isMac;
+}
+
+/** 状态栏按钮（status_bar.rs `status_button`）：ghost XSmall，高 = density.statusControl。 */
+function StatusButton({ children, iconOnly = false }: { children: ReactNode; iconOnly?: boolean }) {
+  return (
+    <span
+      className={cn("inline-flex shrink-0 items-center whitespace-nowrap hover:bg-[var(--gt-colors-navHover)]", iconOnly && "justify-center")}
+      style={{
+        height: v("density.statusControl"),
+        minWidth: iconOnly ? v("density.statusControl") : undefined,
+        paddingInline: v("spacing.xs"),
+        gap: v("spacing.xxs"),
+        borderRadius: v("components.button.radius"),
+      }}
+      {...tokenAttrs("density.statusControl", "spacing.xs", "components.button.radius", "colors.navHover")}
+    >
+      {children}
+    </span>
+  );
+}
+
+interface Column {
+  key: "size" | "progress" | "status" | "created";
+  label: string;
+  width: number;
+  numeric: boolean;
+  className?: string;
 }
 
 export function GpuiPreview({
@@ -382,17 +640,20 @@ export function GpuiPreview({
   t: PreviewMessages;
   onToggleMode: () => void;
 }) {
+  const isMac = useIsMac();
+  const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [sections, setSections] = useState<Record<Section, boolean>>({ status: true, queues: true, devices: true });
   const [folder, setFolder] = useState<StatusFolder>("all");
   const [category, setCategory] = useState<Category | null>(null);
   const [expanded, setExpanded] = useState<StatusFolder>("all");
-  const [selected, setSelected] = useState<Set<string>>(() => new Set(["2", "3"]));
+  const [selected, setSelected] = useState<Set<string>>(() => new Set());
   const [dialog, setDialog] = useState(false);
 
   const visible = TASKS.filter((task) => FOLDER_MATCH[folder](task) && (category === null || task.category === category));
-  const failedCount = TASKS.filter((task) => task.status === "failed").length;
+  const selectedTasks = TASKS.filter((task) => selected.has(task.id));
   const ModeIcon = mode === "dark" ? Sun : Moon;
-  const iconMd = { width: v("icon.md"), height: v("icon.md") };
-  const iconSm = { width: v("icon.sm"), height: v("icon.sm") };
+  const activityIcon = { width: `calc(${v("icon.lg")} + 2px)`, height: `calc(${v("icon.lg")} + 2px)` };
+  const contentLeft = ACTIVITY_RAIL_WIDTH + (sidebarOpen ? SIDEBAR_WIDTH : 0);
 
   const toggleSelected = (id: string) =>
     setSelected((current) => {
@@ -401,10 +662,36 @@ export function GpuiPreview({
       else next.add(id);
       return next;
     });
+  const toggleSection = (section: Section) => setSections((current) => ({ ...current, [section]: !current[section] }));
+
+  const columns: Column[] = [
+    { key: "size", label: t.colSize, width: 84, numeric: true, className: "hidden @min-[578px]:flex" },
+    { key: "progress", label: t.colProgress, width: 150, numeric: false },
+    { key: "status", label: t.colStatus, width: 140, numeric: false },
+    { key: "created", label: t.colCreated, width: 150, numeric: true, className: "hidden @min-[728px]:flex" },
+  ];
+
+  const statusLine = (task: DemoTask): { main: string; detail?: string } => {
+    switch (task.status) {
+      case "downloading":
+        return {
+          main: [task.speed, task.etaMinutes === undefined ? undefined : t.etaMinutes(task.etaMinutes)].filter(Boolean).join(" · ") || t.status.downloading,
+          detail: `${task.downloaded} / ${task.size}${task.transfers ? ` · ${t.activeTransfers(task.transfers)}` : ""}`,
+        };
+      case "paused":
+        return { main: t.status.paused, detail: `${task.downloaded} / ${task.size}` };
+      case "failed":
+        return { main: t.status.failed, detail: t.errorTimeout };
+      case "queued":
+        return { main: t.status.queued, detail: task.queuePosition ? t.queuePosition(task.queuePosition) : undefined };
+      case "completed":
+        return { main: t.status.completed };
+    }
+  };
 
   return (
     <div
-      className="@container relative flex h-full min-h-0 flex-col overflow-hidden"
+      className="relative flex h-full min-h-0 flex-col overflow-hidden"
       style={{
         ...cssVariables(tokens),
         backgroundColor: v("colors.background"),
@@ -417,80 +704,118 @@ export function GpuiPreview({
       }}
       {...tokenAttrs("colors.background", "colors.foreground", "typography.sans", "colors.border", "radius.lg", "shadow.lg")}
     >
-      {/* 标题栏：crates/shell view.rs + downloads title_bar.rs */}
+      {/* 统一顶栏：crates/shell view.rs `render_title_bar` + downloads title_bar.rs 插槽 */}
       <div
-        className="flex shrink-0 items-center"
-        style={{ height: v("density.titleBar"), backgroundColor: v("colors.chrome"), borderBottom: hairline, paddingLeft: v("spacing.md"), gap: v("spacing.md") }}
+        className="flex shrink-0 items-stretch"
+        style={{ height: v("density.titleBar"), backgroundColor: v("colors.chrome"), borderBottom: hairline }}
         {...tokenAttrs("density.titleBar", "colors.chrome", "colors.hairline", "stroke.thin")}
       >
-        <div className="flex shrink-0 items-center" style={{ gap: v("spacing.sm") }}>
-          <img src={withBase("/logo.svg")} alt="" className="h-4 w-4" />
-          <span style={{ ...text("sm"), fontWeight: v("typography.title.weight") }}>FluxDown</span>
-        </div>
-        <div className="flex min-w-0 flex-1 justify-center">
+        <div className="flex min-w-0 flex-1 items-center" style={{ gap: v("spacing.sm"), paddingRight: isMac ? v("spacing.md") : v("spacing.sm") }}>
+          {/* 前导区（交通灯 / logo + 菜单 + 侧栏开关）至少铺到内容区左缘，主按钮由 gap 留一档白 */}
           <div
-            className="flex w-full max-w-[280px] min-w-[120px] items-center"
-            style={{
-              height: v("density.control"),
-              borderRadius: v("radius.md"),
-              backgroundColor: v("colors.navHover"),
-              color: v("colors.mutedForeground"),
-              paddingInline: v("spacing.sm"),
-              gap: v("spacing.xs"),
-              ...text("sm"),
-            }}
-            {...tokenAttrs("density.control", "radius.md", "colors.navHover", "colors.mutedForeground")}
+            className="flex shrink-0 items-center self-stretch"
+            style={{ minWidth: contentLeft, gap: v("spacing.sm"), paddingLeft: isMac ? undefined : v("spacing.sm") }}
           >
-            <Search style={iconMd} />
-            <span className="min-w-0 flex-1 truncate">{t.searchPlaceholder}</span>
-            <span
-              className="hidden @2xl:inline"
-              style={{ ...text("caption"), fontFamily: v("typography.mono"), color: v("colors.textTertiary"), borderRadius: v("radius.sm"), border: hairline, paddingInline: v("spacing.xxs") }}
-              {...tokenAttrs("typography.mono", "colors.textTertiary", "radius.sm")}
-            >
-              Ctrl K
-            </span>
+            {isMac ? (
+              <span className="flex shrink-0 items-center gap-2 pl-3" style={{ width: MAC_TRAFFIC_LIGHT_WIDTH, marginRight: `calc(-1 * ${v("spacing.sm")})` }} aria-hidden>
+                {["#ff5f57", "#febc2e", "#28c840"].map((color) => (
+                  <span key={color} className="h-3 w-3 rounded-full" style={{ backgroundColor: color, boxShadow: "inset 0 0 0 0.5px rgba(0, 0, 0, 0.12)" }} />
+                ))}
+              </span>
+            ) : (
+              <>
+                <img src={withBase("/logo.svg")} alt="" className="h-4 w-4 shrink-0" />
+                <span className="flex shrink-0 items-center">
+                  {[t.menus.file, t.menus.tasks, t.menus.view, t.menus.tools, t.menus.help].map((label) => (
+                    <span
+                      key={label}
+                      className="inline-flex items-center whitespace-nowrap hover:bg-[var(--gt-colors-secondary)]"
+                      style={{ height: `calc(${v("density.control")} - 4px)`, paddingInline: v("spacing.sm"), borderRadius: v("components.button.radius"), ...text("sm") }}
+                      {...tokenAttrs("components.button.radius", "colors.secondary")}
+                    >
+                      {label}
+                    </span>
+                  ))}
+                </span>
+              </>
+            )}
+            <ToolbarIconButton icon={PanelLeft} label={sidebarOpen ? t.collapseSidebar : t.expandSidebar} onClick={() => setSidebarOpen((open) => !open)} />
           </div>
-        </div>
-        <div className="flex shrink-0 items-center" style={{ gap: v("spacing.xs") }}>
-          <Button variant="ghost">
-            <SlidersHorizontal style={iconMd} />
-            <span className="hidden @3xl:inline">{t.view}</span>
-          </Button>
           <Button variant="primary" onClick={() => setDialog(true)}>
-            <Plus style={iconMd} />
+            <Plus style={iconLg} />
             {t.newDownload}
           </Button>
-        </div>
-        <div className="flex shrink-0 items-center self-stretch" style={{ color: v("colors.mutedForeground") }} {...tokenAttrs("colors.mutedForeground")}>
-          {[Minus, Square, X].map((Icon, index) => (
-            <span key={index} className="grid h-full w-10 place-items-center" aria-hidden>
-              <Icon style={index === 1 ? iconSm : iconMd} />
+          <div className="min-w-0 flex-1" />
+          <div
+            className="flex min-w-[160px] shrink items-center hover:bg-[var(--gt-colors-navSelected)]"
+            style={{
+              width: 280,
+              height: v("density.control"),
+              paddingLeft: v("spacing.sm"),
+              paddingRight: v("spacing.xs"),
+              gap: v("spacing.xs"),
+              borderRadius: v("radius.md"),
+              border: `${v("stroke.thin")} solid transparent`,
+              backgroundColor: v("colors.navHover"),
+              ...text("sm"),
+            }}
+            {...tokenAttrs("density.control", "radius.md", "colors.navHover", "colors.navSelected", "colors.mutedForeground")}
+          >
+            <Search className="shrink-0" style={{ ...iconMd, color: v("colors.mutedForeground") }} />
+            <span className="min-w-0 flex-1 truncate" style={{ color: v("colors.mutedForeground") }}>
+              {t.searchPlaceholder}
             </span>
-          ))}
+            <span
+              className="shrink-0"
+              style={{
+                ...text("caption"),
+                color: v("colors.textTertiary"),
+                backgroundColor: v("colors.surface"),
+                borderRadius: v("radius.sm"),
+                border: hairline,
+                paddingInline: v("spacing.xs"),
+              }}
+              {...tokenAttrs("radius.sm", "colors.surface", "colors.hairline", "colors.textTertiary", "typography.caption.size")}
+            >
+              {isMac ? "⌘F" : "Ctrl+F"}
+            </span>
+          </div>
+          <Button variant="ghost">
+            <SlidersHorizontal style={iconLg} />
+            {t.view}
+          </Button>
         </div>
+        {!isMac && (
+          <div className="flex shrink-0 items-stretch" style={{ color: v("colors.mutedForeground") }} {...tokenAttrs("colors.mutedForeground")}>
+            {[Minus, Square, X].map((IconComponent, index) => (
+              <span key={index} className="grid place-items-center" style={{ width: WINDOW_CONTROL_WIDTH }} aria-hidden>
+                <IconComponent style={index === 1 ? iconSm : iconMd} />
+              </span>
+            ))}
+          </div>
+        )}
       </div>
 
       <div className="flex min-h-0 flex-1">
-        {/* 活动栏：48px，chrome 底 */}
+        {/* 活动栏：48px，chrome 底，32px 按钮 */}
         <div
-          className="flex w-12 shrink-0 flex-col items-center justify-between"
-          style={{ backgroundColor: v("colors.chrome"), borderRight: hairline, paddingBlock: v("spacing.sm") }}
+          className="flex shrink-0 flex-col items-center justify-between"
+          style={{ width: ACTIVITY_RAIL_WIDTH, backgroundColor: v("colors.chrome"), borderRight: hairline, paddingBlock: v("spacing.sm") }}
           {...tokenAttrs("colors.chrome", "colors.hairline")}
         >
           <div className="flex flex-col" style={{ gap: v("spacing.xs") }}>
-            {[ArrowDownToLine, Rss, Puzzle].map((Icon, index) => (
+            {[Download, Rss, Webhook].map((IconComponent, index) => (
               <span
                 key={index}
-                className="grid h-8 w-8 place-items-center hover:bg-[var(--gt-colors-navHover)]"
+                className={cn("grid h-8 w-8 place-items-center", index !== 0 && "hover:bg-[var(--gt-colors-navHover)] hover:text-[var(--gt-colors-foreground)]")}
                 style={{
                   borderRadius: v("components.navItem.radius"),
                   backgroundColor: index === 0 ? v("colors.navSelected") : undefined,
                   color: index === 0 ? v("colors.navSelectedIcon") : v("colors.mutedForeground"),
                 }}
-                {...tokenAttrs("components.navItem.radius", "colors.navSelected", "colors.navHover", "colors.navSelectedIcon", "colors.mutedForeground")}
+                {...tokenAttrs("components.navItem.radius", "colors.navSelected", "colors.navHover", "colors.navSelectedIcon", "colors.mutedForeground", "icon.lg")}
               >
-                <Icon style={{ width: v("icon.lg"), height: v("icon.lg") }} />
+                <IconComponent style={activityIcon} />
               </span>
             ))}
           </div>
@@ -504,306 +829,329 @@ export function GpuiPreview({
               style={{ borderRadius: v("components.navItem.radius"), color: v("colors.mutedForeground") }}
               {...tokenAttrs("components.navItem.radius", "colors.navHover", "colors.mutedForeground")}
             >
-              <ModeIcon style={{ width: v("icon.lg"), height: v("icon.lg") }} />
+              <ModeIcon style={activityIcon} />
             </button>
-            <span className="grid h-8 w-8 place-items-center" style={{ color: v("colors.mutedForeground") }}>
-              <Settings style={{ width: v("icon.lg"), height: v("icon.lg") }} />
+            <span
+              className="grid h-8 w-8 place-items-center hover:bg-[var(--gt-colors-navHover)]"
+              style={{ borderRadius: v("components.navItem.radius"), color: v("colors.mutedForeground") }}
+            >
+              <Settings style={activityIcon} />
             </span>
           </div>
         </div>
 
-        {/* 侧栏：『状态』文件夹，各状态项内嵌分类子项；无独立『分类』分区 */}
-        <div
-          className="flex w-[200px] shrink-0 flex-col overflow-y-auto [scrollbar-width:none]"
-          style={{ backgroundColor: v("colors.chrome"), borderRight: hairline, padding: v("spacing.sm") }}
-          {...tokenAttrs("colors.chrome", "colors.hairline", "spacing.sm")}
-        >
-          <div
-            className="flex items-center justify-between"
-            style={{ height: v("density.sectionHeader"), color: v("colors.textTertiary"), paddingInline: v("spacing.sm"), ...text("caption") }}
-            {...tokenAttrs("density.sectionHeader", "colors.textTertiary", "typography.caption.size")}
-          >
-            <span>{t.sectionStatus}</span>
-            <ChevronDown style={iconSm} />
-          </div>
-          {FOLDERS.map((key) => {
-            const Icon = FOLDER_ICON[key];
-            const count = TASKS.filter(FOLDER_MATCH[key]).length;
-            const active = folder === key && category === null;
-            const open = expanded === key;
-            const iconColor =
-              key === "failed" && failedCount > 0
-                ? v("colors.destructive")
-                : (key === "downloading" && count > 0) || active
-                  ? v("colors.navSelectedIcon")
-                  : v("colors.mutedForeground");
-            return (
-              <div key={key}>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setFolder(key);
-                    setCategory(null);
-                    setExpanded(key);
-                  }}
-                  className={cn("flex w-full items-center text-left", !active && "hover:bg-[var(--gt-colors-navHover)]")}
-                  style={{
-                    height: v("density.navRow"),
-                    borderRadius: v("components.navItem.radius"),
-                    backgroundColor: active ? v("colors.navSelected") : undefined,
-                    color: active ? v("colors.navSelectedForeground") : v("colors.mutedForeground"),
-                    paddingInline: v("spacing.sm"),
-                    gap: v("spacing.sm"),
-                    ...text("sm"),
-                  }}
-                  {...tokenAttrs("density.navRow", "components.navItem.radius", "colors.navSelected", "colors.navHover", "colors.navSelectedForeground", "colors.navSelectedIcon", "colors.mutedForeground")}
-                >
-                  <ChevronRight
-                    className="shrink-0 transition-transform"
-                    style={{ ...iconSm, color: v("colors.textTertiary"), transform: open ? "rotate(90deg)" : undefined }}
-                  />
-                  <Icon className="shrink-0" style={{ ...iconMd, color: iconColor }} />
-                  <span className="min-w-0 flex-1 truncate">{t.folders[key]}</span>
-                  {key === "downloading" && (
-                    <span className="h-1.5 w-1.5 shrink-0 rounded-full" style={{ backgroundColor: v("colors.statusDownloading") }} {...tokenAttrs("colors.statusDownloading")} />
-                  )}
-                  <span className="tabular-nums" style={{ ...text("caption"), fontFamily: v("typography.mono"), color: v("colors.textTertiary") }}>
-                    {count}
-                  </span>
-                </button>
-                {open &&
-                  CATEGORIES.map((cat) => {
-                    const CatIcon = CATEGORY_ICON[cat];
-                    const catCount = TASKS.filter((task) => FOLDER_MATCH[key](task) && task.category === cat).length;
-                    const catActive = folder === key && category === cat;
+        {/* 下载页：[侧栏 | 内容] + 页内状态栏（状态栏不跨活动栏） */}
+        <div className="flex min-w-0 flex-1 flex-col">
+          <div className="flex min-h-0 flex-1">
+            {sidebarOpen && (
+              <div
+                className="flex shrink-0 flex-col overflow-y-auto [scrollbar-width:none]"
+                style={{ width: SIDEBAR_WIDTH, backgroundColor: v("colors.chrome"), borderRight: hairline, paddingInline: v("spacing.sm"), paddingTop: v("spacing.sm") }}
+                {...tokenAttrs("colors.chrome", "colors.hairline", "spacing.sm")}
+              >
+                <SectionHeader label={t.sectionStatus} open={sections.status} onToggle={() => toggleSection("status")} first />
+                {sections.status &&
+                  FOLDERS.map((key) => {
+                    const FolderIcon = FOLDER_ICON[key];
+                    const count = TASKS.filter(FOLDER_MATCH[key]).length;
+                    const active = folder === key && category === null;
+                    const open = expanded === key;
+                    const iconColor =
+                      key === "failed" && count > 0
+                        ? v("colors.destructive")
+                        : (key === "downloading" && count > 0) || active
+                          ? v("colors.navSelectedIcon")
+                          : v("colors.mutedForeground");
                     return (
-                      <button
-                        key={cat}
-                        type="button"
-                        onClick={() => {
-                          setFolder(key);
-                          setCategory(cat);
-                        }}
-                        className={cn("flex w-full items-center text-left", !catActive && "hover:bg-[var(--gt-colors-navHover)]")}
-                        style={{
-                          height: v("density.navRow"),
-                          borderRadius: v("components.navItem.radius"),
-                          backgroundColor: catActive ? v("colors.navSelected") : undefined,
-                          paddingLeft: `calc(${v("spacing.sm")} + ${v("spacing.lg")})`,
-                          paddingRight: v("spacing.sm"),
-                          gap: v("spacing.sm"),
-                          color: catActive ? v("colors.navSelectedForeground") : v("colors.mutedForeground"),
-                          ...text("sm"),
-                        }}
-                        {...tokenAttrs("density.navRow", "spacing.lg", "components.navItem.radius", "colors.navSelected", "colors.navSelectedForeground", "colors.navSelectedIcon", "colors.mutedForeground")}
-                      >
-                        <CatIcon className="shrink-0" style={{ ...iconMd, color: catActive ? v("colors.navSelectedIcon") : undefined }} />
-                        <span className="min-w-0 flex-1 truncate">{t.categories[cat]}</span>
-                        <span className="tabular-nums" style={{ ...text("caption"), fontFamily: v("typography.mono"), color: v("colors.textTertiary") }}>
-                          {catCount}
-                        </span>
-                      </button>
+                      <div key={key}>
+                        <NavRow
+                          selected={active}
+                          count={count}
+                          label={t.folders[key]}
+                          onClick={() => {
+                            setFolder(key);
+                            setCategory(null);
+                            setExpanded(key);
+                          }}
+                          icon={
+                            <span className="grid shrink-0 place-items-center" style={iconLg} {...tokenAttrs("colors.navSelectedIcon", "colors.destructive")}>
+                              <FolderIcon className="group-hover/nav:hidden" style={{ ...iconLg, color: iconColor }} />
+                              <ChevronRight
+                                className="hidden transition-transform group-hover/nav:block"
+                                style={{ ...iconMd, transform: open ? "rotate(90deg)" : undefined }}
+                              />
+                            </span>
+                          }
+                        />
+                        {open &&
+                          CATEGORIES.map((cat) => {
+                            const CatIcon = CATEGORY_ICON[cat];
+                            const catActive = folder === key && category === cat;
+                            return (
+                              <NavRow
+                                key={cat}
+                                indent
+                                selected={catActive}
+                                count={TASKS.filter((task) => FOLDER_MATCH[key](task) && task.category === cat).length}
+                                label={t.categories[cat]}
+                                onClick={() => {
+                                  setFolder(key);
+                                  setCategory(cat);
+                                }}
+                                icon={<CatIcon className="shrink-0" style={{ ...iconMd, color: catActive ? v("colors.navSelectedIcon") : v("colors.mutedForeground") }} />}
+                              />
+                            );
+                          })}
+                      </div>
                     );
                   })}
+
+                <SectionHeader
+                  label={t.sectionQueues}
+                  open={sections.queues}
+                  onToggle={() => toggleSection("queues")}
+                  trailing={{ icon: Settings, label: t.manageQueues }}
+                />
+                {sections.queues &&
+                  [
+                    { name: t.queueMain, count: 6, running: true },
+                    { name: t.queueLater, count: 1, running: false },
+                  ].map((queue) => (
+                    <NavRow
+                      key={queue.name}
+                      selected={false}
+                      count={queue.count}
+                      dot={queue.running ? "colors.success" : undefined}
+                      label={queue.name}
+                      icon={<Rows3 className="shrink-0" style={{ ...iconLg, color: v("colors.mutedForeground") }} />}
+                    />
+                  ))}
+
+                <SectionHeader
+                  label={t.sectionDevices}
+                  open={sections.devices}
+                  onToggle={() => toggleSection("devices")}
+                  trailing={{ icon: Plus, label: t.addDevice }}
+                />
+                {sections.devices &&
+                  [
+                    { name: t.allDevices, Icon: Layers, count: 9, dot: undefined },
+                    { name: t.thisDevice, Icon: Cpu, count: TASKS.length, dot: undefined },
+                    { name: "FluxDown NAS", Icon: Globe, count: 2, dot: "colors.success" },
+                  ].map((device) => (
+                    <NavRow
+                      key={device.name}
+                      selected={false}
+                      count={device.count}
+                      dot={device.dot}
+                      label={device.name}
+                      icon={<device.Icon className="shrink-0" style={{ ...iconLg, color: v("colors.mutedForeground") }} />}
+                    />
+                  ))}
+                <div className="shrink-0" style={{ height: v("spacing.sm") }} />
               </div>
-            );
-          })}
-
-          <div
-            className="flex items-center justify-between"
-            style={{ height: v("density.sectionHeader"), color: v("colors.textTertiary"), paddingInline: v("spacing.sm"), marginTop: v("spacing.md"), ...text("caption") }}
-            {...tokenAttrs("density.sectionHeader", "colors.textTertiary", "spacing.md")}
-          >
-            <span>{t.sectionQueues}</span>
-            <ChevronDown style={iconSm} />
-          </div>
-          {[t.queueDefault, t.queueNight].map((name, index) => (
-            <div
-              key={name}
-              className="flex items-center hover:bg-[var(--gt-colors-navHover)]"
-              style={{ height: v("density.navRow"), borderRadius: v("components.navItem.radius"), paddingInline: v("spacing.sm"), gap: v("spacing.sm"), color: v("colors.mutedForeground"), ...text("sm") }}
-              {...tokenAttrs("density.navRow", "components.navItem.radius", "colors.navHover")}
-            >
-              <Clock className="shrink-0" style={iconMd} />
-              <span className="min-w-0 flex-1 truncate">{name}</span>
-              <span className="tabular-nums" style={{ ...text("caption"), fontFamily: v("typography.mono"), color: v("colors.textTertiary") }}>
-                {index === 0 ? 5 : 1}
-              </span>
-            </div>
-          ))}
-        </div>
-
-        {/* 内容区：无网格线任务表 + 浮动选择条 */}
-        <div className="relative flex min-w-0 flex-1 flex-col" style={{ backgroundColor: v("colors.background") }} {...tokenAttrs("colors.background")}>
-          <div
-            className="flex shrink-0 items-center"
-            style={{ height: 28, color: v("colors.textTertiary"), paddingInline: v("spacing.xs"), ...text("caption") }}
-            {...tokenAttrs("colors.textTertiary", "typography.caption.size", "colors.hairline")}
-          >
-            <span className="w-9 shrink-0" />
-            {[
-              { label: t.colName, className: "min-w-0 flex-[2.4]" },
-              { label: t.colSize, className: "w-[76px] shrink-0 hidden @xl:flex" },
-              { label: t.colProgress, className: "min-w-[90px] flex-[1.4]" },
-              { label: t.colStatus, className: "w-[108px] shrink-0" },
-              { label: t.colCreated, className: "w-[124px] shrink-0 hidden @3xl:flex" },
-            ].map((column) => (
-              <span key={column.label} className={cn("flex items-center", column.className)} style={{ gap: v("spacing.sm"), paddingInline: v("spacing.sm") }}>
-                <span className="truncate">{column.label}</span>
-                <span className="ml-auto h-3.5 shrink-0" style={{ width: v("stroke.thin"), backgroundColor: v("colors.hairline") }} />
-              </span>
-            ))}
-          </div>
-
-          <div className="min-h-0 flex-1 overflow-y-auto [scrollbar-width:thin]" style={{ paddingInline: v("spacing.xs") }}>
-            {visible.length === 0 && (
-              <p className="py-10 text-center" style={{ color: v("colors.textTertiary") }}>
-                {t.noTasks}
-              </p>
             )}
-            {visible.map((task) => {
-              const isSelected = selected.has(task.id);
-              const Icon = CATEGORY_ICON[task.category];
-              return (
-                <div
-                  key={task.id}
-                  onClick={() => toggleSelected(task.id)}
-                  className="group/row relative flex cursor-default items-center"
-                  style={{ height: v("density.taskRow") }}
-                  {...tokenAttrs("density.taskRow", "components.taskRow.radius", "colors.rowHover", "colors.accent")}
-                >
-                  <span
-                    className={cn("absolute inset-y-0 left-1 right-1", !isSelected && "group-hover/row:bg-[var(--gt-colors-rowHover)]")}
-                    style={{ borderRadius: v("components.taskRow.radius"), backgroundColor: isSelected ? v("colors.accent") : undefined }}
-                  />
-                  <span className="relative grid w-9 shrink-0 place-items-center" style={{ color: v("colors.mutedForeground") }}>
-                    {isSelected ? (
-                      <CheckMark checked />
-                    ) : (
-                      <>
-                        <Icon className="group-hover/row:hidden" style={{ width: v("icon.lg"), height: v("icon.lg") }} />
-                        <span className="hidden group-hover/row:block">
-                          <CheckMark checked={false} />
+
+            {/* 内容区：surface 底、无网格线任务表；选中时选择条盖住表头 */}
+            <div className="@container relative flex min-w-0 flex-1 flex-col" style={{ backgroundColor: v("colors.surface") }} {...tokenAttrs("colors.surface")}>
+              <div
+                className="flex shrink-0 items-center"
+                style={{
+                  height: TABLE_HEADER_HEIGHT,
+                  borderBottom: hairline,
+                  color: v("colors.textTertiary"),
+                  ...text("xs"),
+                  fontWeight: 500,
+                }}
+                {...tokenAttrs("colors.textTertiary", "typography.xs.size", "colors.hairline")}
+              >
+                <span className="shrink-0" style={{ width: SELECTION_COLUMN_WIDTH }} />
+                <span className="flex h-full min-w-[160px] flex-1 items-center px-2">
+                  <span className="min-w-0 flex-1 truncate">{t.colName}</span>
+                  <span className="shrink-0" style={{ width: v("stroke.thin"), height: 14, backgroundColor: v("colors.hairline") }} />
+                </span>
+                {columns.map((column) => (
+                  <span key={column.key} className={cn("flex h-full shrink-0 items-center", column.className)} style={{ width: column.width }}>
+                    <span className={cn("min-w-0 flex-1 truncate px-2", column.numeric && "text-right")}>{column.label}</span>
+                    <span className="shrink-0" style={{ width: v("stroke.thin"), height: 14, backgroundColor: v("colors.hairline") }} />
+                  </span>
+                ))}
+                <span className="shrink-0" style={{ width: TABLE_TRAILING_GUTTER }} />
+              </div>
+
+              <div className="min-h-0 flex-1 overflow-y-auto [scrollbar-width:thin]">
+                {visible.length === 0 && (
+                  <p className="py-10 text-center" style={{ color: v("colors.textTertiary") }}>
+                    {t.noTasks}
+                  </p>
+                )}
+                {visible.map((task) => {
+                  const isSelected = selected.has(task.id);
+                  const KindIcon = KIND_ICON[task.kind];
+                  const status = statusLine(task);
+                  return (
+                    <div
+                      key={task.id}
+                      onClick={() => toggleSelected(task.id)}
+                      className="group/row relative flex cursor-default items-center"
+                      style={{ height: v("density.taskRow") }}
+                      {...tokenAttrs("density.taskRow", "components.taskRow.radius", "colors.rowHover", "colors.accent")}
+                    >
+                      <span
+                        className={cn("absolute inset-y-0 left-1 right-1", !isSelected && "group-hover/row:bg-[var(--gt-colors-rowHover)]")}
+                        style={{ borderRadius: v("components.taskRow.radius"), backgroundColor: isSelected ? v("colors.accent") : undefined }}
+                      />
+                      <span className="relative grid h-full shrink-0 place-items-center" style={{ width: SELECTION_COLUMN_WIDTH, color: v("colors.mutedForeground") }}>
+                        {isSelected || selected.size > 0 ? (
+                          <CheckMark checked={isSelected} />
+                        ) : (
+                          <>
+                            <KindIcon className="group-hover/row:hidden" style={iconLg} />
+                            <span className="hidden group-hover/row:block">
+                              <CheckMark checked={false} />
+                            </span>
+                          </>
+                        )}
+                      </span>
+                      <span className="relative flex min-w-[160px] flex-1 flex-col justify-center px-2">
+                        <span className="truncate" style={{ ...text("sm"), color: v("colors.foreground") }} {...tokenAttrs("typography.sm.size", "colors.foreground")}>
+                          {task.name}
                         </span>
-                      </>
-                    )}
+                        <span className="truncate" style={{ ...text("xs"), color: v("colors.textTertiary") }} {...tokenAttrs("typography.xs.size", "colors.textTertiary")}>
+                          {`${t.categories[task.category]} · ${task.site}`}
+                        </span>
+                      </span>
+                      {columns.map((column) => {
+                        const cellClass = cn("relative h-full shrink-0 px-2", column.className ?? "flex");
+                        if (column.key === "size" || column.key === "created") {
+                          return (
+                            <span
+                              key={column.key}
+                              className={cn(cellClass, "items-center justify-end tabular-nums")}
+                              style={{ width: column.width, color: v("colors.mutedForeground"), ...text("xs") }}
+                              {...tokenAttrs("typography.xs.size", "colors.mutedForeground")}
+                            >
+                              <span className="truncate">{column.key === "size" ? task.size : task.created}</span>
+                            </span>
+                          );
+                        }
+                        if (column.key === "progress") {
+                          return (
+                            <span key={column.key} className={cn(cellClass, "items-center")} style={{ width: column.width, gap: 8 }}>
+                              {task.status !== "completed" && (
+                                <>
+                                  <ProgressBar task={task} />
+                                  <span
+                                    className="shrink-0 text-right tabular-nums"
+                                    style={{ width: PROGRESS_LABEL_WIDTH, color: v("colors.mutedForeground"), ...text("xs") }}
+                                    {...tokenAttrs("typography.xs.size", "colors.mutedForeground")}
+                                  >
+                                    {percentLabel(task.progress)}
+                                  </span>
+                                </>
+                              )}
+                            </span>
+                          );
+                        }
+                        return (
+                          <span key={column.key} className={cn(cellClass, "flex-col justify-center tabular-nums")} style={{ width: column.width, ...text("xs") }}>
+                            <span className="truncate" style={{ color: v(STATUS_TEXT[task.status]) }} {...tokenAttrs(STATUS_TEXT[task.status])}>
+                              {status.main}
+                            </span>
+                            {status.detail && (
+                              <span className="truncate" style={{ color: v("colors.textTertiary") }} {...tokenAttrs("colors.textTertiary")}>
+                                {status.detail}
+                              </span>
+                            )}
+                          </span>
+                        );
+                      })}
+                      <span className="shrink-0" style={{ width: TABLE_TRAILING_GUTTER }} />
+                    </div>
+                  );
+                })}
+              </div>
+
+              {selected.size > 0 && (
+                <div
+                  className="absolute right-0 top-0 z-10 flex items-center"
+                  style={{
+                    left: SELECTION_COLUMN_WIDTH,
+                    height: TABLE_HEADER_HEIGHT - 1,
+                    backgroundColor: v("colors.surface"),
+                    paddingLeft: v("spacing.sm"),
+                    gap: v("spacing.xxs"),
+                  }}
+                  {...tokenAttrs("colors.surface", "spacing.sm", "spacing.xxs")}
+                >
+                  <span className="whitespace-nowrap tabular-nums" style={{ ...text("xs"), color: v("colors.foreground") }}>
+                    {t.selected(selected.size)}
                   </span>
-                  <span className="relative flex min-w-0 flex-[2.4] flex-col justify-center" style={{ paddingInline: v("spacing.sm") }}>
-                    <span className="truncate" style={text("sm")} {...tokenAttrs("typography.sm.size", "colors.foreground")}>
-                      {task.name}
-                    </span>
-                    <span className="truncate" style={{ ...text("caption"), color: v("colors.textTertiary") }} {...tokenAttrs("typography.caption.size", "colors.textTertiary")}>
-                      {task.speed ? `${task.speed} · ${Math.round(task.progress * 100)}%` : `${Math.round(task.progress * 100)}%`}
-                    </span>
-                  </span>
-                  <span className="relative hidden w-[76px] shrink-0 tabular-nums @xl:block" style={{ paddingInline: v("spacing.sm"), color: v("colors.mutedForeground"), ...text("sm") }}>
-                    {task.size}
-                  </span>
-                  <span className="relative flex min-w-[90px] flex-[1.4] items-center" style={{ paddingInline: v("spacing.sm") }}>
-                    <ProgressBar task={task} />
-                  </span>
-                  <span
-                    className="relative flex w-[108px] shrink-0 items-center truncate"
-                    style={{ paddingInline: v("spacing.sm"), gap: v("spacing.xs"), color: v(STATUS_TEXT[task.status]), ...text("sm") }}
-                    {...tokenAttrs(STATUS_TEXT[task.status])}
-                  >
-                    {task.status === "downloading" ? <Play style={iconSm} /> : task.status === "paused" ? <Pause style={iconSm} /> : null}
-                    {t.status[task.status]}
-                  </span>
-                  <span
-                    className="relative hidden w-[124px] shrink-0 tabular-nums @3xl:block"
-                    style={{ paddingInline: v("spacing.sm"), color: v("colors.textTertiary"), fontFamily: v("typography.mono"), ...text("caption") }}
-                    {...tokenAttrs("typography.mono", "colors.textTertiary")}
-                  >
-                    {task.created}
-                  </span>
+                  <span className="mx-1 shrink-0" style={{ width: v("stroke.thin"), height: 16, backgroundColor: v("colors.hairline") }} />
+                  {selectedTasks.some((task) => task.status === "paused" || task.status === "failed") && <ToolbarIconButton icon={Play} label={t.resume} />}
+                  {selectedTasks.some((task) => task.status === "downloading" || task.status === "queued") && <ToolbarIconButton icon={Pause} label={t.pause} />}
+                  <ToolbarIconButton icon={ExternalLink} label={t.openFile} />
+                  <ToolbarIconButton icon={FolderOpen} label={t.openFolder} />
+                  <ToolbarIconButton icon={Trash2} label={t.deleteTask} destructive />
+                  <span className="mx-1 shrink-0" style={{ width: v("stroke.thin"), height: 16, backgroundColor: v("colors.hairline") }} />
+                  <ToolbarIconButton icon={X} label={t.clearSelection} onClick={() => setSelected(new Set())} />
                 </div>
-              );
-            })}
+              )}
+            </div>
           </div>
 
-          {selected.size > 0 && (
-            <div
-              className="absolute left-1/2 flex -translate-x-1/2 items-center"
-              style={{
-                bottom: v("spacing.lg"),
-                height: 36,
-                backgroundColor: v("colors.surface"),
-                color: v("colors.surfaceForeground"),
-                border: hairline,
-                borderRadius: v("radius.lg"),
-                boxShadow: v("shadow.md"),
-                paddingInline: v("spacing.sm"),
-                gap: v("spacing.xs"),
-                ...text("sm"),
-              }}
-              {...tokenAttrs("colors.surface", "colors.hairline", "radius.lg", "shadow.md", "spacing.lg")}
-            >
-              <span className="whitespace-nowrap" style={{ paddingInline: v("spacing.xs") }}>
-                {t.selected(selected.size)}
+          {/* 状态栏：status_bar.rs `render_status_bar` */}
+          <div
+            className="flex shrink-0 items-center justify-between overflow-hidden tabular-nums"
+            style={{
+              height: v("density.statusBar"),
+              backgroundColor: v("colors.chrome"),
+              borderTop: hairline,
+              paddingInline: v("spacing.sm"),
+              gap: v("spacing.md"),
+              color: v("colors.mutedForeground"),
+              ...text("caption"),
+            }}
+            {...tokenAttrs("density.statusBar", "colors.chrome", "colors.hairline", "colors.mutedForeground", "typography.caption.size")}
+          >
+            <span className="flex shrink-0 items-center" style={{ gap: v("spacing.md") }}>
+              <span className="inline-flex items-center whitespace-nowrap" style={{ gap: v("spacing.xxs") }}>
+                <ArrowDown style={iconSm} />
+                12.8 MB/s
               </span>
-              <span style={{ width: v("stroke.thin"), height: v("icon.lg"), backgroundColor: v("colors.hairline") }} />
-              {[Play, Pause, Folder].map((Icon, index) => (
-                <span key={index} className="grid h-7 w-7 place-items-center hover:bg-[var(--gt-colors-rowHover)]" style={{ borderRadius: v("components.button.radius") }}>
-                  <Icon style={iconMd} />
-                </span>
-              ))}
-              <span className="grid h-7 w-7 place-items-center" style={{ color: v("colors.destructive") }} {...tokenAttrs("colors.destructive")}>
-                <Trash2 style={iconMd} />
+              <span className="inline-flex items-center whitespace-nowrap" style={{ gap: v("spacing.xxs") }}>
+                <ArrowUp style={iconSm} />
+                0 B/s
               </span>
-              <span style={{ width: v("stroke.thin"), height: v("icon.lg"), backgroundColor: v("colors.hairline") }} />
-              <button type="button" onClick={() => setSelected(new Set())} aria-label={t.clearSelection} className="grid h-7 w-7 place-items-center">
-                <X style={iconMd} />
-              </button>
-            </div>
-          )}
-        </div>
-      </div>
-
-      {/* 状态栏 */}
-      <div
-        className="flex shrink-0 items-center"
-        style={{
-          height: v("density.statusBar"),
-          backgroundColor: v("colors.chrome"),
-          borderTop: hairline,
-          paddingInline: v("spacing.sm"),
-          gap: v("spacing.sm"),
-          color: v("colors.mutedForeground"),
-          ...text("caption"),
-        }}
-        {...tokenAttrs("density.statusBar", "colors.chrome", "colors.hairline", "colors.mutedForeground", "typography.caption.size")}
-      >
-        <span className="inline-flex items-center tabular-nums" style={{ gap: v("spacing.xs"), color: v("colors.statusDownloading"), fontFamily: v("typography.mono") }} {...tokenAttrs("colors.statusDownloading", "typography.mono")}>
-          <ArrowDownToLine style={iconSm} />
-          12.8 MB/s
-        </span>
-        <span
-          className="inline-flex items-center hover:bg-[var(--gt-colors-navHover)]"
-          style={{ height: v("density.statusControl"), paddingInline: v("spacing.xs"), gap: v("spacing.xs"), borderRadius: v("components.button.radius") }}
-          {...tokenAttrs("density.statusControl", "spacing.xs", "components.button.radius", "colors.navHover")}
-        >
-          <Pause style={iconSm} />
-          {t.pauseAll}
-        </span>
-        <span className="ml-auto inline-flex items-center" style={{ gap: v("spacing.xs") }}>
-          {[
-            { Icon: ArrowDownToLine, label: t.unlimited },
-            { Icon: ArrowUp, label: t.unlimited },
-            { Icon: HardDrive, label: t.freeSpace("128 GB") },
-          ].map(({ Icon, label }, index) => (
-            <span
-              key={index}
-              className="inline-flex items-center tabular-nums hover:bg-[var(--gt-colors-navHover)]"
-              style={{ height: v("density.statusControl"), paddingInline: v("spacing.xs"), gap: v("spacing.xs"), borderRadius: v("components.button.radius") }}
-              {...tokenAttrs("density.statusControl", "components.button.radius", "colors.navHover")}
-            >
-              <Icon style={iconSm} />
-              {label}
+              <span className="inline-flex items-center" style={{ gap: v("spacing.xxs") }}>
+                <ToolbarIconButton icon={Pause} label={t.pauseAll} size={v("density.statusControl")} iconStyle={iconSm} />
+                <ToolbarIconButton icon={Play} label={t.resumeAll} size={v("density.statusControl")} iconStyle={iconSm} />
+              </span>
             </span>
-          ))}
-          <Badge tone="muted">{mode}</Badge>
-        </span>
+            <span className="flex min-w-0 items-center" style={{ gap: v("spacing.xs") }}>
+              <StatusButton>
+                <ArrowDown style={iconSm} />
+                {t.unlimited}
+              </StatusButton>
+              <StatusButton>
+                <ArrowUp style={iconSm} />
+                {t.unlimited}
+              </StatusButton>
+              <StatusButton>
+                <Globe style={iconSm} />
+                {t.proxyAuto}
+                <ChevronDown style={iconSm} />
+              </StatusButton>
+              <StatusButton iconOnly>
+                <Power style={iconSm} />
+              </StatusButton>
+              <span className="inline-flex shrink-0 items-center whitespace-nowrap" style={{ paddingInline: v("spacing.xs"), gap: v("spacing.xxs") }}>
+                <HardDrive style={iconSm} />
+                {t.freeSpace("128 GB")}
+              </span>
+            </span>
+          </div>
+        </div>
       </div>
 
       {dialog && <NewDownloadDialog t={t} onClose={() => setDialog(false)} />}

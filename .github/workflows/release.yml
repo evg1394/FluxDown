@@ -301,6 +301,7 @@ jobs:
                 # Web SPA 构建期引用共享文案与 GPUI 主题解析器（web/vite.config.ts 别名）
                 assets/i18n/*)       APP=true; MOBILE=true; SERVER=true ;;
                 website-v2/src/lib/gpui-theme/*) SERVER=true ;;
+                assets/icon-packs/*) APP=true; SERVER=true ;;
                 website/*)  ;;
                 docs/*|*.md) ;;
                 *)          APP=true ;;
@@ -783,7 +784,8 @@ jobs:
           fi
           python3 -c "import json,sys;p=sys.argv[1];m=json.load(open(p));m.pop('key',None);open(p,'w').write(json.dumps(m,indent=2))" "$MANIFEST"
           ZIP_FILE="$PWD/build/extension/FluxDown-${VERSION}-edge.zip"
-          (cd "$PKG_DIR" && zip -qr "$ZIP_FILE" .)
+          # Chrome zip 内含 chrome-mv3/ 顶层目录；Edge 要求 manifest.json 位于 zip 根，故从 manifest 所在目录打包
+          (cd "$(dirname "$MANIFEST")" && zip -qr "$ZIP_FILE" .)
           echo "Edge package rebuilt without manifest key: $ZIP_FILE"
 
           # 1) 上传 zip 包到 draft（202 + Location 头携带 operationID）

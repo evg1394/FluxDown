@@ -155,6 +155,7 @@ pub(crate) async fn run_with(
     // 不等 daemon 就绪就开 Gateway：首个快照先带偏好 / 外壳状态（`daemon_connected=false`），
     // 界面据此立即决定主题、语言与启动时是否只驻留托盘；daemon 连上后由投影任务替换
     // daemon 快照并发布 `DaemonConnectionChanged(true)`，与运行期断线重连同一路径。
+    let update_target = crate::update::install::detect(server.is_some());
     let initial = AgentSnapshot {
         daemon_connected: false,
         session: state
@@ -167,6 +168,7 @@ pub(crate) async fn run_with(
         linked_devices: crate::link::public_devices(&state),
         remote_tasks: state.remote_tasks.clone(),
         shell: crate::shell::shell_status(host.availability, &state.preferences),
+        update: crate::update::initial_status(&update_target),
         ..AgentSnapshot::default()
     };
     let events = AgentEventHub::new(initial);
@@ -221,7 +223,7 @@ pub(crate) async fn run_with(
     );
     let (api_config, api_switches, api_token) = {
         let mut state = shared_state.lock().await;
-        // 局域网 / CORS 放开且 takeover 或 aria2 开启时，空 token 等于对外匿名开放：启动即补齐。
+        // 局域网监听且 takeover 或 aria2 开启时，空 token 等于对同网段匿名开放：启动即补齐。
         // server 模式的空密钥表示尚未完成首次设置，由兼容 API 自身拒绝，不能自动补。
         if server.is_none() && crate::gateway::ensure_exposed_auth_token(&mut state) {
             store.save(&state).await?;
@@ -264,52 +266,27 @@ pub(crate) async fn run_with(
         link: link.clone(),
     }));
     let shared_state_for_server = shared_state.clone();
-    let cloud_client = crate::cloud::CloudClient::new(
+    let CloudServices {
+        auth,
+        api: cloud_api,
+        sync,
+        remote,
+        sync_task,
+        remote_task,
+        device_meta_task,
+        cdn_task,
+    } = start_cloud_services(
         fluxcloud_base_url(
             std::env::var("FLUXCLOUD_BASE_URL").ok(),
             option_env!("FLUXCLOUD_BASE_URL"),
         ),
-        shared_state.clone(),
-        store.clone(),
-    )?
-    .with_events(events.clone());
-    cloud_client.restore_endpoint_override().await;
-    let auth = Arc::new(crate::cloud::CloudAuthService::new(
-        cloud_client.clone(),
-        events.clone(),
-    ));
-    let cloud_api = crate::cloud::CloudApi::new(cloud_client);
-    let sync = Arc::new(crate::sync::SyncService::new(
-        cloud_api.clone(),
-        daemon.clone(),
-        events.clone(),
-        shared_state.clone(),
-        store.clone(),
-    ));
-    let sync_task = tokio::spawn(sync.clone().run(cancel.clone()));
-    let remote = Arc::new(crate::remote::RemoteTaskService::new(
-        cloud_api.clone(),
-        daemon.clone(),
-        events.clone(),
-        shared_state.clone(),
-        store.clone(),
-    ));
-    let remote_task = tokio::spawn(remote.clone().run(cancel.clone()));
-    let device_meta_task = tokio::spawn(
-        Arc::new(crate::device_meta::DeviceMetaService::new(
-            cloud_api.clone(),
-            events.clone(),
-        ))
-        .run(cancel.clone()),
-    );
-    let cdn_task = tokio::spawn(
-        crate::cdn_worker::CdnWorker::new(
-            cloud_api.clone(),
-            daemon.as_ref().clone(),
-            events.clone(),
-        )
-        .run(cancel.clone()),
-    );
+        &daemon,
+        &events,
+        &shared_state,
+        &store,
+        &cancel,
+    )
+    .await?;
     let capture = Arc::new(crate::capture::CaptureService::new(
         daemon.clone(),
         events.clone(),
@@ -367,8 +344,17 @@ pub(crate) async fn run_with(
         diagnostics.with_desktop_checks(notifier.clone())
     });
     let update = Arc::new(crate::update::UpdateService::new(
-        fluxdown_protocol::APP_VERSION,
+        crate::update::UpdateParts {
+            events: events.clone(),
+            data_dir: store.data_dir().to_path_buf(),
+            target: update_target,
+            request_restart: {
+                let lifecycle = lifecycle.clone();
+                Box::new(move || lifecycle.request_restart())
+            },
+        },
     ));
+    update.start(cancel.clone(), true);
     let cloud = Arc::new(cloud_api);
     let gateway_service = Arc::new(
         GatewayService::new(
@@ -440,6 +426,7 @@ pub(crate) async fn run_with(
                 daemon: daemon_config.clone(),
                 webroot: config.webroot.clone(),
                 demo: config.effective_demo_url(bound).is_some(),
+                allow_local_platform: config.allow_local_platform,
             })?))
         }
         None => None,
@@ -594,7 +581,7 @@ async fn await_daemon_ready(readiness: DaemonReadiness) -> AgentResult {
                 ));
             }
         } else {
-            // 迁移可能带入 CORS 放开与接管 / aria2 开关：对外暴露面必须有 token。
+            // 迁移可能带入局域网监听与接管 / aria2 开关：局域网暴露面必须有 token。
             let mut state = state.lock().await;
             if crate::gateway::ensure_exposed_auth_token(&mut state) {
                 store.save(&state).await?;
@@ -633,7 +620,7 @@ async fn await_daemon_ready(readiness: DaemonReadiness) -> AgentResult {
     outcome
 }
 
-fn spawn_daemon_projection(
+pub(crate) fn spawn_daemon_projection(
     mut daemon_events: tokio::sync::mpsc::Receiver<DaemonClientEvent>,
     events: AgentEventHub,
     cancel: CancellationToken,
@@ -682,7 +669,7 @@ fn spawn_daemon_projection(
 const DAEMON_READY_POLL: Duration = Duration::from_secs(30);
 
 /// FluxCloud 服务地址：运行期环境变量 > 构建期注入 > 本地默认。空串（CI 未配置 secret 时传入）视为未设置。
-fn fluxcloud_base_url(runtime: Option<String>, build_time: Option<&str>) -> String {
+pub(crate) fn fluxcloud_base_url(runtime: Option<String>, build_time: Option<&str>) -> String {
     runtime
         .filter(|url| !url.trim().is_empty())
         .or_else(|| {
@@ -691,6 +678,74 @@ fn fluxcloud_base_url(runtime: Option<String>, build_time: Option<&str>) -> Stri
                 .map(str::to_owned)
         })
         .unwrap_or_else(|| "http://127.0.0.1:8720".to_owned())
+}
+
+/// FluxCloud 客户端与依赖它的后台服务（云认证、配置同步、远程任务、设备元数据、CDN）。
+pub(crate) struct CloudServices {
+    pub(crate) auth: Arc<crate::cloud::CloudAuthService>,
+    pub(crate) api: crate::cloud::CloudApi,
+    pub(crate) sync: Arc<crate::sync::SyncService>,
+    pub(crate) remote: Arc<crate::remote::RemoteTaskService>,
+    pub(crate) sync_task: tokio::task::JoinHandle<()>,
+    pub(crate) remote_task: tokio::task::JoinHandle<()>,
+    pub(crate) device_meta_task: tokio::task::JoinHandle<()>,
+    pub(crate) cdn_task: tokio::task::JoinHandle<()>,
+}
+
+/// 装配并启动云相关服务；桌面 / server 与嵌入式宿主共用，差别只在 `base_url` 的来源。
+pub(crate) async fn start_cloud_services(
+    base_url: String,
+    daemon: &Arc<DaemonClient>,
+    events: &AgentEventHub,
+    state: &Arc<tokio::sync::Mutex<AgentState>>,
+    store: &Arc<StateStore>,
+    cancel: &CancellationToken,
+) -> Result<CloudServices, crate::cloud::CloudError> {
+    let cloud_client = crate::cloud::CloudClient::new(base_url, state.clone(), store.clone())?
+        .with_events(events.clone());
+    cloud_client.restore_endpoint_override().await;
+    let auth = Arc::new(crate::cloud::CloudAuthService::new(
+        cloud_client.clone(),
+        events.clone(),
+    ));
+    let api = crate::cloud::CloudApi::new(cloud_client);
+    let sync = Arc::new(crate::sync::SyncService::new(
+        api.clone(),
+        daemon.clone(),
+        events.clone(),
+        state.clone(),
+        store.clone(),
+    ));
+    let sync_task = tokio::spawn(sync.clone().run(cancel.clone()));
+    let remote = Arc::new(crate::remote::RemoteTaskService::new(
+        api.clone(),
+        daemon.clone(),
+        events.clone(),
+        state.clone(),
+        store.clone(),
+    ));
+    let remote_task = tokio::spawn(remote.clone().run(cancel.clone()));
+    let device_meta_task = tokio::spawn(
+        Arc::new(crate::device_meta::DeviceMetaService::new(
+            api.clone(),
+            events.clone(),
+        ))
+        .run(cancel.clone()),
+    );
+    let cdn_task = tokio::spawn(
+        crate::cdn_worker::CdnWorker::new(api.clone(), daemon.as_ref().clone(), events.clone())
+            .run(cancel.clone()),
+    );
+    Ok(CloudServices {
+        auth,
+        api,
+        sync,
+        remote,
+        sync_task,
+        remote_task,
+        device_meta_task,
+        cdn_task,
+    })
 }
 
 async fn initialize_device_identity(
@@ -721,16 +776,33 @@ async fn initialize_device_identity(
         }
         changed = true;
     }
+    finalize_device_identity(state, store, std::env::consts::OS, None, changed).await
+}
+
+/// 设备身份的共同收尾（桌面 / server / 嵌入式共用）：设备名、平台名、凭证与账号归属自检。
+///
+/// `host_device_name` 是宿主给出的系统设备名（移动端经 UniFFI 传入；桌面 / server 为 `None`，
+/// 改为探测主机名）。设备名缺失、非法或仍是占位名 `FluxDown` 时才重新解析，用户改过的名字不动。
+pub(crate) async fn finalize_device_identity(
+    state: &mut AgentState,
+    store: &StateStore,
+    platform: &str,
+    host_device_name: Option<&str>,
+    mut changed: bool,
+) -> Result<(), crate::state::StateError> {
     let valid_name = {
         let length = state.device_name.trim().chars().count();
         (1..=64).contains(&length)
     };
-    if !valid_name {
-        state.device_name = crate::device_identity::detect_device_name().await;
-        changed = true;
+    if !valid_name || crate::device_identity::is_placeholder_device_name(&state.device_name) {
+        let name = crate::device_identity::resolve_device_name(host_device_name).await;
+        if name != state.device_name {
+            state.device_name = name;
+            changed = true;
+        }
     }
     if state.platform.is_empty() {
-        state.platform = std::env::consts::OS.to_owned();
+        state.platform = platform.to_owned();
         changed = true;
     }
     if state.credentials.as_ref().is_some_and(|credentials| {
@@ -1030,7 +1102,7 @@ pub(crate) fn engine_data_dir() -> PathBuf {
     }
 }
 
-fn daemon_socket_address(
+pub(crate) fn daemon_socket_address(
     url: &str,
 ) -> Result<std::net::SocketAddr, Box<dyn std::error::Error + Send + Sync>> {
     let url = reqwest::Url::parse(url)?;
@@ -1188,6 +1260,46 @@ mod tests {
             if let Err(error) = tokio::fs::remove_dir_all(&dir).await {
                 tracing::warn!(path = %dir.display(), error = %error, "remove fixed bind test directory");
             }
+        }
+    }
+
+    #[tokio::test]
+    async fn host_device_name_replaces_missing_or_placeholder_names_but_not_user_names() {
+        let dir = gateway_test_dir("device_name");
+        let store = crate::state::StateStore::open(dir.clone())
+            .await
+            .expect("open store");
+        for (current, expected) in [
+            ("", "Pixel 9 Pro"),
+            ("FluxDown", "Pixel 9 Pro"),
+            ("书房手机", "书房手机"),
+        ] {
+            let mut state = AgentState {
+                device_id: "device-1".to_owned(),
+                device_name: current.to_owned(),
+                platform: "android".to_owned(),
+                ..AgentState::default()
+            };
+            store.save(&state).await.expect("seed identity");
+            super::finalize_device_identity(
+                &mut state,
+                &store,
+                "android",
+                Some("  Pixel 9 Pro\n"),
+                false,
+            )
+            .await
+            .expect("finalize identity");
+            assert_eq!(state.device_name, expected, "starting from {current:?}");
+            assert_eq!(
+                store.load().await.expect("reload identity").device_name,
+                expected,
+                "persisted from {current:?}"
+            );
+        }
+        drop(store);
+        if let Err(error) = tokio::fs::remove_dir_all(&dir).await {
+            tracing::warn!(path = %dir.display(), error = %error, "remove device name test directory");
         }
     }
 }

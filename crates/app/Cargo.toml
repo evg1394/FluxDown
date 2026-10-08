@@ -23,6 +23,7 @@ fluxdown_ui_account = { version = "0.1.0", path = "../account" }
 fluxdown_ui_downloads = { path = "../downloads" }
 fluxdown_ui_extensions = { version = "0.1.0", path = "../extensions" }
 fluxdown_ui_i18n = { path = "../i18n" }
+fluxdown_ui_icon_pack = { path = "../icon_pack" }
 fluxdown_ui_rss = { version = "0.1.0", path = "../rss" }
 fluxdown_ui_settings = { path = "../settings" }
 fluxdown_ui_shell = { path = "../shell" }

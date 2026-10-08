@@ -6,7 +6,7 @@ use fluxdown_protocol::{MarketEntryDto, PluginDto};
 use fluxdown_ui_components::{dialog_scroll_body, tabular_numbers};
 use fluxdown_ui_i18n::Translator;
 use fluxdown_ui_theme::active_theme;
-use gpui::{App, FontWeight, IntoElement, ParentElement, SharedString, Styled, Window, div, px};
+use gpui::{App, FontWeight, IntoElement, ParentElement, SharedString, Styled, Window, div};
 use gpui_component::{WindowExt as _, h_flex, link::Link, v_flex};
 
 use crate::{pages::Frame, ui};
@@ -114,7 +114,7 @@ pub fn open_plugin_detail(
                 detail.name.clone(),
                 cx,
             ))
-            .w(px(480.))
+            .w(active_theme(cx).text_extent(480.))
             .content(move |root, _, cx| {
                 root.min_h_0().child(dialog_scroll_body(
                     "plugin-detail-body",
@@ -142,7 +142,7 @@ fn render_detail(detail: &PluginDetail, translator: &Translator, cx: &App) -> im
     let text = |key: &str| SharedString::from(translator.text(key).to_owned());
     let label_cell = |label: SharedString| {
         ui::meta_text(label, frame)
-            .w(px(LABEL_WIDTH))
+            .w(theme.text_extent(LABEL_WIDTH))
             .flex_shrink_0()
     };
     let info_row = |label: SharedString, value: String| {

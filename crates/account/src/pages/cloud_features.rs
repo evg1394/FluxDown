@@ -98,7 +98,7 @@ fn row_text(
         )
 }
 
-fn sync_subtitle(translator: &Translator, phase: SyncPhase) -> SharedString {
+pub(crate) fn sync_subtitle(translator: &Translator, phase: SyncPhase) -> SharedString {
     match phase {
         SyncPhase::Disabled => t(translator, "cloudSyncDesc"),
         SyncPhase::Halted(reason) => {

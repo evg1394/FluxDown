@@ -39,6 +39,7 @@ class SettingsProvider extends ChangeNotifier {
   final Set<String> _pendingProxyKeys = {};
 
   // BT 设置
+  bool _btEnabled = true; // 启用 BitTorrent
   bool _btEnableDht = true; // DHT 分布式哈希表
   bool _btEnableUpnp = true; // UPnP 端口映射
   int _btPortStart = 6881; // 监听端口起始
@@ -170,6 +171,7 @@ class SettingsProvider extends ChangeNotifier {
   String get proxyPort => _proxyPort;
 
   // BT 设置 Getters
+  bool get btEnabled => _btEnabled;
   bool get btEnableDht => _btEnableDht;
   bool get btEnableUpnp => _btEnableUpnp;
   int get btPortStart => _btPortStart;
@@ -315,6 +317,12 @@ class SettingsProvider extends ChangeNotifier {
   }
 
   // BT 设置 Setters
+  void setBtEnabled(bool value) {
+    if (_btEnabled == value) return;
+    _btEnabled = value;
+    notifyListeners();
+    _saveToRust('bt_enabled', value.toString());
+  }
 
   void setBtEnableDht(bool value) {
     if (_btEnableDht == value) return;
@@ -413,6 +421,8 @@ class SettingsProvider extends ChangeNotifier {
           _autoCheckUpdate = entry.value == 'true';
         case 'update_channel':
           _updateChannel = entry.value.isEmpty ? 'stable' : entry.value;
+        case 'bt_enabled':
+          _btEnabled = entry.value == 'true';
         case 'bt_enable_dht':
           _btEnableDht = entry.value == 'true';
         case 'bt_enable_upnp':

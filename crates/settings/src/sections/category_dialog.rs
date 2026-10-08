@@ -6,7 +6,7 @@ use fluxdown_ui_components::{
     form, form_field, input_with_action, segmented_tabs,
 };
 use fluxdown_ui_i18n::Translator;
-use fluxdown_ui_theme::{CONTROL_HEIGHT, active_theme};
+use fluxdown_ui_theme::active_theme;
 use gpui::{
     App, AppContext as _, ClickEvent, Context, Div, Entity, InteractiveElement as _, IntoElement,
     ParentElement, Render, SharedString, StatefulInteractiveElement as _, Styled, Window, div,
@@ -143,7 +143,7 @@ pub(crate) fn open(
         let view = view.clone();
         dialog
             .title(dialog_title(title.clone(), cx))
-            .w(px(520.))
+            .w(active_theme(cx).text_extent(520.))
             .content(move |content, _, _| content.min_h_0().child(view.clone()))
     });
     name.update(cx, |input, cx| input.focus(window, cx));
@@ -402,7 +402,7 @@ impl CategoryDialog {
             grid = grid.child(
                 div()
                     .id(SharedString::from(format!("category-icon-{name}")))
-                    .size(CONTROL_HEIGHT)
+                    .size(theme.density().control)
                     .flex()
                     .items_center()
                     .justify_center()

@@ -1,7 +1,7 @@
 //! GPUI 设置能力页面与设置分区。
 //!
 //! 设置通过共享的翻译 Entity 和主题全局状态更新 UI，不依赖其他业务能力；
-//! 全部读写经 [`SettingsPort`] 注入的单一 agent 会话，导入主题经 [`ThemeLibrary`] 存取本机文件。
+//! 全部读写经 [`SettingsPort`] 注入的单一 agent 会话；导入主题也存为（随云同步的）agent 偏好。
 
 mod port;
 mod search;
@@ -9,13 +9,14 @@ mod sections;
 mod store;
 mod theme_library;
 mod ui;
+pub mod update_view;
 mod view;
 mod webhook_view;
 
-pub use port::{PortFuture, SettingsPort, StoredTheme, ThemeInfo, ThemeLibrary};
+pub use port::{PortFuture, SettingsPort};
 pub use search::{SettingsSearchEntry, SettingsTarget, search_index};
 pub use store::{SettingsError, SettingsErrorKind, SettingsStore};
-pub use theme_library::install_theme_library;
+pub use theme_library::sync_theme_library;
 pub use view::{ActivityBarToggle, SettingsContentSlots, SettingsView};
 pub use webhook_view::WebhookView;
 

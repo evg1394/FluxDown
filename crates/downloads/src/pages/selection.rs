@@ -3,6 +3,7 @@
 //! 每个 [`fluxdown_protocol::SelectionRequestDto`] 对应一个独立 `Floating` 窗口
 //! （见 `crate::windows::selection`，app 侧）；窗口的开启/关闭由 app 监听会话事件
 //! 完成，本视图只负责收集用户选择并调用 `daemon.selection.resolve`。
+//! `FileExists` 不走本视图，由 [`crate::FileConflictView`] 聚合承载。
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -18,8 +19,8 @@ use fluxdown_ui_components::{
 use fluxdown_ui_i18n::Translator;
 use fluxdown_ui_theme::active_theme;
 use gpui::{
-    ClickEvent, Context, Div, Entity, InteractiveElement as _, IntoElement, ParentElement, Render,
-    SharedString, StatefulInteractiveElement as _, Styled, Window, div,
+    AnyElement, ClickEvent, Context, Div, Entity, InteractiveElement as _, IntoElement,
+    ParentElement, Render, SharedString, StatefulInteractiveElement as _, Styled, Window, div,
     prelude::FluentBuilder as _,
 };
 use gpui_component::{
@@ -61,17 +62,15 @@ enum SelectionState {
     },
 }
 
-impl SelectionView {
-    /// 按 `request.kind` 初始化默认选择，并启动每秒刷新一次的倒计时。
-    pub fn new(
-        translator: Entity<Translator>,
-        request: SelectionRequestDto,
-        task_name: String,
-        port: Arc<dyn DownloadsPort>,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Self {
-        let strings = SelectionStrings::from_translator(translator.read(cx));
+/// 单请求选择窗口（HLS 画质 / BT 文件 / 插件变体）能承载的请求及其默认选择。
+/// `FileExists` 由聚合的「文件已存在」窗口承载（见 [`crate::FileConflictView`]），没有计划。
+pub struct SelectionPlan {
+    state: SelectionState,
+}
+
+impl SelectionPlan {
+    #[must_use]
+    pub fn for_request(request: &SelectionRequestDto) -> Option<Self> {
         let state = match request.kind.clone() {
             SelectionKind::Hls { options } => {
                 let selected = match request.default_choice {
@@ -96,7 +95,25 @@ impl SelectionView {
                 };
                 SelectionState::Variant { options, selected }
             }
+            SelectionKind::FileExists { .. } => return None,
         };
+        Some(Self { state })
+    }
+}
+
+impl SelectionView {
+    /// 按计划初始化默认选择，并启动每秒刷新一次的倒计时。
+    pub fn new(
+        translator: Entity<Translator>,
+        request: SelectionRequestDto,
+        plan: SelectionPlan,
+        task_name: String,
+        port: Arc<dyn DownloadsPort>,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let strings = SelectionStrings::from_translator(translator.read(cx));
+        let state = plan.state;
         cx.observe(&translator, |this, translator, cx| {
             this.strings = SelectionStrings::from_translator(translator.read(cx));
             cx.notify();
@@ -237,13 +254,24 @@ impl SelectionView {
             )
     }
 
-    fn render_body(&self, cx: &mut Context<Self>) -> Div {
+    fn render_body(&self, cx: &mut Context<Self>) -> AnyElement {
+        // HLS / 画质选择窗口固定尺寸：文字放大后选项可能超出窗口，列表内滚动。
         match &self.state {
-            SelectionState::Hls { options, selected } => self.render_hls(options, *selected, cx),
-            SelectionState::Bt { files, selected } => self.render_bt(files, selected, cx),
-            SelectionState::Variant { options, selected } => {
-                self.render_variant(options, *selected, cx)
+            SelectionState::Hls { options, selected } => div()
+                .id("selection-hls-scroll")
+                .size_full()
+                .overflow_y_scroll()
+                .child(self.render_hls(options, *selected, cx))
+                .into_any_element(),
+            SelectionState::Bt { files, selected } => {
+                self.render_bt(files, selected, cx).into_any_element()
             }
+            SelectionState::Variant { options, selected } => div()
+                .id("selection-variant-scroll")
+                .size_full()
+                .overflow_y_scroll()
+                .child(self.render_variant(options, *selected, cx))
+                .into_any_element(),
         }
     }
 

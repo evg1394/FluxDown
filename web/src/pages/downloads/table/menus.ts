@@ -1,11 +1,12 @@
 // 任务行 / 分组头右键菜单（移植 task_table.rs 的 `context_menu_items` 与 `group_context_menu`）。
-// Web 里「打开文件 / 在文件夹中显示」换成浏览器下载已完成文件。
+// 「打开文件 / 在文件夹中显示」仅在 agent 下发 `agent.openTaskFiles`（同机）时出现，其余情况用浏览器下载已完成文件。
 
 import {
   AppWindow,
   CircleAlert,
   Copy,
   Download,
+  FolderOpen,
   Pause,
   PanelRight,
   Pen,
@@ -18,7 +19,9 @@ import {
 import type { QueueDto } from '../../../lib/rpc'
 import type { MenuEntry } from '../../../ui'
 import {
+  canOpenTaskFile,
   canRedownload,
+  canRevealTaskFile,
   confirmDeleteGroupWithFiles,
   confirmDeleteWithFiles,
   confirmIgnorePluginRetry,
@@ -30,12 +33,14 @@ import {
   isDownloadable,
   isPluginRetryError,
   moveViewsToQueue,
+  openTaskFile,
   pauseGroup,
   pauseViews,
   redownloadViews,
   resumeGroup,
   resumeViews,
   retryFailedInGroup,
+  revealTaskFile,
   toggleBoost,
 } from '../model/actions'
 import { remoteCan } from '../model/batchPlan'
@@ -93,6 +98,24 @@ export function buildTaskMenu({ t, views, queues, queueName, showDetail }: TaskM
       label: t('webDownloadFile'),
       icon: Download,
       onSelect: () => downloadViewsFiles(views),
+    })
+  }
+  if (only && canOpenTaskFile(only)) {
+    entries.push({
+      type: 'item',
+      key: 'open-file',
+      label: t('openFile'),
+      icon: AppWindow,
+      onSelect: () => void openTaskFile(only.taskId),
+    })
+  }
+  if (only && canRevealTaskFile(only)) {
+    entries.push({
+      type: 'item',
+      key: 'reveal-file',
+      label: t('openFolder'),
+      icon: FolderOpen,
+      onSelect: () => void revealTaskFile(only.taskId),
     })
   }
   if (only && only.source === 'local') {

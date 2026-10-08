@@ -1,0 +1,76 @@
+import FluxDomain
+import FluxUI
+
+/// 主机切换 / 移除的唯一分发点（设备页与添加主机共用，同 Android `HostActions`）：给出 Toast，
+/// 串行化由 `AppContainer.switchHost` 保证；确认框只用于移除（由调用方的 `.alert` 承担）。
+@MainActor
+enum HostFlow {
+    /// 主机连接失败 → 用户可读文案：先按 code（Unauthorized / Timeout / Unavailable / ProtocolIncompatible），其余回退通用失败。
+    static func errorText(_ error: HostError) -> String {
+        switch error.code {
+        case .unauthorized: L("webLoginInvalidKey")
+        case .timeout: L("mobileHostErrTimeout")
+        case .unavailable: L("webLoginUnreachable")
+        case .protocolIncompatible: L("mobileHostErrIncompatible")
+        default: L("localServiceActionFailed")
+        }
+    }
+
+    /// 切换到 `ref`；已是当前主机且会话可用则直接成功（不弹 Toast）。返回是否成功。
+    @discardableResult
+    static func switchTo(_ ref: HostRef, container: AppContainer) async -> Bool {
+        if ref.id == container.host.id, !(container.session is UnavailableSession) { return true }
+        let name = ref.localizedName
+        container.toasts.show(
+            text: L("mobileHostSwitching", ["name": name]),
+            tone: .info,
+            systemImage: FluxSymbol.switchHost
+        )
+        switch await container.switchHost(ref) {
+        case .success:
+            container.toasts.show(text: L("mobileHostSwitched", ["name": name]), tone: .success, systemImage: FluxSymbol.done)
+            return true
+        case let .failure(error):
+            container.toasts.show(
+                text: L("mobileHostSwitchFailed", ["name": name, "reason": errorText(error)]),
+                tone: .error,
+                systemImage: FluxSymbol.offline
+            )
+            return false
+        }
+    }
+
+    /// 移除已保存的远程主机（本机不可移除）。移除当前主机时 `AppContainer.removeHost` 会先回到本机。
+    static func remove(_ ref: HostRef, container: AppContainer) async {
+        guard case let .remote(id, name, _) = ref else { return }
+        switch await container.removeHost(id: id) {
+        case .success:
+            container.toasts.show(text: L("mobileHostRemoved", ["name": name]), tone: .info, systemImage: FluxSymbol.delete)
+        case let .failure(error):
+            container.toasts.show(text: ErrorText.describe(error), tone: .error, systemImage: "exclamationmark.circle")
+        }
+    }
+}
+
+extension HostRef {
+    /// 主机显示名：本机走 i18n（存储里的 displayName 不随语言变化），远端沿用用户起的名称。
+    var localizedName: String {
+        switch self {
+        case .local: L("mobileHostLocalName")
+        case let .remote(_, name, _): name
+        }
+    }
+
+    /// 主机副标题：本机 = 进程内引擎；远端 = 地址。
+    var localizedSubtitle: String {
+        switch self {
+        case .local: L("mobileHostLocalEngine")
+        case let .remote(_, _, endpoint): endpoint
+        }
+    }
+
+    /// 本机 = 当前设备图形（iPhone / iPad）；远端 = `FluxSymbol.remoteHost`。全 App 的主机图标都走这里。
+    var symbolName: String {
+        isLocal ? FluxSymbol.thisDevice : FluxSymbol.remoteHost
+    }
+}

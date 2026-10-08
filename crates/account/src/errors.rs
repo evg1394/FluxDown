@@ -57,6 +57,7 @@ pub(crate) fn sync_reason_key(reason: Option<ErrorReason>) -> &'static str {
 pub(crate) fn session_revoked_key(reason: ErrorReason) -> &'static str {
     match reason {
         ErrorReason::DeviceUntrusted => "accountSessionRevokedUntrusted",
+        ErrorReason::PasswordChanged => "accountSessionRevokedPasswordChanged",
         ErrorReason::AccountDisabled => "accountErrorAccountDisabled",
         _ => "accountSessionRevokedExpired",
     }
@@ -65,6 +66,8 @@ pub(crate) fn session_revoked_key(reason: ErrorReason) -> &'static str {
 pub(crate) fn reason_key(reason: ErrorReason, context: ErrorContext) -> Option<&'static str> {
     Some(match reason {
         ErrorReason::InvalidCredentials => "accountErrorInvalidCredentials",
+        ErrorReason::WrongPassword => "accountErrorWrongPassword",
+        ErrorReason::PasswordChanged => "accountSessionRevokedPasswordChanged",
         ErrorReason::InvalidVerificationCode => "accountErrorInvalidCode",
         ErrorReason::RateLimited => "accountErrorRateLimited",
         ErrorReason::EmailTaken => "accountErrorEmailTaken",
@@ -323,6 +326,10 @@ mod tests {
             session_revoked_key(ErrorReason::Unknown),
             "accountSessionRevokedExpired"
         );
+        assert_eq!(
+            session_revoked_key(ErrorReason::PasswordChanged),
+            "accountSessionRevokedPasswordChanged"
+        );
     }
 
     #[test]
@@ -331,6 +338,7 @@ mod tests {
         let reasons = [
             ErrorReason::InvalidCredentials,
             ErrorReason::InvalidVerificationCode,
+            ErrorReason::WrongPassword,
             ErrorReason::RateLimited,
             ErrorReason::EmailTaken,
             ErrorReason::OriginIdTaken,
@@ -394,6 +402,7 @@ mod tests {
             ErrorReason::DeviceUntrusted,
             ErrorReason::AccountDisabled,
             ErrorReason::SessionExpired,
+            ErrorReason::PasswordChanged,
         ] {
             keys.push(session_revoked_key(reason));
         }

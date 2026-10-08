@@ -5,12 +5,12 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use fluxdown_protocol::{RpcErrorData, WebhookDeliveriesResponse, WebhookPresetDto, method};
 use fluxdown_ui_components::{
-    ControlExt as _, FluxIcon, IconControlExt as _, card, check_row, choice_chip, field_error,
-    field_hint, field_label, form, form_field, form_row, input_with_action, option_group,
-    option_row,
+    BusyExt as _, ControlExt as _, FluxIcon, IconControlExt as _, card, check_row, choice_chip,
+    field_error, field_hint, field_label, form, form_field, form_row, input_with_action,
+    option_group, option_row,
 };
 use fluxdown_ui_i18n::Translator;
-use fluxdown_ui_theme::active_theme;
+use fluxdown_ui_theme::{CONTROL_HEIGHT, active_theme};
 use gpui::{
     Anchor, AnyElement, App, AppContext as _, ClickEvent, ClipboardItem, Context, Div, Entity,
     FontWeight, InteractiveElement as _, IntoElement, ParentElement, Render, SharedString,
@@ -290,7 +290,7 @@ pub(crate) fn open(
         let view = view.clone();
         dialog
             .title(fluxdown_ui_components::dialog_title(title.clone(), cx))
-            .w(px(DIALOG_WIDTH))
+            .w(active_theme(cx).text_extent(DIALOG_WIDTH))
             .content(move |content, _, _| content.min_h_0().child(view.clone()))
     });
     name.update(cx, |input, cx| input.focus(window, cx));
@@ -820,7 +820,8 @@ impl WebhookDialog {
         form_field(
             self.t("webhookFieldTemplate"),
             Textarea::new(&self.template)
-                .h(px(112.))
+                // 文本区高度随行高增长：基准 112 + 5 行的行高增量（默认增量为 0）。
+                .h(px(112.) + (active_theme(cx).density().control - CONTROL_HEIGHT) * 5.)
                 .w_full()
                 .font_family(tokens.typography.mono.clone()),
             Some(self.t("webhookTemplateHint")),
@@ -1080,7 +1081,7 @@ impl WebhookDialog {
             .w_full();
         v_flex()
             .flex_none()
-            .w(px(PREVIEW_WIDTH))
+            .w(active_theme(cx).text_extent(PREVIEW_WIDTH))
             .min_h_0()
             .pl(tokens.spacing.md)
             .gap(tokens.spacing.xs + tokens.spacing.xxs)
@@ -1118,7 +1119,7 @@ impl WebhookDialog {
                         "webhookSendTest"
                     }))
                     .control(cx)
-                    .loading(self.testing)
+                    .busy(self.testing)
                     .disabled(!can_test)
                     .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.send_test(cx))),
             )

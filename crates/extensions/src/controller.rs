@@ -132,6 +132,29 @@ impl ExtensionsController {
         self.stale = !snapshot.daemon_connected;
     }
 
+    /// 事件是否会改变扩展页状态（与 [`Self::apply_event`] 处理的分支一致）；下载进度等无关
+    /// 高频事件返回 `false`，视图据此跳过重绘。
+    #[must_use]
+    pub fn affects_view(event: &ServiceEvent) -> bool {
+        matches!(
+            event,
+            ServiceEvent::Agent(
+                AgentEvent::DaemonSnapshotReplaced(_)
+                    | AgentEvent::DaemonConnectionChanged(_)
+                    | AgentEvent::Daemon(
+                        DaemonEvent::PluginsChanged(_)
+                            | DaemonEvent::ComponentsChanged(_)
+                            | DaemonEvent::ConfigChanged(_)
+                            | DaemonEvent::Engine(
+                                WsServerMsg::ComponentProgress { .. }
+                                    | WsServerMsg::ComponentResult { .. }
+                                    | WsServerMsg::PluginAutoDisabled { .. }
+                            )
+                    )
+            )
+        )
+    }
+
     /// 应用事件；组件安装进度 / 结果以信号形式回传给 view 处理。
     pub fn apply_event(&mut self, event: &ServiceEvent) -> Option<ExtensionsSignal> {
         let ServiceEvent::Agent(event) = event else {

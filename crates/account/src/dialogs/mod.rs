@@ -6,5 +6,7 @@ pub(crate) mod device;
 pub(crate) mod email;
 pub(crate) mod login;
 pub(crate) mod pairing_prompt;
+pub(crate) mod password;
+pub(crate) mod password_reset;
 pub(crate) mod profile;
 pub(crate) mod register;

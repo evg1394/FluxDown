@@ -1,4 +1,4 @@
-// 外观（crates/settings/src/sections/appearance.rs）：语言 / 明暗模式 / 内置主题卡片 / 强调色 / 界面缩放。
+// 外观（crates/settings/src/sections/appearance.rs）：语言 / 明暗模式 / 内置主题卡片 / 强调色 / 文件图标 / 界面缩放。
 // 只写偏好（`setPref(..., {immediate})`），ThemeProvider 与 I18nProvider 响应偏好快照即时生效；
 // 主题库导入 / 导出 / 删除与「更多主题」是桌面专属，Web 省略。
 
@@ -29,6 +29,7 @@ import {
 import type { AccentScheme, BuiltinThemeId, ThemePreference } from '../../../../theme'
 import { Icon } from '../../../../ui'
 import { FontFamilyRow } from './FontFamilyRow'
+import { IconPackRow } from './IconPackRow'
 import { DropdownField, PrefDropdownRow, SettingsPage, SettingsRow, SettingsSection, setPref, usePrefString, useSettingsReadOnly } from '../../kit'
 
 /** `UI_SCALE_PERCENTS`（crates/theme）。 */
@@ -229,6 +230,7 @@ export function AppearanceSettings() {
         <SettingsRow title={t('themeColor')} description={t('themeColorDesc')} vertical>
           <AccentPicker disabled={disabled} />
         </SettingsRow>
+        <IconPackRow />
       </SettingsSection>
       <SettingsSection title={t('settingsGroupInterface')}>
         <FontFamilyRow />

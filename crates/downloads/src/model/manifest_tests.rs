@@ -27,6 +27,23 @@ fn ids(model: &ManifestSelection) -> HashSet<String> {
         .map(|item| item.resolver_item)
         .collect()
 }
+
+#[test]
+fn default_group_name_percent_decodes_url_segment() {
+    use super::default_group_name;
+    assert_eq!(default_group_name("  Pack ", "https://a.example/x"), "Pack");
+    assert_eq!(
+        default_group_name("", "https://a.example/d/%E4%B8%AD%E6%96%87.m3u8?t=1"),
+        "中文.m3u8"
+    );
+    assert_eq!(
+        default_group_name("", "https://a.example/d/plain/"),
+        "plain"
+    );
+    assert_eq!(default_group_name("", "https://a.example/%B6%D4"), "");
+    assert_eq!(default_group_name("", "https://a.example"), "");
+}
+
 fn dir(model: &ManifestSelection, label: &str) -> usize {
     model
         .rows()

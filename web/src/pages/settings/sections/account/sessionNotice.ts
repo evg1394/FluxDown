@@ -7,6 +7,8 @@ export function sessionRevokedKey(reason: ErrorReason): string {
   switch (reason) {
     case 'deviceUntrusted':
       return 'accountSessionRevokedUntrusted'
+    case 'passwordChanged':
+      return 'accountSessionRevokedPasswordChanged'
     case 'accountDisabled':
       return 'accountErrorAccountDisabled'
     default:

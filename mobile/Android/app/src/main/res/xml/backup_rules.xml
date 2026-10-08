@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?><!--
+   Android 11 及以下（fullBackupContent）：整个应用数据一律不进云备份 / adb 备份。
+   原因：
+   - DataStore（files/datastore/fluxdown.preferences_pb）里保存的远端主机访问密钥是 Android Keystore
+     AES-GCM 密文，Keystore 密钥不随备份迁移，恢复后只会留下永远无法解密的孤儿条目；
+   - 引擎数据目录（files/fluxdown：任务库、令牌、身份）与下载文件属于本机状态，不能被云端回灌或克隆；
+   - 偏好与密文同在一个 DataStore 文件，无法只保留外观偏好，故整体排除。
+   以后若新增确认可跨设备恢复的文件，用 <include> 精确放行。
+   Android 12+ 的对应规则见 data_extraction_rules.xml（两处必须保持一致）。
+-->
+<full-backup-content>
+    <exclude domain="root" path="." />
+    <exclude domain="file" path="." />
+    <exclude domain="database" path="." />
+    <exclude domain="sharedpref" path="." />
+    <exclude domain="external" path="." />
+    <exclude domain="device_root" path="." />
+    <exclude domain="device_file" path="." />
+    <exclude domain="device_database" path="." />
+    <exclude domain="device_sharedpref" path="." />
+</full-backup-content>

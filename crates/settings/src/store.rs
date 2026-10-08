@@ -11,7 +11,7 @@ use fluxdown_protocol::{
     ConnPolicySummaryDto, DaemonConfigPatch, DaemonConfigSnapshot, DaemonEvent,
     DiagnosticsReportDto, ErrorReason, GatewayPatchParams, GatewayStatusDto,
     PlatformIntegrationDto, PluginDto, QueueDto, RpcErrorData, ServiceEvent, SettingOwner,
-    ShellStatusDto, SiteAuthEntryDto, SyncStatusDto, SystemProxyDto, UpdateCheckResultDto,
+    ShellStatusDto, SiteAuthEntryDto, SyncStatusDto, SystemProxyDto, UpdateStatusDto,
     WebhookDeliveryDto, method, setting_spec, setting_value_kind, value_to_daemon_config,
 };
 use gpui::{Context, SharedString};
@@ -127,7 +127,7 @@ pub struct SettingsStore {
     site_auth: Vec<SiteAuthEntryDto>,
     conn_policy: Option<ConnPolicySummaryDto>,
     system_proxy: Option<SystemProxyDto>,
-    update_check: Option<UpdateCheckResultDto>,
+    update: UpdateStatusDto,
     busy: BTreeSet<&'static str>,
     /// 同一 `action` 下具体是哪个按钮发起的（如某条修复 / 某个站点）；随 `action` 完成清除。
     busy_tags: BTreeMap<&'static str, SharedString>,
@@ -177,7 +177,7 @@ impl SettingsStore {
             site_auth: Vec::new(),
             conn_policy: None,
             system_proxy: None,
-            update_check: None,
+            update: UpdateStatusDto::default(),
             busy: BTreeSet::new(),
             busy_tags: BTreeMap::new(),
             last_error: None,
@@ -193,10 +193,11 @@ impl SettingsStore {
     pub fn replace_snapshot(&mut self, snapshot: &AgentSnapshot, cx: &mut Context<Self>) {
         self.daemon.clone_from(&snapshot.daemon.config);
         self.gateway.clone_from(&snapshot.gateway);
-        self.gateway_token_stale = true;
+        self.reopen_load_gates();
         self.shell.clone_from(&snapshot.shell);
         self.preferences.clone_from(&snapshot.preferences);
         self.sync.clone_from(&snapshot.sync);
+        self.update.clone_from(&snapshot.update);
         self.queues.clone_from(&snapshot.daemon.queues);
         self.plugins.clone_from(&snapshot.daemon.plugins);
         self.components.clone_from(&snapshot.daemon.components);
@@ -206,11 +207,17 @@ impl SettingsStore {
         self.other_cloud_devices = other_device_count(&snapshot.cloud_devices);
         self.linked_devices = snapshot.linked_devices.len();
         self.daemon_connected = snapshot.daemon_connected;
-        self.stale = false;
-        self.load_attempts.clear();
         self.overlay_local_edits();
         self.last_error = None;
         cx.notify();
+    }
+
+    /// 连上 / 重连拿到全量快照：退出断线只读，并重新放行渲染期按需加载（系统集成状态、
+    /// 网关 token 等）。首次连接失败、断线期间失败过的读取都靠这里在恢复后重发。
+    fn reopen_load_gates(&mut self) {
+        self.stale = false;
+        self.load_attempts.clear();
+        self.gateway_token_stale = true;
     }
 
     /// 投递日志：增量按 deliveryId 合并；清空只由显式事件表达。
@@ -257,6 +264,7 @@ impl SettingsStore {
                 self.overlay_local_edits();
             }
             AgentEvent::SyncChanged(sync) => self.sync.clone_from(sync),
+            AgentEvent::UpdateChanged(update) => self.update.clone_from(update),
             AgentEvent::SessionChanged(session) => {
                 self.session.clone_from(session.as_ref());
                 if session.is_none() {
@@ -494,8 +502,8 @@ impl SettingsStore {
         self.system_proxy.as_ref()
     }
     #[must_use]
-    pub fn update_check(&self) -> Option<&UpdateCheckResultDto> {
-        self.update_check.as_ref()
+    pub fn update_status(&self) -> &UpdateStatusDto {
+        &self.update
     }
     #[must_use]
     pub fn transient(&self, key: &str) -> Option<&Value> {
@@ -506,10 +514,25 @@ impl SettingsStore {
     pub fn gateway_token_needs_reveal(&self) -> bool {
         self.gateway_token_stale || !self.transient.contains_key("gateway_user_token")
     }
+    /// 渲染期是否应发起 token 读取：断线只读时不发；失败后本轮不再重发（避免
+    /// 「失败 → notify → 重绘 → 再发」的循环），网关变化或重连 / 新快照后重新放行。
+    #[must_use]
+    pub fn should_reveal_gateway_token(&self) -> bool {
+        !self.stale
+            && !self.is_busy("gateway")
+            && !self.is_busy("gatewayToken")
+            && (self.gateway_token_stale
+                || (!self.transient.contains_key("gateway_user_token")
+                    && !self.load_attempts.contains("gatewayToken")))
+    }
     /// 按需加载的「本轮已尝试」闸门：渲染期调用，返回 true 表示本轮首次，调用方随后发起加载。
     /// 失败后不会在下一次重绘里重发，直到重连 / 新快照 / 重新打开设置窗口重置。
     pub fn begin_load(&mut self, key: &'static str) -> bool {
         self.load_attempts.insert(key)
+    }
+    /// 本轮是否已尝试过 `key` 的按需加载（只读，渲染期先判定再决定是否 `update`）。
+    pub fn load_attempted(&self, key: &'static str) -> bool {
+        self.load_attempts.contains(key)
     }
     /// 清除指定加载标记，使下次渲染重新加载（如设置窗口重新打开）。
     pub fn reset_load(&mut self, key: &'static str) {
@@ -669,6 +692,7 @@ impl SettingsStore {
     }
 
     /// 写入偏好。云同步目录内的键自动进入同步；其余键为设备本地。
+    /// `Value::Null` 是墓碑：agent 移除该偏好（同步键把删除同步给云端），不做值校验。
     pub fn set_pref(&mut self, key: &str, value: Value, cx: &mut Context<Self>) {
         if self.stale {
             self.set_error(SettingsErrorKind::Disconnected, "", cx);
@@ -676,7 +700,9 @@ impl SettingsStore {
         }
         let synced = preference_is_synced(key);
         if let Some(spec) = setting_spec(key) {
-            if let Err(error) = fluxdown_protocol::validate_value(spec.key, &value) {
+            if !value.is_null()
+                && let Err(error) = fluxdown_protocol::validate_value(spec.key, &value)
+            {
                 self.set_error(SettingsErrorKind::InvalidArgument, error, cx);
                 return;
             }
@@ -754,6 +780,7 @@ impl SettingsStore {
     /// 用户 token 只在本机 UI 按需读取，不进快照；结果放入 `transient("gateway_user_token")`。
     pub fn reveal_gateway_token(&mut self, cx: &mut Context<Self>) {
         self.gateway_token_stale = false;
+        self.load_attempts.insert("gatewayToken");
         self.call_with(
             "gatewayToken",
             method::AGENT_GATEWAY_REVEAL_TOKEN,
@@ -1010,19 +1037,42 @@ impl SettingsStore {
     }
 
     pub fn check_update(&mut self, channel: Option<String>, cx: &mut Context<Self>) {
-        self.call_with(
+        self.call_update(
             "update",
             method::AGENT_UPDATE_CHECK,
             json!({ "channel": channel }),
             cx,
-            |this, result, _| {
-                if let Ok(value) = result
-                    && let Ok(dto) = serde_json::from_value::<UpdateCheckResultDto>(value)
-                {
-                    this.update_check = Some(dto);
-                }
-            },
         );
+    }
+
+    /// 「更新并重启」：包未就绪时 agent 先下载再安装；成功后 agent 随即整体重启，连接会被
+    /// `service-quit` 关闭，这类 `Unavailable` 属预期，不当作错误展示。
+    pub fn install_update(&mut self, cx: &mut Context<Self>) {
+        self.call_update("updateInstall", method::AGENT_UPDATE_INSTALL, json!({}), cx);
+    }
+
+    pub fn cancel_update(&mut self, cx: &mut Context<Self>) {
+        self.call_update("updateCancel", method::AGENT_UPDATE_CANCEL, json!({}), cx);
+    }
+
+    fn call_update(
+        &mut self,
+        action: &'static str,
+        method: &'static str,
+        params: Value,
+        cx: &mut Context<Self>,
+    ) {
+        self.call_with(action, method, params, cx, |this, result, _| match result {
+            Ok(value) => {
+                if let Ok(dto) = serde_json::from_value::<UpdateStatusDto>(value) {
+                    this.update = dto;
+                }
+            }
+            Err(error) if error.code == ApplicationErrorCode::Unavailable => {
+                this.last_error = None;
+            }
+            Err(_) => {}
+        });
     }
 
     /// 退出前把尚未发送的编辑立即打成 RPC future 交给调用方等待（不再走防抖）。
@@ -1319,6 +1369,50 @@ mod tests {
         store.reset_load("connPolicy");
         assert!(store.begin_load("connPolicy"));
         assert!(!store.begin_load("siteAuth"));
+    }
+
+    /// 渲染期读取 token 失败后不得在下一次重绘里重发；断线时不发；网关变化后重新放行。
+    #[test]
+    fn gateway_token_reveal_does_not_loop_after_failure_or_while_stale() {
+        let mut store = SettingsStore::new(Arc::new(NullPort));
+        // 新建的 store 在首个快照前处于断线只读，不发起读取。
+        assert!(!store.should_reveal_gateway_token());
+        store.stale = false;
+        assert!(store.should_reveal_gateway_token());
+        // 模拟一次已发起但失败（没有写入 transient）的读取。
+        store.gateway_token_stale = false;
+        store.load_attempts.insert("gatewayToken");
+        assert!(!store.should_reveal_gateway_token());
+        // 网关变化（如重新生成 token）重新放行。
+        store.gateway_token_stale = true;
+        assert!(store.should_reveal_gateway_token());
+        store.stale = true;
+        assert!(!store.should_reveal_gateway_token());
+    }
+
+    /// 首次连接 agent 失败 → 连上后必须发起加载；连上后加载失败 → 本轮不重发；
+    /// 断线重连拿到新快照 → 再次放行。
+    #[test]
+    fn load_gates_reopen_after_first_connect_and_every_reconnect() {
+        let mut store = SettingsStore::new(Arc::new(NullPort));
+        // 首个快照前（含首次连接失败、广播 Stale）：只读，渲染期不发任何加载。
+        assert!(store.is_read_only());
+        assert!(!store.should_reveal_gateway_token());
+        store.reopen_load_gates();
+        assert!(!store.is_read_only());
+        assert!(!store.load_attempted("integration"));
+        assert!(store.should_reveal_gateway_token());
+        // 连上后两项读取都失败（busy 已清、未写入结果）：本轮不再重发。
+        assert!(store.begin_load("integration"));
+        store.gateway_token_stale = false;
+        store.load_attempts.insert("gatewayToken");
+        assert!(store.load_attempted("integration"));
+        assert!(!store.should_reveal_gateway_token());
+        // 断线（mark_stale 置只读）后重连：新快照重新放行。
+        store.stale = true;
+        store.reopen_load_gates();
+        assert!(!store.load_attempted("integration"));
+        assert!(store.should_reveal_gateway_token());
     }
 
     fn wire(store: &SettingsStore) -> Option<&str> {

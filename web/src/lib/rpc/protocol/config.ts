@@ -113,7 +113,7 @@ export interface Ed2kServerSubRefreshResponse {
 // ── 配置键目录（镜像 daemon_config.rs 的 DAEMON_CONFIG_FIELDS）──
 
 export const BT_SEED_TIME_UNITS = ['minutes', 'hours', 'days'] as const;
-export const FILE_EXISTS_BEHAVIORS = ['rename', 'overwrite', 'skip'] as const;
+export const FILE_EXISTS_BEHAVIORS = ['rename', 'overwrite', 'skip', 'ask'] as const;
 export const FILE_MISSING_ACTIONS = ['keep', 'delete'] as const;
 export const BT_SEED_LIMIT_OPERATORS = ['or', 'and'] as const;
 export const BT_SEED_THEN_ACTIONS = ['stop', 'delete', 'delete_files'] as const;
@@ -186,6 +186,7 @@ export const DAEMON_CONFIG_FIELDS: readonly DaemonConfigField[] = [
   text('default_queue_id'),
   readOnly('domain_conn_caps'),
   // BT
+  bool('bt_enabled', 'true'),
   bool('bt_enable_dht', 'true'),
   bool('bt_enable_upnp', 'true'),
   int('bt_port_start', '6881', 1, 65_535),

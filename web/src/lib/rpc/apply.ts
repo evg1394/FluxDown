@@ -305,6 +305,8 @@ export function applyAgentEvent(snapshot: AgentSnapshot, event: AgentEvent): Age
         : { ...snapshot, session: event.data }
     case 'syncChanged':
       return { ...snapshot, sync: event.data }
+    case 'updateChanged':
+      return { ...snapshot, update: event.data }
     case 'cloudConnectionChanged':
       return {
         ...snapshot,

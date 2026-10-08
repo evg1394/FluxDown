@@ -1,20 +1,30 @@
-//! 本机主题库在设置能力内的状态：app 启动时装入全部已导入主题并注册到主题 crate；
-//! 外观分区经此导入、删除与导出。
+//! 已导入主题库。唯一事实源是 agent 偏好 `appearance.custom_themes.<id>`（值为主题文件原文，
+//! 见 `fluxdown_protocol::custom_theme_key`），随配置同步在设备间逐主题同步。
 //!
-//! 文件存取经 [`ThemeLibrary`] 端口（app 以 `<data_dir>/themes/<id>.json` 实现），
-//! 这里只持有解析结果与卡片预览色。
+//! app 观察设置存储的偏好视图（含未回执的本地编辑）时调用 [`sync_theme_library`]，把这些偏好
+//! 解析并注册到主题 crate；外观分区的导入 / 删除只写偏好，注册与注销都由这条投影完成，
+//! 云端拉到的增删改与本机操作走同一路径。
 
-use std::{io, sync::Arc};
+use std::{
+    collections::BTreeMap,
+    io,
+    sync::Arc,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
+use fluxdown_protocol::{
+    MAX_CUSTOM_THEME_ID_LEN, custom_theme_fits_sync, custom_theme_id, custom_theme_key,
+};
 use fluxdown_ui_theme::{
     ACCENT_TOKEN_PATHS, BuiltinBase, BuiltinThemeId, ColorTokens, Diagnostic, DiagnosticKind,
     ResolveOptions, ThemeDocument, ThemeMode, ThemeParseError, ThemeSelection, TokenLayer,
     TokenValue, active_theme, color_hex, custom_theme, register_custom_theme, resolve,
     resolve_with, unregister_custom_theme,
 };
-use gpui::{App, Global, Hsla, SharedString};
+use gpui::{App, Context, Global, Hsla, SharedString};
+use serde_json::Value;
 
-use crate::port::ThemeLibrary;
+use crate::store::SettingsStore;
 
 /// 一个已导入并注册的主题。
 #[derive(Clone)]
@@ -84,53 +94,99 @@ pub(crate) fn theme_available_in(document: &ThemeDocument, mode: ThemeMode) -> b
     preset_mode.is_none() && !has_layer(other)
 }
 
+/// 一条主题偏好的投影：原文与解析结果（`None` = 无法解析；原文不变时不再重试）。
+struct LibraryEntry {
+    text: String,
+    theme: Option<ImportedTheme>,
+}
+
+#[derive(Default)]
 struct ThemeLibraryState {
-    library: Arc<dyn ThemeLibrary>,
-    themes: Vec<ImportedTheme>,
+    /// 库内 id → 投影，按 id 升序。
+    entries: BTreeMap<String, LibraryEntry>,
 }
 
 impl Global for ThemeLibraryState {}
 
-/// 装配主题库：读取、解析并注册库内全部主题（之后应用的 `custom:<id>` 偏好即可命中；
-/// 找不到的 id 由主题 crate 回退到该槽位的内置默认主题）。返回无法加载的条目说明，
-/// 由调用方记录；单个文件失败不影响其余。
-pub fn install_theme_library(library: Arc<dyn ThemeLibrary>, cx: &mut App) -> Vec<String> {
-    let mut failures = Vec::new();
-    let infos = library.list().unwrap_or_else(|error| {
-        failures.push(format!("theme library: {error}"));
-        Vec::new()
+/// 一次投影需要对主题 crate 做的注册变化。
+#[derive(Default)]
+struct LibraryChanges {
+    unregister: Vec<String>,
+    register: Vec<ImportedTheme>,
+    failures: Vec<String>,
+}
+
+/// 偏好视图 → 已注册主题：只解析原文变化的条目，删掉偏好里已不存在（或被写成墓碑）的条目。
+/// 须在应用外观偏好之前调用，`custom:<id>` 选择才能直接命中；找不到的 id 由主题 crate
+/// 回退到该槽位的内置默认主题。返回无法解析的条目说明，由调用方记录。
+pub fn sync_theme_library(preferences: &BTreeMap<String, Value>, cx: &mut App) -> Vec<String> {
+    let changes = reconcile(
+        &mut cx.default_global::<ThemeLibraryState>().entries,
+        preferences,
+    );
+    for id in &changes.unregister {
+        unregister_custom_theme(id, cx);
+    }
+    for theme in changes.register {
+        register_custom_theme(theme.id, theme.document, cx);
+    }
+    changes.failures
+}
+
+fn reconcile(
+    entries: &mut BTreeMap<String, LibraryEntry>,
+    preferences: &BTreeMap<String, Value>,
+) -> LibraryChanges {
+    let desired = preferences
+        .iter()
+        .filter_map(|(key, value)| Some((custom_theme_id(key)?, value.as_str()?)))
+        .collect::<BTreeMap<_, _>>();
+    let mut changes = LibraryChanges::default();
+    entries.retain(|id, _| {
+        let keep = desired.contains_key(id);
+        if !keep {
+            changes.unregister.push(id.clone());
+        }
+        keep
     });
-    let mut themes = Vec::with_capacity(infos.len());
-    for info in infos {
-        let stored = match library.load(&info.id) {
-            Ok(stored) => stored,
+    for (id, text) in desired {
+        if entries.get(&id).is_some_and(|entry| entry.text == text) {
+            continue;
+        }
+        let theme = match ThemeDocument::parse(text) {
+            Ok((document, _)) => {
+                let theme = ImportedTheme::new(id.clone(), document);
+                changes.register.push(theme.clone());
+                Some(theme)
+            }
             Err(error) => {
-                failures.push(format!("{}: {error}", info.id));
-                continue;
+                changes.failures.push(format!("{id}: {error}"));
+                // 原文变成了无法解析的内容：旧版本也不再代表库内状态。
+                changes.unregister.push(id.clone());
+                None
             }
         };
-        match ThemeDocument::parse(&stored.text) {
-            Ok((document, _)) => themes.push(ImportedTheme::new(info.id, document)),
-            Err(error) => failures.push(format!("{}: {error}", info.id)),
-        }
+        entries.insert(
+            id,
+            LibraryEntry {
+                text: text.to_owned(),
+                theme,
+            },
+        );
     }
-    for theme in &themes {
-        register_custom_theme(theme.id.clone(), Arc::clone(&theme.document), cx);
-    }
-    cx.set_global(ThemeLibraryState { library, themes });
-    failures
+    changes
 }
 
-/// 主题库端口；app 未装配时为 `None`（导入 / 删除不可用）。
-pub(crate) fn library(cx: &App) -> Option<Arc<dyn ThemeLibrary>> {
-    cx.try_global::<ThemeLibraryState>()
-        .map(|state| Arc::clone(&state.library))
-}
-
-/// 已导入的主题（库内 id 升序，本次运行新导入的追加在后）。
+/// 已导入的主题（库内 id 升序）。
 pub(crate) fn imported_themes(cx: &App) -> Vec<ImportedTheme> {
     cx.try_global::<ThemeLibraryState>()
-        .map(|state| state.themes.clone())
+        .map(|state| {
+            state
+                .entries
+                .values()
+                .filter_map(|entry| entry.theme.clone())
+                .collect()
+        })
         .unwrap_or_default()
 }
 
@@ -139,7 +195,10 @@ pub(crate) fn imported_themes(cx: &App) -> Vec<ImportedTheme> {
 pub(crate) enum ImportError {
     Read(io::Error),
     Parse(ThemeParseError),
-    Save(io::Error),
+    /// 原文超过同步值上限（`fluxdown_protocol::MAX_SYNC_VALUE_BYTES`）。
+    TooLarge,
+    /// 本机服务未连接，偏好只读。
+    Unavailable,
 }
 
 impl ImportError {
@@ -150,62 +209,127 @@ impl ImportError {
             Self::Parse(ThemeParseError::InvalidJson(_)) => "themeImportInvalidJson",
             Self::Parse(ThemeParseError::NotAnObject) => "themeImportNotObject",
             Self::Parse(ThemeParseError::UnsupportedFormat(_)) => "themeImportUnsupportedFormat",
-            Self::Save(_) => "themeImportSaveFailed",
+            Self::TooLarge => "themeImportTooLarge",
+            Self::Unavailable => "themeImportSaveFailed",
         }
     }
 
-    /// 系统错误详情（读写失败时）；解析错误的原因已由文案键表达。
+    /// 系统错误详情（读文件失败时）；其余原因已由文案键表达。
     pub(crate) fn io_detail(&self) -> Option<&io::Error> {
         match self {
-            Self::Read(error) | Self::Save(error) => Some(error),
-            Self::Parse(_) => None,
+            Self::Read(error) => Some(error),
+            Self::Parse(_) | Self::TooLarge | Self::Unavailable => None,
         }
     }
 }
 
-/// 一次成功的导入：已保存到库，尚未注册（注册须在主线程经 [`register_imported`]）。
-pub(crate) struct ImportOutcome {
-    pub theme: ImportedTheme,
+/// 解析通过、尚未入库的导入。
+pub(crate) struct ParsedImport {
+    text: String,
+    preferred_id: Option<String>,
     pub diagnostics: Vec<Diagnostic>,
 }
 
-/// 解析（含 v1 / Flutter 格式）并把原文原样存入库；可在后台线程执行。
-pub(crate) fn import_text(
-    library: &dyn ThemeLibrary,
-    text: &str,
-) -> Result<ImportOutcome, ImportError> {
-    let (document, diagnostics) = ThemeDocument::parse(text).map_err(ImportError::Parse)?;
-    let preferred = document.meta.as_ref().and_then(|meta| meta.id.as_deref());
-    let id = library.save(text, preferred).map_err(ImportError::Save)?;
-    Ok(ImportOutcome {
-        theme: ImportedTheme::new(id, document),
+/// 解析（含 v1 / Flutter 格式）并确认原文可作为同步值保存；可在后台线程执行。
+pub(crate) fn parse_import(text: String) -> Result<ParsedImport, ImportError> {
+    let (document, diagnostics) = ThemeDocument::parse(&text).map_err(ImportError::Parse)?;
+    if !custom_theme_fits_sync(&text) {
+        return Err(ImportError::TooLarge);
+    }
+    let preferred_id = document.meta.and_then(|meta| meta.id);
+    Ok(ParsedImport {
+        text,
+        preferred_id,
         diagnostics,
     })
 }
 
-/// 注册新导入的主题并加入列表（同 id 替换）。
-pub(crate) fn register_imported(theme: ImportedTheme, cx: &mut App) {
-    register_custom_theme(theme.id.clone(), Arc::clone(&theme.document), cx);
-    if cx.has_global::<ThemeLibraryState>() {
-        let themes = &mut cx.global_mut::<ThemeLibraryState>().themes;
-        themes.retain(|existing| existing.id != theme.id);
-        themes.push(theme);
+/// 分配库内 id（`meta.id` 清洗后可用则取之，否则按时间戳生成；与已有主题冲突时加数字后缀，
+/// 从不覆盖），把原文原样写入该主题的偏好键；注册由偏好投影完成。返回分配的 id。
+pub(crate) fn store_import(
+    import: ParsedImport,
+    store: &mut SettingsStore,
+    cx: &mut Context<SettingsStore>,
+) -> Result<String, ImportError> {
+    if store.is_read_only() {
+        return Err(ImportError::Unavailable);
     }
+    let (id, key) = allocate_theme_key(import.preferred_id.as_deref(), |key| {
+        store.pref(key).is_some_and(|value| !value.is_null())
+    })
+    .ok_or(ImportError::Unavailable)?;
+    store.set_pref(&key, Value::String(import.text), cx);
+    Ok(id)
 }
 
-/// 从库中删除并注销。调用方应先把引用该 id 的槽位改回内置主题并写偏好。
-pub(crate) fn delete_theme(id: &str, cx: &mut App) -> io::Result<()> {
-    let Some(library) = library(cx) else {
-        return Ok(());
+/// 从库中删除：写墓碑（JSON null），经同步链路传到其他设备；注销由偏好投影完成。
+/// 调用方负责把引用该 id 的槽位改回内置主题。本机服务未连接时返回 `false`。
+pub(crate) fn delete_theme(
+    id: &str,
+    store: &mut SettingsStore,
+    cx: &mut Context<SettingsStore>,
+) -> bool {
+    let Some(key) = custom_theme_key(id) else {
+        return false;
     };
-    library.delete(id)?;
-    if cx.has_global::<ThemeLibraryState>() {
-        cx.global_mut::<ThemeLibraryState>()
-            .themes
-            .retain(|theme| theme.id.as_ref() != id);
+    if store.is_read_only() {
+        return false;
     }
-    unregister_custom_theme(id, cx);
-    Ok(())
+    store.set_pref(&key, Value::Null, cx);
+    true
+}
+
+/// 第一个未被占用的 `(id, 偏好键)`；`taken` 按偏好键判定。
+fn allocate_theme_key(
+    preferred: Option<&str>,
+    taken: impl Fn(&str) -> bool,
+) -> Option<(String, String)> {
+    let base = preferred.and_then(sanitize_id).unwrap_or_else(timestamp_id);
+    (1..=u32::MAX).find_map(|suffix| {
+        let id = if suffix == 1 {
+            base.clone()
+        } else {
+            suffixed_id(&base, suffix)
+        };
+        let key = custom_theme_key(&id)?;
+        (!taken(&key)).then_some((id, key))
+    })
+}
+
+/// `meta.id` → 库 id：小写，`[a-z0-9_]` 之外的字符折叠为单个 `-`，去掉首尾 `-`，
+/// 截断到 [`MAX_CUSTOM_THEME_ID_LEN`]；清洗后为空则 `None`。结果总是规范 id
+/// （`fluxdown_protocol::is_custom_theme_id`）。
+fn sanitize_id(raw: &str) -> Option<String> {
+    let mut id = String::with_capacity(raw.len().min(MAX_CUSTOM_THEME_ID_LEN));
+    for ch in raw.chars().flat_map(char::to_lowercase) {
+        if id.len() >= MAX_CUSTOM_THEME_ID_LEN {
+            break;
+        }
+        if ch.is_ascii_alphanumeric() || ch == '_' {
+            id.push(ch);
+        } else if !id.is_empty() && !id.ends_with('-') {
+            id.push('-');
+        }
+    }
+    let id = id.trim_end_matches('-');
+    (!id.is_empty()).then(|| id.to_owned())
+}
+
+/// `<base>-<suffix>`：先截断 `base` 给后缀留出空间（去掉截断后尾部的 `-`），
+/// 结果仍满足 `sanitize_id(id) == id`。
+fn suffixed_id(base: &str, suffix: u32) -> String {
+    let suffix = format!("-{suffix}");
+    // base 已清洗，全为 ASCII，按字节截断不会切到字符中间。
+    let keep = base.len().min(MAX_CUSTOM_THEME_ID_LEN - suffix.len());
+    let head = base[..keep].trim_end_matches('-');
+    format!("{head}{suffix}")
+}
+
+fn timestamp_id() -> String {
+    let millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_millis());
+    format!("theme-{millis}")
 }
 
 /// 诊断汇总的展示顺序与文案键。
@@ -292,63 +416,31 @@ pub(crate) fn export_file_name(document: &ThemeDocument) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::BTreeMap, sync::Mutex};
-
+    use fluxdown_protocol::{MAX_SYNC_VALUE_BYTES, is_custom_theme_id};
     use fluxdown_ui_theme::{ExportMode, argb_color, resolve};
 
     use super::*;
-    use crate::port::{StoredTheme, ThemeInfo};
-
-    /// 内存主题库：id 取 `preferred_id` 或 `theme`，冲突加 `-N`。
-    #[derive(Default)]
-    struct MemoryLibrary(Mutex<BTreeMap<String, String>>);
-
-    impl ThemeLibrary for MemoryLibrary {
-        fn list(&self) -> io::Result<Vec<ThemeInfo>> {
-            let themes = self.0.lock().map_err(|_| io::ErrorKind::Other)?;
-            Ok(themes
-                .keys()
-                .map(|id| ThemeInfo {
-                    id: id.clone(),
-                    modified: None,
-                })
-                .collect())
-        }
-
-        fn load(&self, id: &str) -> io::Result<StoredTheme> {
-            let themes = self.0.lock().map_err(|_| io::ErrorKind::Other)?;
-            let text = themes.get(id).cloned().ok_or(io::ErrorKind::NotFound)?;
-            Ok(StoredTheme {
-                info: ThemeInfo {
-                    id: id.to_owned(),
-                    modified: None,
-                },
-                text,
-            })
-        }
-
-        fn save(&self, text: &str, preferred_id: Option<&str>) -> io::Result<String> {
-            let mut themes = self.0.lock().map_err(|_| io::ErrorKind::Other)?;
-            let base = preferred_id.unwrap_or("theme").to_owned();
-            let mut id = base.clone();
-            let mut n = 2;
-            while themes.contains_key(&id) {
-                id = format!("{base}-{n}");
-                n += 1;
-            }
-            themes.insert(id.clone(), text.to_owned());
-            Ok(id)
-        }
-
-        fn delete(&self, id: &str) -> io::Result<()> {
-            let mut themes = self.0.lock().map_err(|_| io::ErrorKind::Other)?;
-            themes.remove(id);
-            Ok(())
-        }
-    }
 
     fn document(json: &str) -> Result<ThemeDocument, ThemeParseError> {
         ThemeDocument::parse(json).map(|(doc, _)| doc)
+    }
+
+    fn prefs(entries: &[(&str, Value)]) -> BTreeMap<String, Value> {
+        entries
+            .iter()
+            .map(|(id, value)| {
+                let key = custom_theme_key(id).unwrap_or_else(|| panic!("canonical id {id}"));
+                (key, value.clone())
+            })
+            .collect()
+    }
+
+    fn registered(changes: &LibraryChanges) -> Vec<&str> {
+        changes
+            .register
+            .iter()
+            .map(|theme| theme.id.as_ref())
+            .collect()
     }
 
     #[test]
@@ -375,47 +467,87 @@ mod tests {
         Ok(())
     }
 
+    /// 投影只解析变化的原文；删除、墓碑与非主题键都不留下注册。
     #[test]
-    fn flutter_theme_imports_into_its_appearance_slot() -> Result<(), Box<dyn std::error::Error>> {
-        let library = MemoryLibrary::default();
+    fn reconcile_registers_changes_and_drops_removed_or_tombstoned_themes() {
+        let ocean = Value::String(r#"{"meta":{"name":"Ocean"}}"#.to_owned());
+        let nord = Value::String(r#"{"extends":"builtin:nord"}"#.to_owned());
+        let mut entries = BTreeMap::new();
+
+        let mut values = prefs(&[("ocean", ocean.clone()), ("nord-square", nord.clone())]);
+        values.insert("appearance.theme_mode".to_owned(), Value::from("dark"));
+        let changes = reconcile(&mut entries, &values);
+        assert_eq!(registered(&changes), ["nord-square", "ocean"]);
+        assert!(changes.unregister.is_empty() && changes.failures.is_empty());
+        assert_eq!(changes.register[1].name.as_ref(), "Ocean");
+
+        // 原文不变：不重新解析、不重复注册。
+        let changes = reconcile(&mut entries, &values);
+        assert!(changes.register.is_empty() && changes.unregister.is_empty());
+
+        // 云端改了 ocean、删了 nord-square（本机写墓碑时偏好视图里是 null）。
+        let ocean_v2 = Value::String(r#"{"meta":{"name":"Ocean 2"}}"#.to_owned());
+        let changes = reconcile(
+            &mut entries,
+            &prefs(&[("ocean", ocean_v2), ("nord-square", Value::Null)]),
+        );
+        assert_eq!(registered(&changes), ["ocean"]);
+        assert_eq!(changes.register[0].name.as_ref(), "Ocean 2");
+        assert_eq!(changes.unregister, ["nord-square"]);
+        assert_eq!(entries.keys().collect::<Vec<_>>(), ["ocean"]);
+    }
+
+    #[test]
+    fn unparseable_synced_theme_is_reported_once_and_not_registered() {
+        let mut entries = BTreeMap::new();
+        let broken = prefs(&[("ocean", Value::String("[1]".to_owned()))]);
+        let changes = reconcile(&mut entries, &broken);
+        assert!(changes.register.is_empty());
+        assert_eq!(changes.unregister, ["ocean"]);
+        assert_eq!(changes.failures.len(), 1);
+        assert!(entries["ocean"].theme.is_none());
+        let again = reconcile(&mut entries, &broken);
+        assert!(again.failures.is_empty(), "same text is not re-parsed");
+    }
+
+    #[test]
+    fn flutter_theme_parses_into_its_appearance_slot() -> Result<(), Box<dyn std::error::Error>> {
         let flutter =
             r#"{"name":"Ocean","appearance":"light","colors":{"accent":{"color":"FF0EA5E9"}}}"#;
-        let outcome = import_text(&library, flutter).map_err(|error| format!("{error:?}"))?;
-        assert!(outcome.theme.available_in(ThemeMode::Light));
-        assert!(!outcome.theme.available_in(ThemeMode::Dark));
-        assert_eq!(outcome.theme.name.as_ref(), "Ocean");
+        let parsed = parse_import(flutter.to_owned()).map_err(|error| format!("{error:?}"))?;
         assert_eq!(
-            diagnostic_counts(&outcome.diagnostics),
+            diagnostic_counts(&parsed.diagnostics),
             vec![("themeDiagMigrated", 1)]
         );
-        // 原文原样入库（不是转换后的文件）。
-        assert_eq!(library.load(&outcome.theme.id)?.text, flutter);
+        // 原文原样入库（不是转换后的文件），投影后按原文解析出亮色主题。
+        assert_eq!(parsed.text, flutter);
+        let mut entries = BTreeMap::new();
+        let changes = reconcile(&mut entries, &prefs(&[("ocean", Value::from(parsed.text))]));
+        let theme = &changes.register[0];
+        assert!(theme.available_in(ThemeMode::Light));
+        assert!(!theme.available_in(ThemeMode::Dark));
+        assert_eq!(theme.name.as_ref(), "Ocean");
         Ok(())
     }
 
     #[test]
-    fn import_reload_round_trip_keeps_unknown_keys_and_suffixes_conflicts()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let library = MemoryLibrary::default();
+    fn stored_text_round_trips_unknown_keys() -> Result<(), Box<dyn std::error::Error>> {
         let text = r##"{
           "format": "fluxdown.gpui-theme",
           "schemaVersion": 2,
-          "meta": { "id": "ocean", "name": "Ocean", "x-origin": "gallery" },
+          "meta": { "id": "Ocean", "name": "Ocean", "x-origin": "gallery" },
           "x-top": { "keep": true },
           "dark": { "colors": { "primary": "#0ea5e9", "x-glow": "#ffffff" } }
         }"##;
-        let first = import_text(&library, text).map_err(|error| format!("{error:?}"))?;
-        let second = import_text(&library, text).map_err(|error| format!("{error:?}"))?;
-        assert_eq!(first.theme.id.as_ref(), "ocean");
-        assert_eq!(second.theme.id.as_ref(), "ocean-2");
-        let counts = diagnostic_counts(&first.diagnostics);
-        assert_eq!(counts.len(), 1);
-        assert_eq!(counts[0].0, "themeDiagUnknownKey");
-
-        let reloaded = library.load("ocean")?;
-        let (document, _) = ThemeDocument::parse(&reloaded.text)?;
-        let exported: serde_json::Value =
-            serde_json::from_str(&document.to_json_pretty(ExportMode::Diff))?;
+        let parsed = parse_import(text.to_owned()).map_err(|error| format!("{error:?}"))?;
+        assert_eq!(parsed.preferred_id.as_deref(), Some("Ocean"));
+        let kinds = diagnostic_counts(&parsed.diagnostics)
+            .into_iter()
+            .map(|(key, _)| key)
+            .collect::<Vec<_>>();
+        assert_eq!(kinds, ["themeDiagUnknownKey"]);
+        let (document, _) = ThemeDocument::parse(&parsed.text)?;
+        let exported: Value = serde_json::from_str(&document.to_json_pretty(ExportMode::Diff))?;
         assert_eq!(exported["x-top"]["keep"], true);
         assert_eq!(exported["meta"]["x-origin"], "gallery");
         assert_eq!(exported["dark"]["colors"]["x-glow"], "#ffffff");
@@ -423,18 +555,57 @@ mod tests {
     }
 
     #[test]
-    fn unparseable_import_is_not_saved() -> Result<(), Box<dyn std::error::Error>> {
-        let library = MemoryLibrary::default();
-        let error = import_text(&library, "[1, 2]")
-            .err()
-            .ok_or("expected an error")?;
-        assert_eq!(error.i18n_key(), "themeImportNotObject");
-        let error = import_text(&library, "{")
-            .err()
-            .ok_or("expected an error")?;
-        assert_eq!(error.i18n_key(), "themeImportInvalidJson");
-        assert!(library.list()?.is_empty());
-        Ok(())
+    fn unusable_imports_are_rejected_before_reaching_preferences() {
+        let reason = |text: &str| {
+            parse_import(text.to_owned())
+                .err()
+                .map(|error| error.i18n_key())
+        };
+        assert_eq!(reason("[1, 2]"), Some("themeImportNotObject"));
+        assert_eq!(reason("{"), Some("themeImportInvalidJson"));
+        let huge = format!(r#"{{"x-pad":"{}"}}"#, "x".repeat(MAX_SYNC_VALUE_BYTES));
+        assert_eq!(reason(&huge), Some("themeImportTooLarge"));
+    }
+
+    #[test]
+    fn allocated_ids_suffix_conflicts_and_stay_canonical() {
+        let taken = |ids: &[&str]| {
+            let keys = ids
+                .iter()
+                .filter_map(|id| custom_theme_key(id))
+                .collect::<Vec<_>>();
+            move |key: &str| keys.iter().any(|taken| taken == key)
+        };
+        let allocate =
+            |preferred, ids: &[&str]| allocate_theme_key(preferred, taken(ids)).map(|(id, _)| id);
+        assert_eq!(allocate(Some("Ocean"), &[]).as_deref(), Some("ocean"));
+        assert_eq!(
+            allocate(Some("Ocean"), &["ocean"]).as_deref(),
+            Some("ocean-2")
+        );
+        assert_eq!(
+            allocate(Some("ocean"), &["ocean", "ocean-2"]).as_deref(),
+            Some("ocean-3")
+        );
+        // 第 62 位是 `-`：给 `-2` 截断到 62 字符后必须去掉尾部 `-`，避免 `--2`。
+        let preferred = format!("{}-bb", "a".repeat(61));
+        assert_eq!(preferred.len(), MAX_CUSTOM_THEME_ID_LEN);
+        let suffixed = allocate(Some(&preferred), &[&preferred]).unwrap_or_default();
+        assert_eq!(suffixed, format!("{}-2", "a".repeat(61)));
+        for preferred in [None, Some("  "), Some("../../")] {
+            let id = allocate(preferred, &[]).unwrap_or_default();
+            assert!(id.starts_with("theme-"), "{preferred:?} → {id}");
+        }
+        for raw in [
+            "../../etc/passwd",
+            "Nord  Square!",
+            "Ünïcode Theme",
+            &"x".repeat(100),
+        ] {
+            let id = sanitize_id(raw).unwrap_or_default();
+            assert!(is_custom_theme_id(&id), "{raw} → {id}");
+        }
+        assert_eq!(sanitize_id("Nord  Square!").as_deref(), Some("nord-square"));
     }
 
     #[test]

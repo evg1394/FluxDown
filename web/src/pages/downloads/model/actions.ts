@@ -1,10 +1,11 @@
 // 下载页命令：对应 GPUI 的 DownloadsCommand（downloads_port.rs），全部走 agent /rpc。
 // 本地任务 → `daemon.*`；远程任务 → `agent.remote.command`。失败统一 toast。
-// 桌面专属的「打开文件 / 在文件夹中显示」在 Web 里替换为浏览器下载已完成文件。
+// 「打开文件 / 在文件夹中显示」只在连接带 `agent.openTaskFiles` 能力（agent 与浏览器同机）时提供，
+// 其余情况由浏览器下载已完成文件替代。
 
 import { copyText } from '../../../lib/copy'
 import { t } from '../../../i18n'
-import { downloadTaskFile, rpc } from '../../../lib/rpc'
+import { CAPABILITY_AGENT_OPEN_TASK_FILES, RpcError, downloadTaskFile, rpc, rpcStore } from '../../../lib/rpc'
 import type { CreateTaskRequest, RemoteCommandParams } from '../../../lib/rpc'
 import { confirmDialog, toast } from '../../../ui'
 import { toastRpcError } from '../../../lib/rpcToast'
@@ -170,6 +171,32 @@ export function downloadViewsFiles(views: readonly DownloadTaskView[]): void {
     setTimeout(() => downloadTaskFile(view.taskId), index * 400)
   })
 }
+
+/**
+ * 本连接能否在 agent 所在主机上打开 / 定位任务产物：agent 按连接在 `system.hello` 下发
+ * `agent.openTaskFiles`（桌面宿主、headless server 的字面本机来源或运维显式放行）。
+ * 菜单在打开时构建，读最新握手结果即可，重连后自动跟随新连接。
+ */
+const hostOpensTaskFiles = (): boolean =>
+  rpcStore.peek().hello?.capabilities.includes(CAPABILITY_AGENT_OPEN_TASK_FILES) ?? false
+
+/** 「打开文件」：本地已完成且文件仍在磁盘上。 */
+export const canOpenTaskFile = (view: DownloadTaskView): boolean => hostOpensTaskFiles() && isDownloadable(view)
+
+/** 「在文件夹中显示」：任意本地任务（对齐 GPUI：未完成或文件缺失时定位临时文件 / 保存目录）。 */
+export const canRevealTaskFile = (view: DownloadTaskView): boolean => hostOpensTaskFiles() && view.source === 'local'
+
+/** 打开失败且文件已不在：立即重扫，让行上的丢失标记跟上磁盘现状（对齐 GPUI `rescan_files_now`）。 */
+export async function openTaskFile(taskId: string): Promise<void> {
+  try {
+    await rpc.agent.platform.openTask({ taskId })
+  } catch (error) {
+    if (error instanceof RpcError && error.is('notFound')) rpc.daemon.task.rescan().catch(() => {})
+    toastRpcError(error)
+  }
+}
+
+export const revealTaskFile = (taskId: string) => guarded(() => rpc.agent.platform.revealTask({ taskId }))
 
 // ── 任务组 ──
 

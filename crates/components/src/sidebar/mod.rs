@@ -68,6 +68,14 @@ impl SidebarState {
         self.available
     }
 
+    /// [`Self::set_available`] + [`Self::set_layout`] 投影这组值是否会改变状态。
+    ///
+    /// 宿主在渲染期投影偏好时先用它判定，未变化就不 `update`，避免其他读者被标记重建。
+    pub fn needs_projection(&self, available: bool, width: Pixels, collapsed: bool) -> bool {
+        let width = width.clamp(self.width_range.start, self.width_range.end);
+        self.available != available || self.width != width || self.collapsed != collapsed
+    }
+
     /// 投影已保存的布局，不发出用户修改事件，避免偏好回流形成写入循环。
     pub fn set_layout(&mut self, width: Pixels, collapsed: bool, cx: &mut Context<Self>) {
         let width = width.clamp(self.width_range.start, self.width_range.end);
@@ -142,35 +150,32 @@ impl SidebarPanel {
         window: &mut Window,
         cx: &mut App,
     ) -> Self {
-        let (split, width, width_range, amount) = state.update(cx, |state, cx| {
-            let now = Instant::now();
-            let open = state.available && !state.collapsed;
-            let motion = state
-                .motion
-                .get_or_insert_with(|| SidebarMotion::settled(open));
-            motion.retarget(open, now, state.available && !cx.reduce_motion());
-            let amount = motion.amount(now);
-            if motion.is_animating(now) {
-                window.request_animation_frame();
-            }
-            if amount == 1.
-                && !state.split_initialized
-                && state
-                    .split
-                    .read(cx)
-                    .sizes()
-                    .get(1)
-                    .is_some_and(|size| *size > px(1.))
-            {
-                state.split.update(cx, |split, cx| split.reset_panel(1, cx));
-                state.split_initialized = true;
-            }
-            (
-                state.split.clone(),
-                state.width,
-                state.width_range.clone(),
-                amount,
-            )
+        let now = Instant::now();
+        // 状态无需变化时只读不写：gpui-fast 把渲染期的 entity 写入记为外部修改，
+        // 每帧 `update` 会让 shell 顶栏等其他读者每帧重建。
+        let sampled = Self::sample(state, now, window, cx);
+        let (split, width, width_range, amount) = sampled.unwrap_or_else(|| {
+            state.update(cx, |state, cx| {
+                let open = state.available && !state.collapsed;
+                let motion = state
+                    .motion
+                    .get_or_insert_with(|| SidebarMotion::settled(open));
+                motion.retarget(open, now, state.available && !cx.reduce_motion());
+                let amount = motion.amount(now);
+                if motion.is_animating(now) {
+                    window.request_animation_frame();
+                }
+                if amount == 1. && !state.split_initialized && Self::split_has_content(state, cx) {
+                    state.split.update(cx, |split, cx| split.reset_panel(1, cx));
+                    state.split_initialized = true;
+                }
+                (
+                    state.split.clone(),
+                    state.width,
+                    state.width_range.clone(),
+                    amount,
+                )
+            })
         });
         Self {
             id: id.into(),
@@ -182,6 +187,43 @@ impl SidebarPanel {
             sidebar: None,
             content: content.into_any_element(),
         }
+    }
+
+    /// 只读采样；需要改写动画 / 分栏状态时返回 `None`，由调用方走 `update`。
+    fn sample(
+        state: &Entity<SidebarState>,
+        now: Instant,
+        window: &mut Window,
+        cx: &App,
+    ) -> Option<(Entity<ResizableState>, Pixels, Range<Pixels>, f32)> {
+        let state = state.read(cx);
+        let open = state.available && !state.collapsed;
+        let motion = state.motion.as_ref()?;
+        if motion.needs_retarget(open, state.available && !cx.reduce_motion()) {
+            return None;
+        }
+        let amount = motion.amount(now);
+        if amount == 1. && !state.split_initialized && Self::split_has_content(state, cx) {
+            return None;
+        }
+        if motion.is_animating(now) {
+            window.request_animation_frame();
+        }
+        Some((
+            state.split.clone(),
+            state.width,
+            state.width_range.clone(),
+            amount,
+        ))
+    }
+
+    fn split_has_content(state: &SidebarState, cx: &App) -> bool {
+        state
+            .split
+            .read(cx)
+            .sizes()
+            .get(1)
+            .is_some_and(|size| *size > px(1.))
     }
 
     /// 动画尚未完全收起时仍需要侧栏内容，以完成淡出。

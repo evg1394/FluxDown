@@ -6,13 +6,14 @@
 //! **不使用 [`url::Url::parse`]**：`|` 是 WHATWG opaque-host 禁止字符，
 //! ed2k 链接会解析失败或产生垃圾 host。按 `|` 手工分段是唯一正确做法。
 
-use crate::downloader::{DownloadError, decode_bytes_utf8_or_gbk, sanitize_filename};
+use crate::downloader::DownloadError;
 use crate::ed2k::hash::MAX_FILE_SIZE;
+use crate::naming::{NameHints, decode_legacy_bytes, sanitize_filename};
 
 /// 一条已解析的 `ed2k://|file|...` 链接的核心字段。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Ed2kLink {
-    /// 经 percent-decode + GBK 回退 + 文件名净化后的展示文件名。
+    /// 经 percent-decode + 旧式字节解码（GBK/Big5/…）+ 文件名净化后的展示文件名。
     pub file_name: String,
     /// 文件总字节数。
     pub total_bytes: u64,
@@ -121,9 +122,7 @@ pub fn parse_ed2k_link(url: &str) -> Result<Ed2kLink, DownloadError> {
     if raw_name.is_empty() {
         return Err(DownloadError::Ed2k("ed2k link has empty file name".into()));
     }
-    let decoded_bytes = percent_decode_bytes(raw_name);
-    let name_str = decode_bytes_utf8_or_gbk(&decoded_bytes)
-        .map_err(|e| DownloadError::Ed2k(format!("ed2k file name decode failed: {e}")))?;
+    let name_str = decode_legacy_bytes(&percent_decode_bytes(raw_name), NameHints::default());
     let file_name = sanitize_filename(&name_str);
     if file_name.is_empty() {
         return Err(DownloadError::Ed2k(

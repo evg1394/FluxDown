@@ -17,6 +17,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::daemon_client::{DaemonClient, DaemonClientConfig};
 use crate::supervisor::DaemonSupervisor;
+use fluxdown_protocol::{CLOSE_REASON_SERVICE_QUIT, CLOSE_REASON_SERVICE_RESTART};
 
 /// 等 daemon 收尾（actor 关停、日志 flush）并释放 `daemon.lock` 的上限。
 const DAEMON_EXIT_BUDGET: Duration = Duration::from_secs(20);
@@ -26,6 +27,7 @@ const DAEMON_SHUTDOWN_CALL_BUDGET: Duration = Duration::from_secs(5);
 pub struct Lifecycle {
     cancel: CancellationToken,
     quit_requested: AtomicBool,
+    restart_requested: AtomicBool,
     daemon: Arc<DaemonClient>,
     supervisor: Arc<DaemonSupervisor>,
     daemon_data_dir: PathBuf,
@@ -43,6 +45,7 @@ impl Lifecycle {
         Self {
             cancel,
             quit_requested: AtomicBool::new(false),
+            restart_requested: AtomicBool::new(false),
             daemon,
             supervisor,
             daemon_data_dir,
@@ -72,6 +75,31 @@ impl Lifecycle {
         tokio::spawn(async move {
             lifecycle.run_quit().await;
         });
+    }
+
+    /// 应用更新后的完全退出：流程与 [`Self::request_quit`] 相同，另外标记为重启——
+    /// agent 运行期结束后由 `update::restart::run_pending` 重新拉起程序。幂等，立即返回。
+    pub fn request_restart(self: &Arc<Self>) {
+        self.restart_requested.store(true, Ordering::Release);
+        self.request_quit();
+    }
+
+    /// UI 连接在 agent 退出时的 WebSocket 关闭原因。
+    ///
+    /// 完全退出为 `service-quit`（客户端停止重连）；headless 服务器为更新而重启时为
+    /// `service-restart`（浏览器保持重连，服务版本变化后重新加载页面）——桌面形态的更新重启
+    /// 仍是 `service-quit`，由 agent 退出后重新拉起的桌面程序接管界面；其余为 `agent-shutdown`。
+    #[must_use]
+    pub fn close_reason(&self) -> &'static str {
+        if !self.quit_requested() {
+            "agent-shutdown"
+        } else if self.restart_requested.load(Ordering::Acquire)
+            && crate::update::restart::scheduled_server_restart()
+        {
+            CLOSE_REASON_SERVICE_RESTART
+        } else {
+            CLOSE_REASON_SERVICE_QUIT
+        }
     }
 
     async fn run_quit(&self) {

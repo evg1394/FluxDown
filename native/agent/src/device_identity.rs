@@ -29,12 +29,25 @@ pub(crate) struct LegacyIdentity {
     pub device_name: Option<String>,
 }
 
-/// 探测本机真实主机名；失败回落 `FluxDown`。返回值保证 1..=64 个字符。
-pub(crate) async fn detect_device_name() -> String {
+/// 解析本机设备名：宿主给出的系统设备名（移动端：Android「设备名称」/ 机型、iOS `UIDevice.name`）
+/// 优先，否则探测真实主机名；都不可用时回落 `FluxDown`。返回值保证 1..=64 个字符。
+///
+/// 移动端沙盒里没有可读的主机名（iOS 无 `/proc` / `/etc/hostname`，Android 恒为 `localhost`），
+/// 只能由宿主经 UniFFI 传入。
+pub(crate) async fn resolve_device_name(host_provided: Option<&str>) -> String {
+    if let Some(name) = host_provided.and_then(sanitize_device_name) {
+        return name;
+    }
     platform_hostname()
         .await
         .and_then(|raw| sanitize_device_name(&raw))
         .unwrap_or_else(|| FALLBACK_DEVICE_NAME.to_owned())
+}
+
+/// 取不到任何真实名字时落下的占位名。FluxCloud 同样把它视为占位（再次登录时用真实名自愈），
+/// 本地状态里的占位名在每次启动时也会尝试替换成真实名。
+pub(crate) fn is_placeholder_device_name(name: &str) -> bool {
+    name.trim() == FALLBACK_DEVICE_NAME
 }
 
 /// 修剪并截断到设备名上限；空串视为不可用。

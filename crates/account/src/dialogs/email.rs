@@ -1,11 +1,11 @@
 use fluxdown_protocol::{AuthVerificationDto, method};
 use fluxdown_ui_components::{
-    ControlExt as _, dialog_title, field_error, field_hint, form, form_field,
+    BusyExt as _, ControlExt as _, dialog_title, field_error, field_hint, form, form_field,
 };
 use fluxdown_ui_theme::active_theme;
 use gpui::{
     App, AppContext as _, ClickEvent, Context, Entity, IntoElement, ParentElement, Render,
-    SharedString, Styled, Window, prelude::FluentBuilder as _, px,
+    SharedString, Styled, Window, prelude::FluentBuilder as _,
 };
 use gpui_component::{
     Disableable as _, WindowExt as _,
@@ -40,7 +40,10 @@ struct EmailDialog {
     old_challenge: Option<CodeChallenge>,
     new_challenge: Option<CodeChallenge>,
     ticking: bool,
-    busy: bool,
+    /// 发码在途（自动发 / 「重新发送」）：只锁发码按钮并转圈，输入框与取消仍可用。
+    sending: bool,
+    /// 主按钮请求在途：锁定整个表单。
+    submitting: bool,
     closed: bool,
     invalidated: bool,
     error: Option<SharedString>,
@@ -91,7 +94,8 @@ pub(crate) fn open(host: &Entity<AccountHost>, window: &mut Window, cx: &mut App
             old_challenge: None,
             new_challenge: None,
             ticking: false,
-            busy: false,
+            sending: false,
+            submitting: false,
             closed: false,
             invalidated: false,
             error: None,
@@ -101,36 +105,41 @@ pub(crate) fn open(host: &Entity<AccountHost>, window: &mut Window, cx: &mut App
     window.open_dialog(cx, {
         let view = view.clone();
         move |dialog, _, cx| {
-            let busy = view.read(cx).busy;
+            let submitting = view.read(cx).submitting;
             let title = view.read(cx).text("accountEmailChangeTitle", cx);
             let on_close = view.clone();
             let content = view.clone();
             dialog
                 .title(dialog_title(title, cx))
-                .w(px(480.))
-                .close_button(!busy)
-                .keyboard(!busy)
-                .overlay_closable(!busy)
+                .w(active_theme(cx).text_extent(480.))
+                .close_button(!submitting)
+                .keyboard(!submitting)
+                // 点遮罩不关闭：误触会丢掉已输入的验证码，重开又要重新发码。
+                .overlay_closable(false)
                 .on_close(move |_, _, cx| on_close.update(cx, |this, _| this.closed = true))
                 .content(move |body, _, _| body.child(content.clone()))
         }
     });
     input.update(cx, |input, cx| input.focus(window, cx));
-    view.update(cx, |this, cx| this.send_old(window, cx));
+    view.update(cx, |this, cx| this.resume_or_send_old(window, cx));
 }
 
-fn email_error(email: &str, current: &str) -> Option<&'static str> {
+/// 邮箱基本格式：`name@domain.tld`，无空白、无多余 `@`。登录 / 重置密码对话框复用。
+pub(crate) fn is_valid_email(email: &str) -> bool {
     let email = email.trim();
-    let valid = email.split_once('@').is_some_and(|(name, domain)| {
+    email.split_once('@').is_some_and(|(name, domain)| {
         !name.is_empty()
             && !domain.contains('@')
             && domain
                 .split_once('.')
                 .is_some_and(|(a, b)| !a.is_empty() && !b.is_empty())
-    }) && !email.chars().any(char::is_whitespace);
-    if !valid {
+    }) && !email.chars().any(char::is_whitespace)
+}
+
+fn email_error(email: &str, current: &str) -> Option<&'static str> {
+    if !is_valid_email(email) {
         Some("accountEmailChangeInvalid")
-    } else if email.eq_ignore_ascii_case(current.trim()) {
+    } else if email.trim().eq_ignore_ascii_case(current.trim()) {
         Some("accountEmailChangeSame")
     } else {
         None
@@ -154,8 +163,28 @@ impl EmailDialog {
         !self.closed && !self.invalidated && self.same_session(cx)
     }
 
+    fn busy(&self) -> bool {
+        self.sending || self.submitting
+    }
+
+    fn old_code_key(&self) -> String {
+        format!("email-old:{}", self.user_id)
+    }
+
+    /// 打开时若刚发过原邮箱验证码（对话框被关掉后重开），恢复倒计时而不是重发。
+    fn resume_or_send_old(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let restored = self.host.read(cx).sent_codes.restore(&self.old_code_key());
+        match restored {
+            Some(challenge) => {
+                self.old_challenge = Some(challenge);
+                self.start_ticker(window, cx);
+            }
+            None => self.send_old(window, cx),
+        }
+    }
+
     fn can_submit(&self, cx: &App) -> bool {
-        if self.busy || !self.enabled(cx) || !self.old_challenge.is_some_and(|c| !c.is_expired()) {
+        if self.busy() || !self.enabled(cx) || self.old_challenge.is_none_or(|c| c.is_expired()) {
             return false;
         }
         if self.sent_email.is_some() {
@@ -168,10 +197,10 @@ impl EmailDialog {
     }
 
     fn send_old(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.busy || !self.enabled(cx) || self.old_challenge.is_some_and(|c| !c.can_resend()) {
+        if self.busy() || !self.enabled(cx) || self.old_challenge.is_some_and(|c| !c.can_resend()) {
             return;
         }
-        self.run(Operation::SendOld, serde_json::json!({}), window, cx);
+        self.run(Operation::SendOld, serde_json::json!({}), false, window, cx);
     }
 
     fn submit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -185,18 +214,20 @@ impl EmailDialog {
                     "email": email, "oldCode": self.old_code.read(cx).value().trim(),
                     "newCode": self.new_code.read(cx).value().trim(),
                 }),
+                true,
                 window,
                 cx,
             );
         } else {
-            self.send_new(window, cx);
+            self.send_new(true, window, cx);
         }
     }
 
-    fn send_new(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.busy
+    /// `via_submit`：由主按钮触发（锁表单、主按钮转圈），否则是「重新发送」。
+    fn send_new(&mut self, via_submit: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if self.busy()
             || !self.enabled(cx)
-            || !self.old_challenge.is_some_and(|c| !c.is_expired())
+            || self.old_challenge.is_none_or(|c| c.is_expired())
             || self.new_challenge.is_some_and(|c| !c.can_resend())
             || self.old_code.read(cx).value().trim().is_empty()
             || email_error(&self.new_email.read(cx).value(), &self.current_email).is_some()
@@ -209,6 +240,7 @@ impl EmailDialog {
                 "email": self.new_email.read(cx).value().trim(),
                 "code": self.old_code.read(cx).value().trim(),
             }),
+            via_submit,
             window,
             cx,
         );
@@ -238,12 +270,22 @@ impl EmailDialog {
         &mut self,
         operation: Operation,
         params: serde_json::Value,
+        via_submit: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.busy = true;
+        if via_submit {
+            self.submitting = true;
+        } else {
+            self.sending = true;
+        }
         self.error = None;
         cx.notify();
+        // 发新邮箱验证码的目标以请求时为准，在途期间改输入框不影响。
+        let target_email = params
+            .get("email")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned);
         let method = match operation {
             Operation::SendOld => method::AGENT_PROFILE_SEND_EMAIL_CODE,
             Operation::SendNew => method::AGENT_PROFILE_SEND_NEW_EMAIL_CODE,
@@ -257,13 +299,19 @@ impl EmailDialog {
         cx.spawn_in(window, async move |this, cx| {
             let result = future.await;
             let Ok(()) = this.update_in(cx, |this, window, cx| {
-                this.busy = false;
+                if via_submit {
+                    this.submitting = false;
+                } else {
+                    this.sending = false;
+                }
                 if !this.enabled(cx) {
                     cx.notify();
                     return;
                 }
                 match result {
                     Ok(_) if operation == Operation::Confirm => {
+                        let key = this.old_code_key();
+                        this.host.update(cx, |host, _| host.sent_codes.forget(&key));
                         window.push_notification(
                             Notification::success(this.text("accountEmailChangeSuccess", cx)),
                             cx,
@@ -275,12 +323,15 @@ impl EmailDialog {
                         Ok(result) => {
                             let challenge = Some(CodeChallenge::new(result.ttl_seconds, false));
                             if operation == Operation::SendOld {
+                                let key = this.old_code_key();
+                                this.host.update(cx, |host, _| {
+                                    host.sent_codes.record(key, result.ttl_seconds);
+                                });
                                 this.old_challenge = challenge;
                                 this.old_code
                                     .update(cx, |input, cx| input.set_value("", window, cx));
                             } else {
-                                this.sent_email =
-                                    Some(this.new_email.read(cx).value().trim().to_owned());
+                                this.sent_email = target_email;
                                 this.new_challenge = challenge;
                                 this.new_code.update(cx, |input, cx| {
                                     input.set_value("", window, cx);
@@ -309,7 +360,7 @@ impl EmailDialog {
     }
 
     fn back(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.busy {
+        if self.busy() {
             return;
         }
         self.sent_email = None;
@@ -391,7 +442,7 @@ impl EmailDialog {
                         .ghost()
                         .label(self.text("back", cx))
                         .control(cx)
-                        .disabled(disabled)
+                        .disabled(disabled || self.busy())
                         .on_click(
                             cx.listener(|this, _: &ClickEvent, window, cx| this.back(window, cx)),
                         ),
@@ -402,7 +453,7 @@ impl EmailDialog {
                     .outline()
                     .label(self.text("cancel", cx))
                     .control(cx)
-                    .disabled(self.busy)
+                    .disabled(self.submitting)
                     .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                         this.closed = true;
                         window.close_dialog(cx);
@@ -420,8 +471,8 @@ impl EmailDialog {
                         cx,
                     ))
                     .control(cx)
-                    .loading(self.busy)
-                    .disabled(!self.can_submit(cx))
+                    .busy(self.submitting)
+                    .disabled(!self.submitting && !self.can_submit(cx))
                     .on_click(
                         cx.listener(|this, _: &ClickEvent, window, cx| this.submit(window, cx)),
                     ),
@@ -433,7 +484,8 @@ impl Render for EmailDialog {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let tokens = active_theme(cx).tokens().clone();
         let translator = self.host.read(cx).translator().read(cx).clone();
-        let disabled = self.busy || !self.enabled(cx);
+        // 只有主按钮请求才锁输入框；发码在途时仍可先填写其它字段。
+        let disabled = self.submitting || !self.enabled(cx);
         let verifying_new = self.sent_email.is_some();
         let challenge = if verifying_new {
             self.new_challenge
@@ -441,6 +493,7 @@ impl Render for EmailDialog {
             self.old_challenge
         };
         let can_resend = !disabled
+            && !self.sending
             && challenge.is_none_or(|c| c.can_resend())
             && (!verifying_new || self.old_challenge.is_some_and(|c| !c.is_expired()));
         let resend_label = challenge
@@ -464,10 +517,11 @@ impl Render for EmailDialog {
                     .ghost()
                     .label(resend_label)
                     .control(cx)
-                    .disabled(!can_resend)
+                    .busy(self.sending)
+                    .disabled(!self.sending && !can_resend)
                     .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                         if this.sent_email.is_some() {
-                            this.send_new(window, cx);
+                            this.send_new(false, window, cx);
                         } else {
                             this.send_old(window, cx);
                         }

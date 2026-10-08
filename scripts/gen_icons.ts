@@ -450,7 +450,7 @@ async function main() {
   // ──────────────────────────────────────────
   // 5. Android mipmap — 5 个 DPI 变体
   // ──────────────────────────────────────────
-  console.log("\n📁 android/app/src/main/res/");
+  console.log("\n📁 android/app/src/main/res/ + mobile/Android/app/src/main/res/");
   {
     const androidIcons: Record<string, number> = {
       "mipmap-mdpi": 48,
@@ -462,8 +462,10 @@ async function main() {
     for (const [folder, size] of Object.entries(androidIcons)) {
       const buf = await getCachedPng(size);
       await saveFile(`android/app/src/main/res/${folder}/ic_launcher.png`, buf);
+      // 原生 Android（Compose）工程与 Flutter 移动端共用同一套启动图标
+      await saveFile(`mobile/Android/app/src/main/res/${folder}/ic_launcher.png`, buf);
     }
-    totalCount += Object.keys(androidIcons).length;
+    totalCount += Object.keys(androidIcons).length * 2;
   }
 
   // ──────────────────────────────────────────

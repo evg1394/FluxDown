@@ -1,0 +1,120 @@
+package com.fluxdown.core.protocol
+
+import java.text.Normalizer
+import java.util.Locale
+
+/* 网络与代理页的纯逻辑：代理模式、端口输入、测试请求、行目录与站点凭据过滤。无 UI / 无主机依赖，便于单测（同 iOS NetworkLogic）。 */
+
+/** `proxy_mode` 的取值（顺序即选择列表顺序，同 GPUI / Web / iOS）。 */
+enum class NetworkProxyMode(val wire: String) {
+    None("none"), System("system"), Manual("manual"), Auto("auto");
+
+    companion object {
+        /** 主机值 → 模式；缺省 / 未知值按「不使用代理」（同 Web `ProxySettings`）。 */
+        fun of(wire: String?): NetworkProxyMode = entries.firstOrNull { it.wire == wire } ?: None
+    }
+}
+
+/** `proxy_port` 的文本规则：只保留 ASCII 数字，提交时钳位到 1…65535；空 = 未配置。 */
+object NetworkPortInput {
+    val range: IntRange = 1..65535
+
+    /** 过滤掉非数字字符（粘贴 `:8080`、全角数字等）。 */
+    fun digits(text: String): String = text.filter { it in '0'..'9' }
+
+    /** 提交结果：[wire] 为写入的字符串（空串 = 清空），[adjusted] 为被钳位改写后的数值（未越界 / 清空为 null）。 */
+    data class Commit(val wire: String, val adjusted: Int?)
+
+    /** 超出 `Int` 的数字饱和后再钳位，而不是当作非法输入。 */
+    fun commit(text: String): Commit {
+        val filtered = digits(text)
+        if (filtered.isEmpty()) return Commit("", null)
+        val parsed = filtered.toLongOrNull() ?: Long.MAX_VALUE
+        val clamped = parsed.coerceIn(range.first.toLong(), range.last.toLong())
+        return Commit(clamped.toString(), if (clamped != parsed) clamped.toInt() else null)
+    }
+}
+
+/** 连通性测试请求的组装与失败文案。 */
+object NetworkProxyTest {
+    /**
+     * 各模式测试发送的内容（镜像 GPUI `proxy.rs::test_control` 与 Web `TestConnectionRow`）：
+     * - 手动：当前表单里的 `proxy_*` 五个键；
+     * - 系统：已检测到的系统代理（类型 / 地址 / 端口，无凭据）；未检测到则无可测；
+     * - 不使用 / 自动：没有确定的代理端点可测，返回 null（不显示按钮）。
+     */
+    fun request(mode: NetworkProxyMode, form: SettingsForm, system: SystemProxyDto?): ProxyTestRequest? = when (mode) {
+        NetworkProxyMode.Manual -> ProxyTestRequest(
+            proxyType = form.string("proxy_type", "http"),
+            host = form.string("proxy_host"),
+            port = form.string("proxy_port"),
+            username = form.string("proxy_username"),
+            password = form.string("proxy_password"),
+        )
+        NetworkProxyMode.System ->
+            if (system != null && system.detected) ProxyTestRequest(system.proxyType, system.host, system.port.toString()) else null
+        NetworkProxyMode.None, NetworkProxyMode.Auto -> null
+    }
+
+    /** 失败详情：代理端点不接受 TLS 握手（把 HTTP 代理选成了 HTTPS）给出可操作的提示；否则取主机错误文案。 */
+    fun failureDetail(message: String, fallback: String, tlsHint: String): String {
+        if (message.contains("did not accept a TLS handshake", ignoreCase = true)) return tlsHint
+        val trimmed = message.trim()
+        return trimmed.ifEmpty { fallback }
+    }
+}
+
+/** 本页的每一行（页面渲染与设置搜索共用同一份可见性判定）。行 id 同 iOS（`network.<name>`）。 */
+enum class NetworkRow(val rowId: String, val group: Group, val configKey: String?) {
+    Mode("network.mode", Group.Mode, "proxy_mode"),
+    Type("network.type", Group.Manual, "proxy_type"),
+    Host("network.host", Group.Manual, "proxy_host"),
+    Port("network.port", Group.Manual, "proxy_port"),
+    Username("network.username", Group.Manual, "proxy_username"),
+    Password("network.password", Group.Manual, "proxy_password"),
+    NoList("network.noList", Group.Manual, "proxy_no_list"),
+    Test("network.test", Group.Manual, null),
+    SiteAuth("network.siteAuth", Group.SiteAuth, null),
+    SiteAuthAdd("network.siteAuthAdd", Group.SiteAuth, null),
+    SiteAuthClear("network.siteAuthClear", Group.SiteAuth, null);
+
+    enum class Group { Mode, Manual, SiteAuth }
+
+    /**
+     * 手动配置分组需要主机配置已加载且模式为手动；代理模式行只需配置已加载；
+     * 站点凭据走 `daemon.siteAuth.*`（`daemon.*` 恒可用），与配置是否已加载无关。
+     */
+    fun isVisible(mode: NetworkProxyMode, isLoaded: Boolean): Boolean = when (group) {
+        Group.Mode -> isLoaded
+        Group.Manual -> isLoaded && mode == NetworkProxyMode.Manual
+        Group.SiteAuth -> true
+    }
+
+    companion object {
+        fun visible(mode: NetworkProxyMode, isLoaded: Boolean): List<NetworkRow> =
+            entries.filter { it.isVisible(mode, isLoaded) }
+    }
+}
+
+/** 站点凭据列表的过滤与表单校验。 */
+object SiteAuthFilter {
+    /** 凭据条数达到该值才显示搜索框。 */
+    const val SEARCH_THRESHOLD = 6
+
+    fun showsSearch(count: Int): Boolean = count >= SEARCH_THRESHOLD
+
+    /** 站点 / 用户名的大小写、变音、全半角不敏感子串匹配；空查询返回全部。 */
+    fun filter(entries: List<SiteAuthEntryDto>, query: String): List<SiteAuthEntryDto> {
+        val needle = fold(query.trim())
+        if (needle.isEmpty()) return entries
+        return entries.filter { fold(it.site).contains(needle) || fold(it.user).contains(needle) }
+    }
+
+    /** 表单可保存：站点与用户名均非空（密码允许为空——服务端按「无密码」保存）。 */
+    fun canSave(site: String, user: String): Boolean = site.isNotBlank() && user.isNotBlank()
+
+    /** NFKD 分解（全角 → 半角、去变音符号）+ 小写。 */
+    private fun fold(text: String): String =
+        Normalizer.normalize(text, Normalizer.Form.NFKD).filter { Character.getType(it) != Character.NON_SPACING_MARK.toInt() }
+            .lowercase(Locale.ROOT)
+}

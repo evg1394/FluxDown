@@ -1,0 +1,5 @@
+export { FileIcon, PackIconGlyph } from './FileIcon'
+export { useIconPackState } from './useIconPackState'
+export { FILE_KINDS, fileKindOf } from './pack'
+export type { FileKind } from './pack'
+export { BUILTIN_PACK_IDS, DEFAULT_PACK, FILE_ICON_PACK_KEY, SYSTEM_PACK_ID, iconPackState, resolveFileIcon, selectionOf } from './registry'

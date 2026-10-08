@@ -14,6 +14,7 @@ import type {
   CaptureSubmitResult,
   CreateGroupResponse,
   ChangeEmailParams,
+  ChangePasswordParams,
   ChangeNicknameParams,
   ChangeOriginIdParams,
   CheckOriginIdParams,
@@ -72,13 +73,14 @@ import type {
   RemoteDispatchResult,
   RemoteTaskDto,
   ResolvePreviewResponse,
+  ResetPasswordParams,
   SendCodeParams,
   SendNewEmailCodeParams,
   SyncLocalOnlyParams,
   SyncStatusDto,
   TtlResult,
   UpdateCheckParams,
-  UpdateCheckResultDto,
+  UpdateStatusDto,
   VerifyCodeParams,
 } from '../protocol';
 
@@ -110,6 +112,11 @@ const auth = {
     call<AgentLoginResult>(METHOD.AGENT_AUTH_VERIFY_CODE, params),
   logout: () => call<OkResult>(METHOD.AGENT_AUTH_LOGOUT),
   refreshProfile: () => call<CloudProfile>(METHOD.AGENT_AUTH_REFRESH_PROFILE),
+  /** 向该邮箱发送重置密码验证码；未注册邮箱同样成功（防枚举）。 */
+  sendPasswordResetCode: (params: SendCodeParams) =>
+    call<TtlResult>(METHOD.AGENT_AUTH_SEND_PASSWORD_RESET_CODE, params),
+  /** 重置成功后该账号全部设备会话失效，需用新密码重新登录。 */
+  resetPassword: (params: ResetPasswordParams) => call<OkResult>(METHOD.AGENT_AUTH_RESET_PASSWORD, params),
 };
 
 const profile = {
@@ -125,6 +132,11 @@ const profile = {
     call<CloudProfile>(METHOD.AGENT_PROFILE_CHANGE_ORIGIN_ID, params),
   changeNickname: (params: ChangeNicknameParams) =>
     call<CloudProfile>(METHOD.AGENT_PROFILE_CHANGE_NICKNAME, params),
+  /** 向当前绑定邮箱发送修改密码验证码。 */
+  sendPasswordCode: () => call<TtlResult>(METHOD.AGENT_PROFILE_SEND_PASSWORD_CODE),
+  /** 成功后其他设备会话失效，本设备保持登录并返回最新资料。 */
+  changePassword: (params: ChangePasswordParams) =>
+    call<CloudProfile>(METHOD.AGENT_PROFILE_CHANGE_PASSWORD, params),
 };
 
 const gateway = {
@@ -239,14 +251,24 @@ const diagnostics = {
 };
 
 const update = {
-  check: (params?: UpdateCheckParams) =>
-    call<UpdateCheckResultDto>(METHOD.AGENT_UPDATE_CHECK, params),
+  check: (params?: UpdateCheckParams) => call<UpdateStatusDto>(METHOD.AGENT_UPDATE_CHECK, params),
+  download: () => call<UpdateStatusDto>(METHOD.AGENT_UPDATE_DOWNLOAD),
+  install: () => call<UpdateStatusDto>(METHOD.AGENT_UPDATE_INSTALL),
+  cancel: () => call<UpdateStatusDto>(METHOD.AGENT_UPDATE_CANCEL),
 };
 
 const power = {
   /** 完成后关机；无活跃任务时被拒绝（invalidArgument）。 */
   arm: (params: PowerArmParams) => call<PowerArmResult>(METHOD.AGENT_POWER_ARM, params),
   disarm: () => call<OkResult>(METHOD.AGENT_POWER_DISARM),
+};
+
+// 桌面集成：在 agent 所在主机上打开 / 定位任务产物。仅当本连接的 hello 带
+// `agent.openTaskFiles` 能力时可用（见 downloads/model/actions.ts）；否则 agent 返回 Unsupported。
+const platform = {
+  openTask: (params: { taskId: string }) => call<OkResult>(METHOD.AGENT_PLATFORM_OPEN_TASK, params),
+  revealTask: (params: { taskId: string }) =>
+    call<OkResult>(METHOD.AGENT_PLATFORM_REVEAL_TASK, params),
 };
 
 export const agent = {
@@ -266,4 +288,5 @@ export const agent = {
   diagnostics,
   update,
   power,
+  platform,
 };

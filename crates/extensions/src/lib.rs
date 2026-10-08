@@ -85,6 +85,7 @@ impl ExtensionsView {
     }
 
     pub fn apply_event(&mut self, event: &ServiceEvent, cx: &mut Context<Self>) {
+        let relevant = ExtensionsController::affects_view(event);
         match self.controller.apply_event(event) {
             Some(ExtensionsSignal::ComponentProgress {
                 kind,
@@ -108,10 +109,11 @@ impl ExtensionsView {
             Some(ExtensionsSignal::PluginAutoDisabled { .. }) => {}
             None => {}
         }
-        if !self.controller.is_stale() {
-            self.last_error = None;
+        let cleared_error = !self.controller.is_stale() && self.last_error.take().is_some();
+        // 无关事件（如下载进度帧）不重绘，保住 retained 渲染的复用。
+        if relevant || cleared_error {
+            cx.notify();
         }
-        cx.notify();
     }
 
     pub fn mark_stale(&mut self, cx: &mut Context<Self>) {

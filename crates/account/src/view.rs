@@ -18,7 +18,9 @@ use gpui_component::notification::Notification;
 use crate::controller::AccountController;
 use crate::errors::{ErrorContext, error_text};
 use crate::host::{AccountHost, AccountHostEvent};
+use crate::link::now_unix_ms;
 use crate::pages;
+use crate::sync_scope::{SyncPhase, relative_time_changes_in, sync_phase};
 use crate::{AccountCommand, AccountPort, PortFuture};
 
 /// 顶部居中卡片列的最大宽度（与 Flutter `_AccountContent` 的 760 对齐）。
@@ -27,6 +29,9 @@ const CONTENT_MAX_WIDTH: f32 = 760.;
 /// 服务器地址设置只在调试构建出现（对齐 Flutter 的 `kDebugMode` 门控）；
 /// 正式包既不显示也不向 agent 查询。
 const SERVER_ADDRESS_VISIBLE: bool = cfg!(debug_assertions);
+
+/// 相对同步时间的最长复查间隔（未处于「已同步」或时间点可能被新同步改写时）。
+const SYNC_TIME_RECHECK: Duration = Duration::from_secs(60);
 
 pub struct AccountView {
     translator: Entity<Translator>,
@@ -104,7 +109,36 @@ impl AccountView {
             _host_subscription,
         };
         this.load_endpoint(cx);
+        Self::spawn_sync_time_ticker(cx);
         this
+    }
+
+    /// 「上次同步 N 分钟前」由时钟推进，不在任何被追踪的状态里：retained 渲染只在依赖变化时
+    /// 重建本视图，必须在相对时间跨档时主动 notify。视图释放后循环随 `update` 失败结束。
+    fn spawn_sync_time_ticker(cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            let mut delay = SYNC_TIME_RECHECK;
+            loop {
+                cx.background_executor().timer(delay).await;
+                let Ok(next) = this.update(cx, |this, cx| {
+                    let controller = this.controller(cx);
+                    let logged_in = controller.session().is_some();
+                    let SyncPhase::Synced(Some(at)) =
+                        sync_phase(logged_in, controller.sync_status())
+                    else {
+                        return SYNC_TIME_RECHECK;
+                    };
+                    cx.notify();
+                    // 新一次同步会改写时间点，跨档时刻随之变化：最多等一个复查周期。
+                    relative_time_changes_in(now_unix_ms(), at).min(SYNC_TIME_RECHECK)
+                }) else {
+                    // 账户页已释放，结束定时刷新。
+                    return;
+                };
+                delay = next;
+            }
+        })
+        .detach();
     }
 
     pub(crate) fn controller<'a>(&self, cx: &'a App) -> &'a AccountController {
@@ -129,6 +163,12 @@ impl AccountView {
     pub(crate) fn open_email_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.signing_out {
             crate::dialogs::email::open(&self.host, window, cx);
+        }
+    }
+
+    pub(crate) fn open_password_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.signing_out {
+            crate::dialogs::password::open(&self.host, window, cx);
         }
     }
 

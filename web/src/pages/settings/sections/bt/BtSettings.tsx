@@ -15,15 +15,20 @@ import {
 } from '../../kit'
 import { ListEditorRow, SubscriptionStatusRow } from '../subscription'
 
-function BasicTab() {
+function BasicTab({ btEnabled }: { btEnabled: boolean }) {
   const t = useT()
   return (
     <SettingsSection title={t('settingsTabGeneral')} subtitle={t('btSettingsRestartHint')}>
-      <DaemonSwitchRow configKey="bt_enable_dht" titleKey="btEnableDht" descKey="btEnableDhtDesc" />
-      <DaemonSwitchRow configKey="bt_enable_upnp" titleKey="btEnableUpnp" descKey="btEnableUpnpDesc" />
-      <DaemonNumberRow configKey="bt_port_start" titleKey="btListenPortStart" descKey="btListenPortDesc" />
-      <DaemonNumberRow configKey="bt_port_end" titleKey="btListenPortEnd" />
-      <DaemonEnumRow configKey="bt_mse_mode" titleKey="btMseMode" descKey="btMseModeDesc" labelPrefix="btMseMode" />
+      <DaemonSwitchRow configKey="bt_enabled" titleKey="btEnabled" descKey="btEnabledDesc" />
+      {btEnabled ? (
+        <>
+          <DaemonSwitchRow configKey="bt_enable_dht" titleKey="btEnableDht" descKey="btEnableDhtDesc" />
+          <DaemonSwitchRow configKey="bt_enable_upnp" titleKey="btEnableUpnp" descKey="btEnableUpnpDesc" />
+          <DaemonNumberRow configKey="bt_port_start" titleKey="btListenPortStart" descKey="btListenPortDesc" />
+          <DaemonNumberRow configKey="bt_port_end" titleKey="btListenPortEnd" />
+          <DaemonEnumRow configKey="bt_mse_mode" titleKey="btMseMode" descKey="btMseModeDesc" labelPrefix="btMseMode" />
+        </>
+      ) : null}
     </SettingsSection>
   )
 }
@@ -102,15 +107,21 @@ function SeedingTab() {
 
 export function BtSettings() {
   const t = useT()
+  const btEnabled = useDaemonBool('bt_enabled')
+  const tabs = [
+    { id: 'basic', label: t('settingsTabGeneral'), content: <BasicTab btEnabled={btEnabled} /> },
+  ]
+  if (btEnabled) {
+    tabs.push(
+      { id: 'tracker', label: t('settingsTabTracker'), content: <TrackerTab /> },
+      { id: 'seeding', label: t('settingsTabSeeding'), content: <SeedingTab /> },
+    )
+  }
   return (
     <SettingsPage
       title={t('settingsCatBt')}
       description={t('settingsCatBtDesc')}
-      tabs={[
-        { id: 'basic', label: t('settingsTabGeneral'), content: <BasicTab /> },
-        { id: 'tracker', label: t('settingsTabTracker'), content: <TrackerTab /> },
-        { id: 'seeding', label: t('settingsTabSeeding'), content: <SeedingTab /> },
-      ]}
+      tabs={tabs}
     />
   )
 }

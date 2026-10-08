@@ -195,7 +195,8 @@ export default defineConfig({
 
       // ── 可选：阿里云 OSS 发布资产源（/api/download 优先 302 到此处，缺失回退 GitHub）──
       // 对象布局 `<OSS_RELEASE_PREFIX>/<tag>/<file>`，与 .github/actions/oss-upload 一致。
-      // bucket 私有：官网用 AK/SK 签发 1h 预签名 URL；未配 AK/SK 时整条 OSS 路径关闭。
+      // bucket 私有：官网用 AK/SK 做存在性探测；未配 AK/SK 时整条 OSS 路径关闭。
+      // 302 目标优先 OSS_CDN_BASE（Cloudflare 边缘缓存，见 cdn/oss-proxy.js），置空则签发 1h 预签名直链。
       OSS_ACCESS_KEY_ID: envField.string({
         context: "server",
         access: "secret",
@@ -220,6 +221,11 @@ export default defineConfig({
         context: "server",
         access: "secret",
         default: "FluxDownRelease",
+      }),
+      OSS_CDN_BASE: envField.string({
+        context: "server",
+        access: "secret",
+        default: "https://dl-fluxdown.zerx.dev",
       }),
 
       // ── 赞助名录（Sponsor Wall）──

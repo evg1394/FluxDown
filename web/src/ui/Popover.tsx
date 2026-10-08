@@ -18,6 +18,7 @@ export function Popover({
   trigger,
   children,
   title,
+  side = 'bottom',
   align = 'start',
   open: controlledOpen,
   onOpenChange,
@@ -29,6 +30,8 @@ export function Popover({
   children: ReactNode | ((close: () => void) => ReactNode)
   /** 移动端 Sheet 标题（无障碍必需）。 */
   title: string
+  /** 面板在触发器的哪一侧：`bottom` 放下方（放不下翻到上方）；`right` 放右侧，`align` 指纵向对齐。 */
+  side?: 'bottom' | 'right'
   align?: PopoverAlign
   open?: boolean
   onOpenChange?: (open: boolean) => void
@@ -57,13 +60,18 @@ export function Popover({
     const anchor = anchorRef.current?.getBoundingClientRect()
     const panel = panelRef.current?.getBoundingClientRect()
     if (!anchor || !panel) return
-    let left = align === 'start' ? anchor.left : align === 'end' ? anchor.right - panel.width : anchor.left + (anchor.width - panel.width) / 2
-    left = Math.min(Math.max(left, MARGIN), window.innerWidth - panel.width - MARGIN)
+    const clampLeft = (value: number) => Math.min(Math.max(value, MARGIN), window.innerWidth - panel.width - MARGIN)
+    if (side === 'right') {
+      const top = align === 'start' ? anchor.top : align === 'end' ? anchor.bottom - panel.height : anchor.top + (anchor.height - panel.height) / 2
+      setPosition({ top: Math.min(Math.max(top, MARGIN), window.innerHeight - panel.height - MARGIN), left: clampLeft(anchor.right + GAP) })
+      return
+    }
+    const left = clampLeft(align === 'start' ? anchor.left : align === 'end' ? anchor.right - panel.width : anchor.left + (anchor.width - panel.width) / 2)
     const below = anchor.bottom + GAP
     const fitsBelow = below + panel.height <= window.innerHeight - MARGIN
     const top = fitsBelow ? below : Math.max(MARGIN, anchor.top - GAP - panel.height)
     setPosition({ top, left })
-  }, [open, asSheet, align])
+  }, [open, asSheet, side, align])
 
   useEffect(() => {
     if (!open || asSheet) return

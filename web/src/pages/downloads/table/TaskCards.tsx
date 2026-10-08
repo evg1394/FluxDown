@@ -12,7 +12,8 @@ import { notePointerActivity } from '../model/rowOrder'
 import { formatBytes, percentLabel, sourceSite } from '../model/task'
 import type { DownloadTaskView } from '../model/task'
 import { useDownloads } from '../state'
-import { KindGlyph } from './cells'
+import { useConflictTaskIds } from '../dialogs/fileConflict'
+import { ConflictBadge, KindGlyph } from './cells'
 import { kindLabel, STATUS_TEXT, statusDetail, statusLabel } from './text'
 import type { Translate } from './text'
 import { buildGroupMenu, buildTaskMenu } from './menus'
@@ -22,6 +23,7 @@ import { TaskEmpty } from './TaskEmpty'
 interface CardProps {
   t: Translate
   view: DownloadTaskView
+  conflict: boolean
   selected: boolean
   anySelected: boolean
   onTap: (view: DownloadTaskView) => void
@@ -30,7 +32,7 @@ interface CardProps {
   onContext: (view: DownloadTaskView) => void
 }
 
-const TaskCard = memo(function TaskCard({ t, view, selected, anySelected, onTap, onToggle, getMenu, onContext }: CardProps) {
+const TaskCard = memo(function TaskCard({ t, view, conflict, selected, anySelected, onTap, onToggle, getMenu, onContext }: CardProps) {
   const detail = statusDetail(t, view)
   const site = sourceSite(view)
   const meta = [kindLabel(t, view.kind), site, view.sizeBytes > 0 ? formatBytes(view.sizeBytes) : '']
@@ -78,6 +80,7 @@ const TaskCard = memo(function TaskCard({ t, view, selected, anySelected, onTap,
           ) : null}
           <div className="tabular mt-1 flex min-w-0 items-center gap-1.5 text-xs">
             <span className={cn('shrink-0', STATUS_TEXT[view.state])}>{statusLabel(t, view)}</span>
+            {conflict ? <ConflictBadge t={t} /> : null}
             {view.state === 'completed' ? (
               <span className="truncate text-text-tertiary">{meta}</span>
             ) : detail ? (
@@ -107,6 +110,7 @@ const TaskCard = memo(function TaskCard({ t, view, selected, anySelected, onTap,
 export function TaskCards() {
   const t = useT()
   const ctx = useDownloads()
+  const conflictTaskIds = useConflictTaskIds()
   const { rows, selected, selectedViews, queues, views, groupSummaries } = ctx
   const scrollRef = useRef<HTMLDivElement>(null)
   const virtualizer = useVirtualizer({
@@ -179,6 +183,7 @@ export function TaskCards() {
                 <TaskCard
                   t={t}
                   view={row.view}
+                  conflict={row.view.source === 'local' && conflictTaskIds.has(row.view.taskId)}
                   selected={selected.has(row.key)}
                   anySelected={selected.size > 0}
                   onTap={onTap}

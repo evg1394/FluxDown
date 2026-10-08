@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 与 FluxColors.canvas（墨 n1）一致 -->
+    <color name="flux_canvas">#FF07080A</color>
+</resources>

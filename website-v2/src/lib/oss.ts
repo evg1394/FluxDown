@@ -1,8 +1,10 @@
 /**
- * 阿里云 OSS 预签名（V1 query 签名）。
+ * 阿里云 OSS 发布资产源。
  *
  * 发布资产由 .github/actions/oss-upload 上传到 `oss://<bucket>/<prefix>/<tag>/<file>`，
- * bucket 保持私有（对象不可公共读），官网按需签出短期 URL 后 302。
+ * bucket 保持私有（对象不可公共读）。下载 302 目标：配置了 `OSS_CDN_BASE` 时走
+ * Cloudflare 边缘缓存（website-v2/cdn/oss-proxy.js 回源私有桶，命中不计 OSS 外网流出），
+ * 否则官网签出短期预签名 URL 直出 OSS。
  * 签名算法：https://help.aliyun.com/zh/oss/developer-reference/signature-version-1
  */
 
@@ -11,6 +13,7 @@ import {
   OSS_ACCESS_KEY_ID,
   OSS_ACCESS_KEY_SECRET,
   OSS_BUCKET,
+  OSS_CDN_BASE,
   OSS_ENDPOINT,
   OSS_RELEASE_PREFIX,
 } from "astro:env/server";
@@ -53,4 +56,14 @@ export function presignOssUrl(
     Signature: signature,
   });
   return `https://${OSS_BUCKET}.${OSS_ENDPOINT}/${path}?${query}`;
+}
+
+/**
+ * 发布资产的下载 URL：优先 CDN（URL 恒定，便于多分段 Range 与边缘缓存），
+ * 未配置 `OSS_CDN_BASE` 时回退 1h 预签名直链。调用前须保证 `ossConfigured`。
+ */
+export function ossDownloadUrl(key: string): string {
+  const base = (OSS_CDN_BASE ?? "").replace(/\/+$/, "");
+  if (!base) return presignOssUrl("GET", key, 3600);
+  return `${base}/${key.split("/").map(encodeURIComponent).join("/")}`;
 }

@@ -1,0 +1,36 @@
+# 原生 Android 工程（Gradle + Kotlin/Compose）
+# 入库：*.gradle.kts、gradle/libs.versions.toml、gradle/gradle-daemon-jvm.properties、
+#       gradle/wrapper/*（含 gradle-wrapper.jar）、gradlew(.bat)、gradle.properties、app/src/**
+# .idea/、*.iml、.DS_Store 已由仓库根 .gitignore 统一忽略。
+
+# 本机路径（sdk.dir / ndk.dir）
+local.properties
+
+# Gradle / Kotlin 缓存与构建产物（所有模块）
+.gradle/
+.kotlin/
+build/
+captures/
+.cxx/
+
+# Studio「Generate Signed Bundle/APK」默认输出目录与产物
+/app/debug/
+/app/release/
+*.apk
+*.aab
+*.apks
+*.ap_
+*.dex
+output-metadata.json
+
+# 内存/性能抓取
+*.hprof
+*.trace
+
+# Rust 引擎经 cargo-ndk 生成的 .so / UniFFI 绑定位于 :bridge 的 build/ 下（构建时产出，不入库）
+
+# 签名材料（严禁入库）
+*.jks
+*.keystore
+keystore.properties
+key.properties

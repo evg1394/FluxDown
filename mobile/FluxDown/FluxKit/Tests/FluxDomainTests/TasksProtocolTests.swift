@@ -1,0 +1,282 @@
+import FluxDomain
+import Foundation
+import Testing
+
+/// 任务 wire DTO 与详情页纯逻辑：做种限制三态映射（D4）、活动日志游标、`.torrent` 提交、插件失败判定。
+struct TasksProtocolTests {
+    // MARK: 做种限制
+
+    @Test func seedLimitsDecodeFromTaskDto_missingFieldsMeanFollowGlobal() throws {
+        let full = Data(#"""
+        {"taskId":"t","url":"magnet:?xt=urn:btih:x","fileName":"f","status":3,
+         "seedRatioLimitMilli":1500,"seedPostRatioLimitMilli":-1,"seedTimeLimitMinutes":90,
+         "seedInactiveTimeLimitMinutes":-2,"seedUploadLimitBps":524288}
+        """#.utf8)
+        let limits = try ProtocolJSON.decode(TaskSeedLimits.self, from: full, what: "task")
+        #expect(limits == TaskSeedLimits(seedRatioLimitMilli: 1500, seedPostRatioLimitMilli: -1, seedTimeLimitMinutes: 90, seedInactiveTimeLimitMinutes: -2, seedUploadLimitBps: 524_288))
+
+        let old = try ProtocolJSON.decode(TaskSeedLimits.self, from: Data(#"{"taskId":"t"}"#.utf8), what: "task")
+        #expect(old == TaskSeedLimits())
+        #expect(old.seedRatioLimitMilli == SeedLimit.inherit && old.seedUploadLimitBps == 0)
+    }
+
+    @Test func seedLimitField_modeMappingFromWire() {
+        #expect(SeedLimitField(wire: -2, unit: .ratio).mode == .inherit)
+        #expect(SeedLimitField(wire: -1, unit: .ratio).mode == .unlimited)
+        // 0 引擎视同不限制。
+        #expect(SeedLimitField(wire: 0, unit: .minutes).mode == .unlimited)
+        let custom = SeedLimitField(wire: 1500, unit: .ratio)
+        #expect(custom.mode == .custom && custom.text == "1.50")
+        let minutes = SeedLimitField(wire: 90, unit: .minutes)
+        #expect(minutes.mode == .custom && minutes.text == "90")
+    }
+
+    @Test func seedLimitField_unchangedKeepsOriginalWire_changesMapToSentinelsAndMilli() {
+        // 未改动：保持原线上值（0 不被改写成 -1）。
+        #expect(SeedLimitField(wire: 0, unit: .minutes).wireValue == 0)
+        #expect(SeedLimitField(wire: -1, unit: .ratio).wireValue == -1)
+        #expect(SeedLimitField(wire: 1234, unit: .ratio).wireValue == 1234)
+
+        var field = SeedLimitField(wire: -2, unit: .ratio)
+        field.mode = .unlimited
+        #expect(field.wireValue == SeedLimit.unlimited)
+        field.mode = .custom
+        field.text = "2"
+        #expect(field.wireValue == 2000)
+        field.text = "1,25"
+        #expect(field.wireValue == 1250)
+        field.text = "1.2346"
+        #expect(field.wireValue == 1235) // 千分比四舍五入
+        field.text = "x"
+        #expect(!field.isValid && field.wireValue == nil)
+        field.text = ""
+        #expect(!field.isValid)
+        field.text = "-1"
+        #expect(!field.isValid)
+        field.mode = .inherit
+        #expect(field.isValid && field.wireValue == SeedLimit.inherit)
+
+        var minutes = SeedLimitField(wire: 60, unit: .minutes)
+        minutes.text = "120"
+        #expect(minutes.wireValue == 120)
+        minutes.text = "1.5"
+        #expect(minutes.wireValue == nil)
+        minutes.text = "120"
+        minutes.mode = .unlimited
+        #expect(minutes.wireValue == -1)
+        minutes.mode = .custom
+        minutes.text = "60"
+        // 改回原值 = 未改动。
+        #expect(minutes.wireValue == 60 && !minutes.isModified)
+    }
+
+    @Test func seedUploadLimit_followGlobalCustomAndUnchanged() {
+        #expect(SeedUploadLimitField(bps: 0).wireBps == 0)
+        var field = SeedUploadLimitField(bps: 0)
+        field.custom = true
+        field.text = "512"
+        #expect(field.wireBps == 524_288)
+        field.text = ""
+        #expect(!field.isValid && field.wireBps == nil)
+        field.custom = false
+        #expect(field.wireBps == 0)
+
+        // 未改动：原 bps 不因 KB 取整而丢精度。
+        let odd = SeedUploadLimitField(bps: 1_500_000)
+        #expect(odd.text == "1465" && odd.wireBps == 1_500_000 && !odd.isModified)
+        var edited = odd
+        edited.text = "1466"
+        #expect(edited.wireBps == 1466 * 1024 && edited.isModified)
+        var cleared = odd
+        cleared.custom = false
+        #expect(cleared.wireBps == 0)
+    }
+
+    @Test func seedLimitsDraftBuildsSetSeedLimitsParams() throws {
+        var draft = SeedLimitsDraft(limits: TaskSeedLimits(seedRatioLimitMilli: -2, seedPostRatioLimitMilli: -2, seedTimeLimitMinutes: 30, seedInactiveTimeLimitMinutes: -1, seedUploadLimitBps: 0))
+        #expect(!draft.isModified && draft.isValid)
+        draft.ratio.mode = .custom
+        draft.ratio.text = "2.5"
+        draft.upload.custom = true
+        draft.upload.text = "100"
+        #expect(draft.isModified)
+        let params = try #require(draft.params(taskId: "t1"))
+        #expect(params == SetSeedLimitsParams(taskId: "t1", ratioLimitMilli: 2500, postRatioLimitMilli: -2, seedTimeLimitMinutes: 30, inactiveTimeLimitMinutes: -1, uploadLimitBps: 102_400))
+        let json = try ProtocolJSON.decode(JSONValue.self, from: ProtocolJSON.encode(params, what: "p"), what: "p")
+        #expect(Set(json.objectValue?.keys.map { $0 } ?? []) == ["taskId", "ratioLimitMilli", "postRatioLimitMilli", "seedTimeLimitMinutes", "inactiveTimeLimitMinutes", "uploadLimitBps"])
+
+        draft.time.mode = .custom
+        draft.time.text = "abc"
+        #expect(!draft.isValid && draft.params(taskId: "t1") == nil)
+    }
+
+    @Test func seedLimitGlobalsReadConfig_zeroMeansUnlimited() {
+        let globals = SeedLimitGlobals(config: [
+            "bt_seed_ratio_limit": "2.0", "bt_seed_post_ratio_limit": "0",
+            "bt_seed_time_limit_minutes": "1440", "bt_seed_inactive_time_limit_minutes": "0",
+        ])
+        #expect(globals.ratio == 2.0 && globals.postRatio == nil)
+        #expect(globals.timeMinutes == 1440 && globals.inactiveMinutes == nil)
+        #expect(SeedLimitGlobals(config: [:]).ratio == nil)
+    }
+
+    // MARK: 活动日志
+
+    private func entry(_ id: Int64, task: String = "t", kind: String = "status") -> TaskActivityDto {
+        TaskActivityDto(id: id, taskId: task, timestampMs: id * 1000, kind: kind, message: "m\(id)", status: nil)
+    }
+
+    @Test func activityDtoAndPageDecodeServerShape() throws {
+        let data = Data(#"""
+        {"entries":[{"id":7,"taskId":"t","timestampMs":1700000000123,"kind":"status","message":"","status":1},
+                    {"id":8,"taskId":"t","timestampMs":1700000001123,"kind":"error","message":"boom","status":null}],
+         "hasMore":true,"oldestId":7,"newestId":8,"truncated":false}
+        """#.utf8)
+        let page = try ProtocolJSON.decode(TaskActivityPage.self, from: data, what: "page")
+        #expect(page.entries.map(\.id) == [7, 8])
+        #expect(page.entries[0].status == 1 && page.entries[1].status == nil)
+        #expect(page.hasMore && page.oldestId == 7 && page.newestId == 8 && !page.truncated)
+        let notice = try ProtocolJSON.decode(TaskActivityDto.self, from: Data(#"{"id":9,"taskId":"t","timestampMs":1,"kind":"retry","message":"x"}"#.utf8), what: "dto")
+        #expect(notice.status == nil && notice.kind == "retry")
+    }
+
+    @Test func activityQueryOmitsNilCursors() throws {
+        let data = try ProtocolJSON.encode(TaskActivityQuery(taskId: "t", beforeId: 5), what: "q")
+        #expect(String(decoding: data, as: UTF8.self) == #"{"beforeId":5,"limit":0,"taskId":"t"}"#)
+    }
+
+    @Test func feed_latestThenLoadOlderThenLiveEvents() throws {
+        var feed = TaskActivityFeed(taskId: "t")
+        let firstTicket = feed.begin()
+        let first = try #require(firstTicket)
+        #expect(first.fetch == .latest && first.query.beforeId == nil && first.query.afterId == nil)
+        let second = feed.begin() // 单飞
+        #expect(second == nil)
+        #expect(feed.isLoading)
+        feed.finish(first, page: TaskActivityPage(entries: [entry(10), entry(11)], hasMore: true, oldestId: 10, newestId: 11))
+        #expect(feed.loaded && feed.hasOlder && !feed.isLoading)
+        #expect(feed.entries.map(\.id) == [10, 11])
+
+        feed.loadOlder()
+        let olderTicket = feed.begin()
+        let older = try #require(olderTicket)
+        #expect(older.fetch == .before && older.query.beforeId == 10)
+        feed.finish(older, page: TaskActivityPage(entries: [entry(8), entry(9)], hasMore: false, oldestId: 8, newestId: 11))
+        #expect(feed.entries.map(\.id) == [8, 9, 10, 11] && !feed.hasOlder)
+
+        // 实时事件：新增返回 true；重复 / 别的任务 / 非法 id 忽略。
+        let added = feed.add(entry(12))
+        let duplicate = feed.add(entry(12))
+        let foreign = feed.add(entry(13, task: "other"))
+        let invalid = feed.add(entry(0))
+        #expect(added && !duplicate && !foreign && !invalid)
+        #expect(feed.entries.last?.id == 12)
+    }
+
+    @Test func feed_failureCanRetry_andReconnectCatchesUpFromCursor() throws {
+        var feed = TaskActivityFeed(taskId: "t")
+        let firstTicket = feed.begin()
+        let first = try #require(firstTicket)
+        feed.finish(first, page: nil)
+        let blocked = feed.begin()
+        #expect(feed.failed && blocked == nil)
+        feed.retry()
+        let againTicket = feed.begin()
+        let again = try #require(againTicket)
+        #expect(again.fetch == .latest)
+        feed.finish(again, page: TaskActivityPage(entries: [entry(1), entry(2)], hasMore: false, oldestId: 1, newestId: 2))
+
+        feed.suspend()
+        feed.reconnect()
+        let afterTicket = feed.begin()
+        let after = try #require(afterTicket)
+        #expect(after.fetch == .after && after.query.afterId == 2)
+        feed.finish(after, page: TaskActivityPage(entries: [entry(3)], hasMore: false, oldestId: 1, newestId: 3))
+        #expect(feed.entries.map(\.id) == [1, 2, 3])
+        let idle = feed.begin()
+        #expect(idle == nil)
+    }
+
+    @Test func feed_staleTicketsAreIgnoredAfterSuspend() throws {
+        var feed = TaskActivityFeed(taskId: "t")
+        let ticketValue = feed.begin()
+        let ticket = try #require(ticketValue)
+        feed.suspend()
+        let accepted = feed.finish(ticket, page: TaskActivityPage(entries: [entry(1)], hasMore: false, oldestId: 1, newestId: 1))
+        #expect(!accepted)
+        #expect(feed.entries.isEmpty)
+    }
+
+    @Test func feed_liveEventDuringLatestFetchTriggersCatchUp_andJournalGapFlagged() throws {
+        var feed = TaskActivityFeed(taskId: "t")
+        let ticketValue = feed.begin()
+        let ticket = try #require(ticketValue)
+        feed.add(entry(6, kind: "journal_overflow"))
+        feed.finish(ticket, page: TaskActivityPage(entries: [entry(4), entry(5)], hasMore: false, oldestId: 4, newestId: 5))
+        #expect(feed.hasJournalGap)
+        let catchUpTicket = feed.begin()
+        let catchUp = try #require(catchUpTicket)
+        #expect(catchUp.fetch == .after && catchUp.query.afterId == 5)
+    }
+
+    @Test func feed_rebuiltDatabaseResetsTheHistory() throws {
+        var feed = TaskActivityFeed(taskId: "t")
+        let latestTicket = feed.begin()
+        let latest = try #require(latestTicket)
+        feed.finish(latest, page: TaskActivityPage(entries: [entry(50)], hasMore: false, oldestId: 50, newestId: 50))
+        feed.reconnect()
+        let afterTicket = feed.begin()
+        let after = try #require(afterTicket)
+        feed.finish(after, page: TaskActivityPage(entries: [], hasMore: false, oldestId: nil, newestId: nil))
+        #expect(feed.entries.isEmpty && !feed.loaded)
+        let restart = feed.begin()
+        #expect(restart?.fetch == .latest)
+    }
+
+    @Test func feed_truncationFlagFromRetentionRange() throws {
+        var feed = TaskActivityFeed(taskId: "t")
+        let ticketValue = feed.begin()
+        let ticket = try #require(ticketValue)
+        feed.finish(ticket, page: TaskActivityPage(entries: [entry(20)], hasMore: false, oldestId: 20, newestId: 20, truncated: true))
+        let range = feed.retainedRange
+        #expect(range.truncated && range.oldest == 20 && range.newest == 20)
+    }
+
+    // MARK: 创建任务 / .torrent
+
+    @Test func torrentValidationAndCreateParams() throws {
+        #expect(TorrentFile.validate(Data()) == .empty)
+        #expect(TorrentFile.validate(Data("<html>login</html>".utf8)) == .notTorrent)
+        #expect(TorrentFile.validate(Data("d8:announce3:foo".utf8)) == .notTorrent)
+        let torrent = Data("d8:announce3:url4:infod6:lengthi1e4:name1:aee".utf8)
+        #expect(TorrentFile.validate(torrent) == nil)
+        #expect(TorrentFile.validate(Data(count: TorrentFile.maxBytes + 1)) == .tooLarge)
+        #expect(TorrentFile.isTorrentFileName("Movie.TORRENT") && !TorrentFile.isTorrentFileName("a.txt"))
+
+        let params = TorrentFile.createParams(data: torrent, saveDir: "/d", queueId: "later", startPaused: true)
+        let json = try ProtocolJSON.decode(JSONValue.self, from: ProtocolJSON.encode(params, what: "p"), what: "p")
+        let request = try #require(json["request"])
+        #expect(request["url"]?.stringValue == "")
+        #expect(request["torrentB64"]?.stringValue == torrent.base64EncodedString())
+        #expect(request["startPaused"]?.boolValue == true)
+        #expect(request["queueId"]?.stringValue == "later")
+        #expect(request["saveDir"]?.stringValue == "/d")
+        #expect(request["headers"] == nil) // nil 省略键
+        #expect(json["torrentBlobId"] == nil)
+        #expect(json["unattended"]?.boolValue == false)
+    }
+
+    @Test func createWireFromMobileSubset() {
+        let wire = TaskCreateWire(CreateTaskRequest(url: "https://a/b", fileName: "b", saveDir: "/x", segments: 4, queueId: "q", headers: ["K": "V"]))
+        #expect(wire.url == "https://a/b" && wire.segments == 4 && wire.headers == ["K": "V"])
+        #expect(TaskCreateWire(CreateTaskRequest(url: "u")).headers == nil)
+    }
+
+    // MARK: 插件失败
+
+    @Test func pluginFailureDetection() {
+        #expect(PluginFailure.isIgnorable(status: .failed, errorMessage: "[插件] yt: boom"))
+        #expect(!PluginFailure.isIgnorable(status: .failed, errorMessage: "connection reset"))
+        #expect(!PluginFailure.isIgnorable(status: .paused, errorMessage: "[插件] yt: boom"))
+    }
+}

@@ -905,6 +905,7 @@ impl CloudError {
         let by_code = match self.code.as_deref() {
             Some("invalid_credentials") => Some(ErrorReason::InvalidCredentials),
             Some("invalid_code") => Some(ErrorReason::InvalidVerificationCode),
+            Some("wrong_password") => Some(ErrorReason::WrongPassword),
             Some("rate_limited") => Some(ErrorReason::RateLimited),
             Some("email_taken") => Some(ErrorReason::EmailTaken),
             Some("origin_id_taken") => Some(ErrorReason::OriginIdTaken),
@@ -941,7 +942,7 @@ impl CloudError {
                 | ErrorReason::DeviceUntrusted
                 | ErrorReason::SessionExpired,
             ) => (ApplicationErrorCode::Unauthorized, false),
-            Some(ErrorReason::InvalidVerificationCode) => {
+            Some(ErrorReason::InvalidVerificationCode | ErrorReason::WrongPassword) => {
                 (ApplicationErrorCode::InvalidArgument, false)
             }
             Some(ErrorReason::RateLimited) => (ApplicationErrorCode::Unavailable, true),
@@ -1471,6 +1472,12 @@ mod tests {
                 "task_device_mismatch",
                 Reason::TaskDeviceMismatch,
                 Code::Conflict,
+            ),
+            (
+                400,
+                "wrong_password",
+                Reason::WrongPassword,
+                Code::InvalidArgument,
             ),
         ];
         for (status, code, reason, application) in table {

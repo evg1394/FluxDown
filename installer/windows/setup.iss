@@ -5,6 +5,9 @@
 ; + fluxdownd.exe (download daemon) + fluxdown_nmh.exe (browser relay) + MSVC CRT,
 ; all in {app}. AppId / install dir / output name are unchanged from the Flutter
 ; client, so the Flutter auto-updater (`setup.exe /SILENT`) upgrades in place.
+; The GPUI in-app updater (native/agent/src/update/install) runs this installer with
+; `/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP-` after the agent and daemon have exited;
+; the silent [Run] entry then relaunches the desktop with `--after-update`.
 
 #define MyAppName "FluxDown"
 #define MyAppPublisher "FluxDown"
@@ -109,7 +112,9 @@ Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Check: De
 
 [Run]
 Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#StringChange(MyAppName, '&', '&&')}}"; Flags: nowait postinstall skipifsilent shellexec
-Filename: "{app}\{#MyAppExeName}"; Flags: nowait skipifdoesntexist skipifnotsilent runasoriginaluser
+; Silent (auto-)update: relaunch the UI. `--after-update` makes the desktop wait for the
+; previous instance to finish exiting instead of forwarding activation to it.
+Filename: "{app}\{#MyAppExeName}"; Parameters: "--after-update"; Flags: nowait skipifdoesntexist skipifnotsilent runasoriginaluser
 
 [Registry]
 ; Autostart launches the resident agent (tray), same value the agent writes itself

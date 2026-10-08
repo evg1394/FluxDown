@@ -1,0 +1,42 @@
+[package]
+name = "fluxdown_mobile"
+version = "0.1.0"
+edition.workspace = true
+publish = false
+
+[lib]
+crate-type = ["cdylib", "staticlib", "lib"]
+
+[lints]
+workspace = true
+
+[dependencies]
+async-trait = "0.1.89"
+fluxdown_agent = { version = "0.1.0", path = "../agent", default-features = false }
+fluxdown_daemon = { version = "0.1.0", path = "../daemon", default-features = false, features = ["components"] }
+fluxdown_protocol = { version = "0.1.0", path = "../protocol" }
+futures-util = "0.3.34"
+rand = "0.10.1"
+rustls = { version = "0.23.36", default-features = false, features = ["ring", "std", "tls12"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { version = "1.52.3", features = ["rt-multi-thread", "sync", "time", "macros", "net"] }
+tokio-tungstenite = { version = "0.29", features = ["rustls-tls-webpki-roots"] }
+tokio-util = "0.7.18"
+tracing = "0.1.44"
+uniffi = { version = "0.32", features = ["tokio"] }
+webpki-roots = "0.26"
+
+[features]
+# `uniffi-bindgen` 二进制（生成 Kotlin / Swift 绑定）；产物库本身不需要 CLI 依赖。
+bindgen = ["uniffi/cli"]
+
+[[bin]]
+name = "uniffi-bindgen"
+path = "src/bin/uniffi-bindgen.rs"
+required-features = ["bindgen"]
+
+[dev-dependencies]
+tokio = { version = "1.52.3", features = ["test-util", "rt", "macros", "io-util"] }
+uuid = { version = "1.23.4", features = ["v4"] }

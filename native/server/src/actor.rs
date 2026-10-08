@@ -996,6 +996,7 @@ pub fn bt_config_from_map(cfg: &HashMap<String, String>) -> BtConfig {
         .map(|v| v == "true")
         .unwrap_or(true);
     BtConfig {
+        enabled: cfg.get("bt_enabled").map(|v| v == "true").unwrap_or(true),
         enable_dht: cfg
             .get("bt_enable_dht")
             .map(|v| v == "true")

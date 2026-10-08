@@ -3,6 +3,8 @@
 //! 分组顺序与 Web 端一致；组内键取自协议同步目录（`SYNC_SETTING_SPECS`），
 //! 目录新增键会自动落入对应分组，无需改这里。
 
+use std::time::Duration;
+
 use fluxdown_protocol::{
     CUSTOM_CATEGORIES_PREF_KEY, ErrorReason, SYNC_SETTING_SPECS, SettingOwner, SyncStatusDto,
 };
@@ -160,6 +162,20 @@ pub(crate) fn relative_time(now_unix_ms: i64, then_unix_ms: i64) -> (&'static st
         60..=1439 => ("cloudSyncTimeHoursAgo", minutes / 60),
         _ => ("cloudSyncTimeDaysAgo", minutes / 1440),
     }
+}
+
+/// [`relative_time`] 的显示距下一次变化（跨入下一个分钟 / 小时 / 天档）的时长。
+///
+/// 相对时间不在任何被追踪的状态里：retained 渲染下必须按它定时 notify，否则一直停在旧值。
+#[must_use]
+pub(crate) fn relative_time_changes_in(now_unix_ms: i64, then_unix_ms: i64) -> Duration {
+    let age = now_unix_ms.saturating_sub(then_unix_ms).max(0);
+    let unit: i64 = match age / 60_000 {
+        0..=59 => 60_000,
+        60..=1439 => 3_600_000,
+        _ => 86_400_000,
+    };
+    Duration::from_millis(u64::try_from(unit - age % unit).unwrap_or(60_000))
 }
 
 /// 全部非空分组（固定顺序）及各自的本机专属键计数。
@@ -356,6 +372,38 @@ mod tests {
         );
         // 时钟回拨（未来时间）按刚刚处理。
         assert_eq!(relative_time(now, now + 5_000), ("cloudSyncTimeJustNow", 0));
+    }
+
+    #[test]
+    fn relative_time_changes_exactly_when_the_label_changes() {
+        let then = 10_000_000_000;
+        for age in [
+            0,
+            59_999,
+            60_000,
+            90_000,
+            59 * 60_000 + 1,
+            3_600_000,
+            5 * 3_600_000 + 7,
+            1439 * 60_000 + 30_000,
+            86_400_000,
+            3 * 86_400_000 + 1,
+        ] {
+            let now = then + age;
+            let delay =
+                i64::try_from(relative_time_changes_in(now, then).as_millis()).expect("delay fits");
+            assert!(delay > 0, "age {age}");
+            assert_eq!(
+                relative_time(now + delay - 1, then),
+                relative_time(now, then),
+                "age {age}: label must hold until the deadline"
+            );
+            assert_ne!(
+                relative_time(now + delay, then),
+                relative_time(now, then),
+                "age {age}: label must change at the deadline"
+            );
+        }
     }
 
     #[test]

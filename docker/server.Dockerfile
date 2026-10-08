@@ -19,8 +19,9 @@ WORKDIR /src/web
 COPY web/package.json web/bun.lock ./
 RUN bun install --frozen-lockfile
 COPY web/ ./
-# Vite 别名从仓库根引用共享文案与 GPUI 主题解析器（与 GPUI/Flutter 同一份事实源）
+# Vite 别名从仓库根引用共享文案、GPUI 主题解析器与内置文件图标包（与 GPUI/Flutter 同一份事实源）
 COPY assets/i18n/ /src/assets/i18n/
+COPY assets/icon-packs/ /src/assets/icon-packs/
 COPY website-v2/src/lib/gpui-theme/ /src/website-v2/src/lib/gpui-theme/
 RUN bun run build
 
@@ -50,6 +51,8 @@ COPY .cargo/ .cargo/
 COPY native/ native/
 COPY crates/ crates/
 COPY scripts/desktop-dev/ scripts/desktop-dev/
+# 根 Cargo.toml 的 [patch.crates-io] 指向 third_party/librqbit-dualstack-sockets。
+COPY third_party/ third_party/
 # notification.rs 在 Linux 上 include_bytes! 应用图标。
 COPY assets/logo/ assets/logo/
 # Web SPA 在编译期由 fluxdown_agent（feature web-ui）按 FLUXDOWN_EMBED_WEBROOT
@@ -85,8 +88,10 @@ WORKDIR /app
 # fluxdownd 必须与 fluxdown-agent 同目录（agent 按同级路径拉起 daemon）
 COPY --from=server /usr/local/bin/fluxdown-agent /usr/local/bin/fluxdownd /app/
 # FLUXDOWN_BIND / FLUXDOWN_DATABASE_URL / FLUXDOWN_DEMO / FLUXDOWN_LANG 等见 native/agent 的 server 模式说明
+# FLUXDOWN_INSTALL_SOURCE：容器内替换二进制会随重建丢失，应用内更新改为提示拉取新镜像。
 ENV FLUXDOWN_BIND=0.0.0.0:17800 \
-    FLUXDOWN_DATA_DIR=/data
+    FLUXDOWN_DATA_DIR=/data \
+    FLUXDOWN_INSTALL_SOURCE=docker
 VOLUME /data
 EXPOSE 17800
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s \

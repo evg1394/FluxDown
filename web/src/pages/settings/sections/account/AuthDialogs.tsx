@@ -8,6 +8,7 @@ import type { AgentLoginResult } from '../../../../lib/rpc'
 import { ConfirmFooter, Dialog, FieldError, FieldHint, Form, FormField, Input, SegmentedTabs } from '../../../../ui'
 import { accountErrorKey } from './errorText'
 import type { AccountErrorContext } from './errorText'
+import { ResetPasswordDialog } from './PasswordDialogs'
 import { PasswordInput } from './PasswordInput'
 import { useCountdown } from './useCountdown'
 
@@ -100,6 +101,7 @@ export function LoginDialog({ onClose }: { onClose: () => void }) {
   const [replace, setReplace] = useState(false)
   const [busy, setBusy] = useState(false)
   const [errorKey, setErrorKey] = useState<string | null>(null)
+  const [resetting, setResetting] = useState(false)
   const expiry = useCountdown()
   const cooldown = useCountdown()
 
@@ -175,10 +177,27 @@ export function LoginDialog({ onClose }: { onClose: () => void }) {
   const trimmedAccount = account.trim()
   const subtitle = trimmedAccount.includes('@') ? t('accountDeviceVerifySubtitle', { email: trimmedAccount }) : t('accountDeviceVerifySubtitleGeneric')
 
+  if (resetting) {
+    return (
+      <ResetPasswordDialog
+        initialEmail={trimmedAccount.includes('@') ? trimmedAccount : ''}
+        onClose={() => setResetting(false)}
+        onDone={(email) => {
+          setAccount(email)
+          setPassword('')
+          setMethod('password')
+          setErrorKey(null)
+          setResetting(false)
+        }}
+      />
+    )
+  }
+
   return (
     <Dialog
       open
       onOpenChange={(open) => !open && !busy && onClose()}
+      persistent
       title={t('accountLoginDialogTitle')}
       modalLocked={busy}
       footer={
@@ -237,6 +256,11 @@ export function LoginDialog({ onClose }: { onClose: () => void }) {
                   autoComplete="current-password"
                 />
               </FormField>
+            )}
+            {byCode ? null : (
+              <button type="button" className="self-start text-xs text-accent-text disabled:opacity-50 coarse:min-h-touch" disabled={busy} onClick={() => setResetting(true)}>
+                {t('accountForgotPassword')}
+              </button>
             )}
           </>
         )}
@@ -303,6 +327,7 @@ export function RegisterDialog({ onClose }: { onClose: () => void }) {
     <Dialog
       open
       onOpenChange={(open) => !open && !busy && onClose()}
+      persistent
       title={t('accountRegisterDialogTitle')}
       modalLocked={busy}
       footer={<ConfirmFooter okLabel={verify ? t('accountVerifySubmit') : t('accountRegister')} onCancel={onClose} onOk={() => void submit()} okDisabled={!canSubmit} loading={busy} />}

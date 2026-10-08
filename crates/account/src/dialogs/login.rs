@@ -5,14 +5,14 @@ use std::sync::Arc;
 
 use fluxdown_protocol::{AgentLoginResult, RpcErrorData, method};
 use fluxdown_ui_components::{
-    ControlExt as _, dialog_scroll_body, field_error, field_hint, form, form_field,
+    BusyExt as _, ControlExt as _, dialog_scroll_body, field_error, field_hint, form, form_field,
     input_with_action, segmented_tabs,
 };
 use fluxdown_ui_i18n::Translator;
 use fluxdown_ui_theme::active_theme;
 use gpui::{
     App, AppContext as _, ClickEvent, Context, Entity, FontWeight, IntoElement, ParentElement,
-    Render, SharedString, Styled, Window, div, prelude::FluentBuilder as _, px,
+    Render, SharedString, Styled, Window, div, prelude::FluentBuilder as _,
 };
 use gpui_component::{
     Disableable as _, WindowExt as _,
@@ -22,7 +22,7 @@ use gpui_component::{
     v_flex,
 };
 
-use crate::dialogs::{code_step, register};
+use crate::dialogs::{code_step, email, password_reset, register};
 use crate::errors::{ErrorContext, error_text, is_registration_incomplete};
 use crate::verification::{CodeChallenge, spawn_ticker};
 use crate::{AccountCommand, AccountPort, PortFuture, t};
@@ -75,7 +75,7 @@ fn parse_outcome(value: serde_json::Value) -> Outcome {
 }
 
 /// `agent.auth.sendCode` 返回 `{ttlSeconds}`。
-fn parse_send_code(value: &serde_json::Value) -> Option<CodeChallenge> {
+pub(crate) fn parse_send_code(value: &serde_json::Value) -> Option<CodeChallenge> {
     value
         .get("ttlSeconds")
         .and_then(serde_json::Value::as_u64)
@@ -89,17 +89,38 @@ pub(crate) fn open(
     window: &mut Window,
     cx: &mut App,
 ) {
+    open_with_account(translator, port, String::new(), window, cx);
+}
+
+/// 打开登录对话框并预填账号（重置密码成功后回到这里）；预填时聚焦密码框。
+pub(crate) fn open_with_account(
+    translator: Entity<Translator>,
+    port: Arc<dyn AccountPort>,
+    account: String,
+    window: &mut Window,
+    cx: &mut App,
+) {
     let title = t(translator.read(cx), "accountLoginDialogTitle");
     let view = cx.new(|cx| LoginDialog::new(translator, port, window, cx));
     let account_input = view.read(cx).account_input.clone();
+    let focus = if account.is_empty() {
+        account_input
+    } else {
+        account_input.update(cx, |input, cx| {
+            input.set_value(account, window, cx);
+        });
+        view.read(cx).password_input.clone()
+    };
     window.open_dialog(cx, move |dialog, _, cx| {
         let view = view.clone();
         dialog
             .title(fluxdown_ui_components::dialog_title(title.clone(), cx))
-            .w(px(520.))
+            .w(active_theme(cx).text_extent(520.))
+            // 点遮罩不关闭：登录/验证码流程误触关闭会丢掉已输入内容并迫使重新发码。
+            .overlay_closable(false)
             .content(move |content, _, _| content.min_h_0().child(view.clone()))
     });
-    account_input.update(cx, |input, cx| input.focus(window, cx));
+    focus.update(cx, |input, cx| input.focus(window, cx));
 }
 
 impl LoginDialog {
@@ -415,7 +436,7 @@ impl LoginDialog {
                             .primary()
                             .label(submit_label)
                             .control(cx)
-                            .loading(self.busy)
+                            .busy(self.busy)
                             .disabled(self.busy)
                             .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                                 this.submit(window, cx);
@@ -498,7 +519,7 @@ impl LoginDialog {
                         .outline()
                         .label(send_label)
                         .control(cx)
-                        .loading(self.resending)
+                        .busy(self.resending)
                         .disabled(!send_enabled || self.resending || self.busy || email_empty)
                         .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                             this.resend(window, cx);
@@ -531,7 +552,36 @@ impl LoginDialog {
                 None,
                 cx,
             ))
+            .child(
+                h_flex().w_full().justify_end().child(
+                    Button::new("account-login-forgot-password")
+                        .ghost()
+                        .label(self.t("accountForgotPassword", cx))
+                        .control(cx)
+                        .disabled(self.busy)
+                        .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                            this.forgot_password(window, cx);
+                        })),
+                ),
+            )
             .into_any_element()
+    }
+
+    /// 「忘记密码？」：关闭登录框并打开重置密码对话框，账号框里像邮箱的内容预填为邮箱。
+    fn forgot_password(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.busy {
+            return;
+        }
+        let account = self.account_input.read(cx).value().trim().to_owned();
+        let email = if email::is_valid_email(&account) {
+            account
+        } else {
+            String::new()
+        };
+        let translator = self.translator.clone();
+        let port = self.port.clone();
+        window.close_dialog(cx);
+        password_reset::open(translator, port, email, window, cx);
     }
 }
 

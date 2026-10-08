@@ -1335,11 +1335,17 @@ pub mod registry {
                     .join("Chrome Beta")
                     .join("NativeMessagingHosts"),
                 lib.join("Google")
+                    .join("Chrome Dev")
+                    .join("NativeMessagingHosts"),
+                lib.join("Google")
                     .join("Chrome Canary")
                     .join("NativeMessagingHosts"),
                 lib.join("Chromium").join("NativeMessagingHosts"),
                 lib.join("Microsoft Edge").join("NativeMessagingHosts"),
                 lib.join("Microsoft Edge Beta").join("NativeMessagingHosts"),
+                lib.join("Microsoft Edge Dev").join("NativeMessagingHosts"),
+                lib.join("Microsoft Edge Canary")
+                    .join("NativeMessagingHosts"),
                 lib.join("Arc")
                     .join("User Data")
                     .join("NativeMessagingHosts"),
@@ -1381,6 +1387,8 @@ pub mod registry {
             match root {
                 "Microsoft Edge" => "Edge",
                 "Microsoft Edge Beta" => "Edge Beta",
+                "Microsoft Edge Dev" => "Edge Dev",
+                "Microsoft Edge Canary" => "Edge Canary",
                 "Brave-Browser" => "Brave",
                 "Mozilla" => "Firefox",
                 "Thorium" => "Thorium",
@@ -1401,8 +1409,20 @@ pub mod registry {
             let snap = home.join("snap");
             vec![
                 config.join("google-chrome").join("NativeMessagingHosts"),
+                config
+                    .join("google-chrome-beta")
+                    .join("NativeMessagingHosts"),
+                config
+                    .join("google-chrome-unstable")
+                    .join("NativeMessagingHosts"),
                 config.join("chromium").join("NativeMessagingHosts"),
                 config.join("microsoft-edge").join("NativeMessagingHosts"),
+                config
+                    .join("microsoft-edge-beta")
+                    .join("NativeMessagingHosts"),
+                config
+                    .join("microsoft-edge-dev")
+                    .join("NativeMessagingHosts"),
                 config
                     .join("BraveSoftware")
                     .join("Brave-Browser")
@@ -1513,8 +1533,12 @@ pub mod registry {
                 .unwrap_or_default();
             let base = match root {
                 "google-chrome" => "Chrome",
+                "google-chrome-beta" => "Chrome Beta",
+                "google-chrome-unstable" => "Chrome Dev",
                 "chromium" => "Chromium",
                 "microsoft-edge" => "Edge",
+                "microsoft-edge-beta" => "Edge Beta",
+                "microsoft-edge-dev" => "Edge Dev",
                 "Brave-Browser" => "Brave",
                 "vivaldi" => "Vivaldi",
                 "thorium" => "Thorium",
@@ -1678,17 +1702,37 @@ pub mod registry {
             }
         }
 
+        /// 选择用于诊断的清单目录：已有清单文件 > 已安装浏览器 > 首个候选。
+        pub(crate) fn select_preferred_manifest_dir(
+            dirs: &[PathBuf],
+            is_installed: impl Fn(&Path) -> bool,
+        ) -> Option<&PathBuf> {
+            dirs.iter()
+                .find(|dir| dir.join(MANIFEST_FILENAME).is_file())
+                .or_else(|| dirs.iter().find(|dir| is_installed(dir)))
+                .or_else(|| dirs.first())
+        }
+
         /// 只读注册快照；从不写清单、包装脚本或目录。
         #[must_use]
         pub fn diagnose() -> NmhDiagnosis {
             let mut diagnosis = NmhDiagnosis::default();
             let chromium_dirs = chromium_nmh_dirs();
             let firefox_dirs = firefox_targets();
-            if let Some(first) = chromium_dirs.first() {
-                diagnosis.chromium_manifest = first.join(MANIFEST_FILENAME).display().to_string();
+            if let Some(preferred) =
+                select_preferred_manifest_dir(&chromium_dirs, browser_installed)
+            {
+                diagnosis.chromium_manifest =
+                    preferred.join(MANIFEST_FILENAME).display().to_string();
             }
-            if let Some((first, _)) = firefox_dirs.first() {
-                diagnosis.firefox_manifest = first.join(MANIFEST_FILENAME).display().to_string();
+            let ff_paths: Vec<PathBuf> = firefox_dirs.iter().map(|(dir, _)| dir.clone()).collect();
+            if let Some(preferred) = select_preferred_manifest_dir(&ff_paths, |dir| {
+                firefox_dirs
+                    .iter()
+                    .any(|(d, installed)| d == dir && *installed)
+            }) {
+                diagnosis.firefox_manifest =
+                    preferred.join(MANIFEST_FILENAME).display().to_string();
             }
             let nmh_exe = match super::find_nmh_exe() {
                 Ok(path) => path,
@@ -1839,6 +1883,128 @@ pub mod registry {
                 }
                 assert_eq!(std::fs::read_dir(&dir)?.count(), 1);
                 std::fs::remove_dir_all(&dir)
+            }
+
+            #[test]
+            fn chromium_nmh_dirs_and_labels_cover_dev_channels() {
+                #[cfg(target_os = "macos")]
+                {
+                    use super::{chromium_nmh_dirs, label_for_dir};
+                    let dirs = chromium_nmh_dirs();
+                    assert!(
+                        dirs.iter()
+                            .any(|d| d.to_string_lossy().contains("Chrome Dev")),
+                        "missing Chrome Dev in chromium_nmh_dirs: {dirs:?}"
+                    );
+                    assert!(
+                        dirs.iter()
+                            .any(|d| d.to_string_lossy().contains("Microsoft Edge Dev")),
+                        "missing Microsoft Edge Dev in chromium_nmh_dirs: {dirs:?}"
+                    );
+                    assert!(
+                        dirs.iter()
+                            .any(|d| d.to_string_lossy().contains("Microsoft Edge Canary")),
+                        "missing Microsoft Edge Canary in chromium_nmh_dirs: {dirs:?}"
+                    );
+
+                    assert_eq!(
+                        label_for_dir(Path::new(
+                            "/Users/u/Library/Application Support/Google/Chrome Dev/NativeMessagingHosts"
+                        )),
+                        "Chrome Dev"
+                    );
+                    assert_eq!(
+                        label_for_dir(Path::new(
+                            "/Users/u/Library/Application Support/Microsoft Edge Dev/NativeMessagingHosts"
+                        )),
+                        "Edge Dev"
+                    );
+                    assert_eq!(
+                        label_for_dir(Path::new(
+                            "/Users/u/Library/Application Support/Microsoft Edge Canary/NativeMessagingHosts"
+                        )),
+                        "Edge Canary"
+                    );
+                }
+
+                #[cfg(not(target_os = "macos"))]
+                {
+                    use super::{chromium_nmh_dirs, label_for_dir};
+                    let dirs = chromium_nmh_dirs();
+                    assert!(
+                        dirs.iter()
+                            .any(|d| d.to_string_lossy().contains("google-chrome-unstable")),
+                        "missing google-chrome-unstable in chromium_nmh_dirs: {dirs:?}"
+                    );
+                    assert!(
+                        dirs.iter()
+                            .any(|d| d.to_string_lossy().contains("google-chrome-beta")),
+                        "missing google-chrome-beta in chromium_nmh_dirs: {dirs:?}"
+                    );
+                    assert!(
+                        dirs.iter()
+                            .any(|d| d.to_string_lossy().contains("microsoft-edge-dev")),
+                        "missing microsoft-edge-dev in chromium_nmh_dirs: {dirs:?}"
+                    );
+                    assert!(
+                        dirs.iter()
+                            .any(|d| d.to_string_lossy().contains("microsoft-edge-beta")),
+                        "missing microsoft-edge-beta in chromium_nmh_dirs: {dirs:?}"
+                    );
+                    assert_eq!(
+                        label_for_dir(Path::new(
+                            "/home/u/.config/google-chrome-unstable/NativeMessagingHosts"
+                        )),
+                        "Chrome Dev"
+                    );
+                    assert_eq!(
+                        label_for_dir(Path::new(
+                            "/home/u/.config/google-chrome-beta/NativeMessagingHosts"
+                        )),
+                        "Chrome Beta"
+                    );
+                    assert_eq!(
+                        label_for_dir(Path::new(
+                            "/home/u/.config/microsoft-edge-dev/NativeMessagingHosts"
+                        )),
+                        "Edge Dev"
+                    );
+                    assert_eq!(
+                        label_for_dir(Path::new(
+                            "/home/u/.config/microsoft-edge-beta/NativeMessagingHosts"
+                        )),
+                        "Edge Beta"
+                    );
+                }
+            }
+
+            #[test]
+            fn select_preferred_manifest_dir_prioritizes_existing_then_installed_then_first() {
+                use super::{MANIFEST_FILENAME, select_preferred_manifest_dir};
+                let root = std::env::temp_dir().join(format!(
+                    "fluxdown_nmh_select_pref_{}",
+                    uuid::Uuid::new_v4().simple()
+                ));
+                let dir_a = root.join("browser_a");
+                let dir_b = root.join("browser_b");
+                let dir_c = root.join("browser_c");
+                let dirs = vec![dir_a.clone(), dir_b.clone(), dir_c.clone()];
+
+                // 1. 没有任何清单或安装：退回首个目录
+                let chosen = select_preferred_manifest_dir(&dirs, |_| false);
+                assert_eq!(chosen, Some(&dir_a));
+
+                // 2. 无清单，但 dir_b 标记为已安装：优先已安装
+                let chosen = select_preferred_manifest_dir(&dirs, |p| p == dir_b);
+                assert_eq!(chosen, Some(&dir_b));
+
+                // 3. dir_c 磁盘上存在实际清单文件：优先已有清单（即使 dir_b 也是已安装）
+                std::fs::create_dir_all(&dir_c).unwrap();
+                std::fs::write(dir_c.join(MANIFEST_FILENAME), "{}").unwrap();
+                let chosen = select_preferred_manifest_dir(&dirs, |p| p == dir_b);
+                assert_eq!(chosen, Some(&dir_c));
+
+                drop(std::fs::remove_dir_all(&root));
             }
         }
     }

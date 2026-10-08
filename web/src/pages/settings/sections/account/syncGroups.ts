@@ -20,6 +20,8 @@ export const SYNC_GROUPS: readonly SyncGroup[] = [
       'appearance.light_theme',
       'appearance.color_scheme',
       'appearance.custom_color',
+      'appearance.custom_themes',
+      'appearance.file_icon_pack',
     ],
   },
   {
@@ -45,6 +47,7 @@ export const SYNC_GROUPS: readonly SyncGroup[] = [
       'ui.show_activity_rss',
       'ui.show_activity_webhooks',
       'ui.show_activity_theme',
+      'ui.show_activity_account',
       'ui.show_titlebar_pause_all',
       'ui.show_titlebar_resume_all',
       'ui.show_titlebar_settings',
@@ -76,6 +79,7 @@ export const SYNC_GROUPS: readonly SyncGroup[] = [
     id: 'bt',
     labelKey: 'syncScopeBt',
     keys: [
+      'bt.enabled',
       'bt.enable_dht',
       'bt.enable_upnp',
       'bt.custom_trackers',

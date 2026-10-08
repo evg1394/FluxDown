@@ -162,7 +162,9 @@ pub async fn run_add_local(args: AddArgs, json: bool) -> Result<(), ClientError>
             maybe_done = done_rx.recv() => {
                 let Some(done) = maybe_done else { break };
                 engine.manager.on_task_done(&done).await; // 内部 drain_queue 推进排队任务
-                remaining.remove(&done.task_id);
+                if done.phase == fluxdown_engine::download_manager::TaskDonePhase::Finished {
+                    remaining.remove(&done.task_id);
+                }
             }
             signal = tokio::signal::ctrl_c() => {
                 for id in &remaining {

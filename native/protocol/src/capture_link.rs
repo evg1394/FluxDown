@@ -30,8 +30,8 @@ pub fn is_capture_url(value: &str) -> bool {
         .any(|scheme| lower.starts_with(scheme))
 }
 
-/// `fluxdown:` 深链 → 实际下载链接：`fluxdown://download?url=<encoded>` 或
-/// `fluxdown:<url>`；其他 scheme 原样返回。
+/// `fluxdown:` 深链 → 实际下载链接：`fluxdown://download?url=<encoded>`（Firefox 等
+/// 会规整成 `fluxdown://download/?url=`）或 `fluxdown:<url>`；其他 scheme 原样返回。
 ///
 /// ```
 /// use fluxdown_protocol::capture_link::normalize_capture_url;
@@ -42,20 +42,48 @@ pub fn is_capture_url(value: &str) -> bool {
 /// ```
 #[must_use]
 pub fn normalize_capture_url(value: &str) -> String {
-    let lower = value.to_ascii_lowercase();
-    if !lower.starts_with("fluxdown:") {
+    let Some(rest) = deep_link_rest(value) else {
         return value.to_owned();
-    }
-    let rest = &value["fluxdown:".len()..];
-    let rest = rest.trim_start_matches('/');
-    if let Some(query) = rest.strip_prefix("download?") {
-        for pair in query.split('&') {
-            if let Some(encoded) = pair.strip_prefix("url=") {
-                return percent_decode(encoded);
-            }
-        }
+    };
+    if let Some(url) = deep_link_param(rest, "url") {
+        return url;
     }
     percent_decode(rest)
+}
+
+/// `fluxdown://download?url=…&filename=…` 携带的文件名（浏览器扩展协议模式会带上
+/// 它已识别的名字）；不是深链或未带名字时为 `None`。
+///
+/// ```
+/// use fluxdown_protocol::capture_link::deep_link_file_name;
+/// assert_eq!(
+///     deep_link_file_name("fluxdown://download/?url=x&filename=a+b.zip").as_deref(),
+///     Some("a b.zip")
+/// );
+/// ```
+#[must_use]
+pub fn deep_link_file_name(value: &str) -> Option<String> {
+    deep_link_param(deep_link_rest(value)?, "filename").filter(|name| !name.trim().is_empty())
+}
+
+/// 去掉 `fluxdown:` 与其后的 `/`；不是深链时为 `None`。
+fn deep_link_rest(value: &str) -> Option<&str> {
+    const SCHEME: &str = "fluxdown:";
+    let rest = value.get(SCHEME.len()..)?;
+    value[..SCHEME.len()]
+        .eq_ignore_ascii_case(SCHEME)
+        .then(|| rest.trim_start_matches('/'))
+}
+
+/// `download?…` / `download/?…` 查询串里的参数值（form-urlencoded：`+` 为空格）。
+fn deep_link_param(rest: &str, key: &str) -> Option<String> {
+    let query = rest
+        .strip_prefix("download?")
+        .or_else(|| rest.strip_prefix("download/?"))?;
+    query.split('&').find_map(|pair| {
+        let (name, value) = pair.split_once('=')?;
+        (name == key).then(|| percent_decode(&value.replace('+', " ")))
+    })
 }
 
 /// `.torrent` 本机路径或 `file://` URL → 路径（不检查文件是否存在）。
@@ -173,6 +201,13 @@ mod tests {
             "https://a.b/c"
         );
         assert_eq!(normalize_capture_url("magnet:?x"), "magnet:?x");
+        // #743：Firefox 把 `fluxdown://download?` 规整成 `download/?`。
+        let link =
+            "fluxdown://download/?url=http%3A%2F%2Fh%2Fa%3Fq%3D1%2B2&filename=%E4%B8%AD+1.bin";
+        assert_eq!(normalize_capture_url(link), "http://h/a?q=1+2");
+        assert_eq!(deep_link_file_name(link).as_deref(), Some("中 1.bin"));
+        assert_eq!(deep_link_file_name("fluxdown:https://a.b/c"), None);
+        assert_eq!(deep_link_file_name("https://a.b/c?filename=x"), None);
     }
 
     #[test]

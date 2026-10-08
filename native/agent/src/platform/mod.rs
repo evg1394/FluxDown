@@ -126,10 +126,7 @@ const DOWNLOADING_SUFFIX: &str = ".fdownloading";
 pub fn open_task(task: &fluxdown_protocol::TaskDto) -> Result<(), PlatformError> {
     let path = PathBuf::from(&task.save_dir).join(&task.file_name);
     if task.file_name.is_empty() || !path.exists() {
-        return Err(PlatformError::Failed(format!(
-            "task file not found: {}",
-            path.display()
-        )));
+        return Err(PlatformError::NotFound(path));
     }
     launch_path(&path, false)
 }
@@ -159,10 +156,7 @@ fn reveal_target(save_dir: &Path, file_name: &str) -> Result<(PathBuf, bool), Pl
     if save_dir.is_dir() {
         return Ok((save_dir.to_path_buf(), false));
     }
-    Err(PlatformError::Failed(format!(
-        "task directory not found: {}",
-        save_dir.display()
-    )))
+    Err(PlatformError::NotFound(save_dir.to_path_buf()))
 }
 
 /// 用系统默认程序打开 `path`；`reveal` 为 true 时改为在文件管理器中定位。
@@ -455,6 +449,10 @@ pub fn set_url_protocol(scheme: &str, enabled: bool) -> Result<(), PlatformError
     }
 }
 
+/// 本构建能否在 agent 所在主机上打开 / 定位路径（与下方 `launch_path` 的 cfg 一一对应）。
+/// 网关据此决定是否向连接下发 `agent.openTaskFiles` 能力。
+pub const LAUNCHES_PATHS: bool = cfg!(any(windows, target_os = "linux", target_os = "macos"));
+
 #[cfg(target_os = "linux")]
 fn launch_path(path: &Path, reveal: bool) -> Result<(), PlatformError> {
     // xdg-open 无「选中」语义：定位时打开所在目录，避免直接打开（未完成的）文件。
@@ -512,6 +510,14 @@ fn launch_path(path: &Path, reveal: bool) -> Result<(), PlatformError> {
         return open_with_shell(&dir);
     }
     open_with_shell(path)
+}
+
+/// Android / iOS：由宿主应用（Intent / UIDocumentInteraction）打开文件，agent 进程内不可用。
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
+fn launch_path(_path: &Path, _reveal: bool) -> Result<(), PlatformError> {
+    Err(PlatformError::Unsupported(
+        "opening files is handled by the host application on this platform",
+    ))
 }
 
 /// 打开任意路径（文件走默认关联程序、目录走默认文件管理器）。
@@ -799,6 +805,9 @@ pub enum PlatformError {
     Unsupported(&'static str),
     #[error("platform integration failed: {0}")]
     Failed(String),
+    /// 要打开 / 定位的任务产物或保存目录已不在磁盘上。
+    #[error("path not found: {}", .0.display())]
+    NotFound(PathBuf),
     #[error("unknown URL scheme: {0}")]
     InvalidScheme(String),
 }
@@ -973,7 +982,7 @@ mod tests {
         std::fs::remove_dir_all(&dir).expect("cleanup");
         assert!(matches!(
             reveal_target(&dir, "a.dmg"),
-            Err(PlatformError::Failed(_))
+            Err(PlatformError::NotFound(path)) if path == dir
         ));
     }
 }

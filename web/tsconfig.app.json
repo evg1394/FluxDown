@@ -8,7 +8,8 @@
     "resolveJsonModule": true,
     "paths": {
       "@i18n-assets/*": ["../assets/i18n/*"],
-      "@gpui-theme/*": ["../website-v2/src/lib/gpui-theme/*"]
+      "@gpui-theme/*": ["../website-v2/src/lib/gpui-theme/*"],
+      "@icon-packs/*": ["../assets/icon-packs/*"]
     },
     "allowArbitraryExtensions": true,
     "skipLibCheck": true,

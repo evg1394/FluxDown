@@ -273,6 +273,7 @@ mod tests {
                 origin_id: None,
                 origin_id_changed: false,
                 membership_ordinal: None,
+                has_password: Some(true),
             },
             entitlements: Entitlements::default(),
             current_plan: None,

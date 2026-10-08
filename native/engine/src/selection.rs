@@ -99,4 +99,55 @@ pub trait HostSelection: Send + Sync {
     /// 侧调用），唤醒对应
     /// [`select_resolve_variant`](HostSelection::select_resolve_variant) 的等待。
     fn provide_variant_selection(&self, task_id: &str, selected_index: i32);
+
+    /// 当前是否有能作答交互选择的宿主界面在线。为 false 时引擎不会为「文件已存在」
+    /// 询问让出并发槽挂起任务，直接按回退值（重命名）继续。默认 false（headless /
+    /// Flutter hub / CLI 本地模式 / 测试）。
+    fn can_prompt(&self) -> bool {
+        false
+    }
+
+    /// 发起「文件已存在」询问等待；`timeout` 到期返回
+    /// `TimedOutDefaulted(FileExistsChoice::Rename)`。默认实现不等待，直接
+    /// `NoSelectorConfigured(Rename)`。
+    async fn select_file_exists(
+        &self,
+        _task_id: &str,
+        _conflict: &FileConflict,
+        _timeout: Duration,
+    ) -> SelectionOutcome<FileExistsChoice> {
+        SelectionOutcome::NoSelectorConfigured(FileExistsChoice::Rename)
+    }
+}
+
+/// 「文件已存在」询问的答复。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileExistsChoice {
+    /// 自动追加序号另存（也是超时 / 无人值守回退值）。
+    Rename,
+    /// 完成时替换旧文件；授权只绑定询问时的文件名。
+    Overwrite,
+    /// 不下载，任务记为完成并采纳已有文件。
+    Skip,
+    /// 用户取消：任务暂停，下次真正起跑时重新询问。
+    Cancel,
+}
+
+/// 「文件已存在」询问的上下文，全部在主机侧算好（远程客户端看不到主机文件系统）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileConflict {
+    /// 发生冲突的目标文件名。
+    pub file_name: String,
+    /// 保存目录。
+    pub save_dir: String,
+    /// 已有文件大小（字节）。
+    pub existing_size: Option<u64>,
+    /// 已有文件修改时间（Unix 毫秒）。
+    pub existing_modified_unix_ms: Option<i64>,
+    /// 新下载的大小（字节），未知为 `None`。
+    pub incoming_size: Option<i64>,
+    /// 选「重命名」时的预览名（询问时刻计算）。
+    pub rename_preview: String,
+    /// 该协议是否允许「跳过」（与全局 skip 支持范围一致：HTTP/FTP）。
+    pub allow_skip: bool,
 }

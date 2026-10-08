@@ -1,0 +1,307 @@
+package com.fluxdown.bridge
+
+import com.fluxdown.core.host.HostErrorCode
+import com.fluxdown.core.host.HostEvent
+import com.fluxdown.core.host.HostException
+import com.fluxdown.core.host.HostSignal
+import com.fluxdown.core.host.HostSnapshot
+import com.fluxdown.core.model.BtFile
+import com.fluxdown.core.model.Category
+import com.fluxdown.core.model.CloudDevice
+import com.fluxdown.core.model.FileExistsAction
+import com.fluxdown.core.model.HlsOption
+import com.fluxdown.core.model.HostInfo
+import com.fluxdown.core.model.LinkDevice
+import com.fluxdown.core.model.Queue
+import com.fluxdown.core.model.RssSource
+import com.fluxdown.core.model.RuntimeStats
+import com.fluxdown.core.model.SeedingStatus
+import com.fluxdown.core.model.Segment
+import com.fluxdown.core.model.SelectionKind
+import com.fluxdown.core.model.SelectionOutcome
+import com.fluxdown.core.model.SelectionRequest
+import com.fluxdown.core.model.SourceBytes
+import com.fluxdown.core.model.Task
+import com.fluxdown.core.model.TaskGroup
+import com.fluxdown.core.model.TaskRuntime
+import com.fluxdown.core.model.TaskStatus
+import com.fluxdown.core.model.VariantOption
+import kotlinx.coroutines.CancellationException
+
+/*
+ * UniFFI 生成的 `*Dto` ↔ `:core` 模型的边界转换（u64→Long、u32→Int 一次性完成）。
+ * 生成类型与 `:core` 端口同名者（`HostSession`）在本包内以生成版为准，端口一律经别名 / 全限定名引用。
+ */
+
+/** 调用 Rust：把绑定层异常归一成 [HostException]；原生库加载失败（LinkageError）同样转成可展示的失败。 */
+internal suspend inline fun <T> guarded(block: () -> T): T = try {
+    block()
+} catch (e: FluxException) {
+    throw e.toHost()
+} catch (e: CancellationException) {
+    throw e
+} catch (e: LinkageError) {
+    throw HostException(HostErrorCode.Internal, message = "native engine unavailable: ${e.message}", cause = e)
+}
+
+internal fun FluxException.toHost(): HostException = when (this) {
+    is FluxException.Rpc -> HostException(code.toCore(), reason, retryable, detail, this)
+    is FluxException.Transport -> HostException(HostErrorCode.Unavailable, null, true, detail, this)
+    is FluxException.Closed -> HostException(HostErrorCode.Cancelled, null, false, "session closed", this)
+}
+
+internal fun HostErrorDto.toHost(): HostException = HostException(code.toCore(), reason, retryable, message)
+
+internal fun ErrorCodeDto.toCore(): HostErrorCode = when (this) {
+    ErrorCodeDto.PROTOCOL_INCOMPATIBLE -> HostErrorCode.ProtocolIncompatible
+    ErrorCodeDto.UNAUTHORIZED -> HostErrorCode.Unauthorized
+    ErrorCodeDto.INVALID_ARGUMENT -> HostErrorCode.InvalidArgument
+    ErrorCodeDto.NOT_FOUND -> HostErrorCode.NotFound
+    ErrorCodeDto.CONFLICT -> HostErrorCode.Conflict
+    ErrorCodeDto.UNAVAILABLE -> HostErrorCode.Unavailable
+    ErrorCodeDto.TIMEOUT -> HostErrorCode.Timeout
+    ErrorCodeDto.CANCELLED -> HostErrorCode.Cancelled
+    ErrorCodeDto.UNSUPPORTED -> HostErrorCode.Unsupported
+    ErrorCodeDto.INTERNAL -> HostErrorCode.Internal
+}
+
+internal fun HostSignalDto.toCore(): HostSignal = when (this) {
+    is HostSignalDto.Snapshot -> HostSignal.Snapshot(snapshot.toCore())
+    is HostSignalDto.Event -> HostSignal.Event(event.toCore())
+    is HostSignalDto.Stale -> HostSignal.Stale
+    is HostSignalDto.Fatal -> HostSignal.Fatal(error.toHost())
+}
+
+internal fun HostSnapshotDto.toCore() = HostSnapshot(
+    info = info.toCore(),
+    daemonConnected = daemonConnected,
+    tasks = tasks.map { it.toCore() },
+    runtime = runtime.associate { it.taskId to it.toCore() },
+    queues = queues.map { it.toCore() },
+    queuePositions = queuePositions,
+    groups = groups.map { it.toCore() },
+    stats = stats.toCore(),
+    priorityTaskId = priorityTaskId,
+    pendingSelections = pendingSelections.map { it.toCore() },
+    config = config,
+    configRevision = configRevision.toLong(),
+    rssSources = rssSources.map { it.toCore() },
+    cloudDevices = cloudDevices.map { it.toCore() },
+    linkDevices = linkDevices.map { it.toCore() },
+    categories = categories.map { it.toCore() },
+    sections = sections,
+)
+
+internal fun HostEventDto.toCore(): HostEvent = when (this) {
+    is HostEventDto.TaskChanged -> HostEvent.TaskChanged(task.toCore())
+    is HostEventDto.TaskDeleted -> HostEvent.TaskDeleted(taskId)
+    is HostEventDto.TaskProgress -> HostEvent.TaskProgress(
+        taskId = taskId,
+        status = status,
+        downloadedBytes = downloadedBytes,
+        totalBytes = totalBytes,
+        speed = speed,
+        uploadSpeed = uploadSpeed,
+        fileName = fileName,
+        errorMessage = errorMessage,
+        uploadedBytes = uploadedBytes,
+        seedingStatus = seedingStatus,
+    )
+    is HostEventDto.TaskRuntimeChanged -> HostEvent.TaskRuntimeChanged(runtime.toCore())
+    is HostEventDto.QueuesChanged -> HostEvent.QueuesChanged(queues.map { it.toCore() })
+    is HostEventDto.QueuePositionsChanged -> HostEvent.QueuePositionsChanged(positions)
+    is HostEventDto.GroupsChanged -> HostEvent.GroupsChanged(groups.map { it.toCore() })
+    is HostEventDto.FileMissingChanged -> HostEvent.FileMissingChanged(updates)
+    is HostEventDto.PriorityTaskChanged -> HostEvent.PriorityTaskChanged(taskId)
+    is HostEventDto.RuntimeStatsChanged -> HostEvent.RuntimeStatsChanged(stats.toCore())
+    is HostEventDto.DaemonConnectionChanged -> HostEvent.DaemonConnectionChanged(connected)
+    is HostEventDto.SelectionPending -> HostEvent.SelectionPending(request.toCore())
+    is HostEventDto.SelectionResolved -> HostEvent.SelectionResolved(requestId)
+    is HostEventDto.ConfigChanged -> HostEvent.ConfigChanged(values, revision.toLong())
+    is HostEventDto.RssSourcesChanged -> HostEvent.RssSourcesChanged(sources.map { it.toCore() })
+    is HostEventDto.CloudDevicesChanged -> HostEvent.CloudDevicesChanged(devices.map { it.toCore() })
+    is HostEventDto.LinkedDevicesChanged -> HostEvent.LinkedDevicesChanged(devices.map { it.toCore() })
+    is HostEventDto.CategoriesChanged -> HostEvent.CategoriesChanged(categories.map { it.toCore() })
+    is HostEventDto.SectionChanged -> HostEvent.SectionChanged(name, json)
+    is HostEventDto.Notice -> HostEvent.Notice(name, json)
+}
+
+internal fun HostInfoDto.toCore() = HostInfo(
+    serviceName = serviceName,
+    serviceVersion = serviceVersion,
+    protocolVersion = protocolVersion.toInt(),
+    capabilities = capabilities.toSet(),
+)
+
+internal fun TaskDto.toCore() = Task(
+    taskId = taskId,
+    url = url,
+    originUrl = originUrl,
+    fileName = fileName,
+    saveDir = saveDir,
+    status = TaskStatus.of(status),
+    downloadedBytes = downloadedBytes,
+    totalBytes = totalBytes,
+    errorMessage = errorMessage,
+    createdAt = createdAt,
+    completedAt = completedAt,
+    queueId = queueId,
+    groupId = groupId,
+    rssSourceId = rssSourceId,
+    fileMissing = fileMissing,
+    autoRoute = autoRoute,
+    sourceBytes = SourceBytes(cdn = sourceCdn, proxy = sourceProxy, nic = sourceNic),
+    uploadedBytes = uploadedBytes,
+    seedingStatus = SeedingStatus.of(seedingStatus),
+    seedingMessage = seedingMessage,
+    seedingTimeSecs = seedingTimeSecs,
+)
+
+internal fun SegmentDto.toCore() = Segment(
+    index = index,
+    startByte = startByte,
+    endByte = endByte,
+    downloadedBytes = downloadedBytes,
+    active = active,
+)
+
+internal fun TaskRuntimeDto.toCore() = TaskRuntime(
+    taskId = taskId,
+    sampleSequence = sampleSequence.toLong(),
+    activeTransfers = activeTransfers?.toInt(),
+    connectedPeers = connectedPeers?.toInt(),
+    totalBytes = totalBytes,
+    segments = segments.map { it.toCore() },
+)
+
+internal fun QueueDto.toCore() = Queue(
+    queueId = queueId,
+    name = name,
+    speedLimitKbps = speedLimitKbps,
+    uploadLimitKbps = uploadLimitKbps,
+    maxConcurrent = maxConcurrent,
+    defaultSaveDir = defaultSaveDir,
+    position = position,
+    isRunning = isRunning,
+    scheduleEnabled = scheduleEnabled,
+    scheduleStart = scheduleStart,
+    scheduleStop = scheduleStop,
+    scheduleDays = scheduleDays,
+)
+
+internal fun GroupDto.toCore() = TaskGroup(
+    groupId = groupId,
+    name = name,
+    sourceUrl = sourceUrl,
+    saveDir = saveDir,
+    createdAt = createdAt,
+)
+
+internal fun RuntimeStatsDto.toCore() = RuntimeStats(
+    activeTasks = activeTasks.toInt(),
+    pendingTasks = pendingTasks.toInt(),
+    totalDownloadBps = totalDownloadBps,
+    totalUploadBps = totalUploadBps,
+    diskFreeBytes = diskFreeBytes?.toLong(),
+    saveDir = saveDir,
+    retryPendingTasks = retryPendingTasks.toInt(),
+)
+
+internal fun SelectionRequestDto.toCore() = SelectionRequest(
+    requestId = requestId,
+    taskId = taskId,
+    kind = kind.toCore(),
+    defaultChoice = defaultChoice.toCore(),
+    deadlineUnixMs = deadlineUnixMs,
+)
+
+internal fun SelectionKindDto.toCore(): SelectionKind = when (this) {
+    is SelectionKindDto.Hls -> SelectionKind.Hls(options.map { HlsOption(it.index, it.bandwidth, it.width, it.height) })
+    is SelectionKindDto.Bt -> SelectionKind.Bt(files.map { BtFile(it.index, it.path, it.size) })
+    is SelectionKindDto.Variant -> SelectionKind.Variant(
+        options.map {
+            VariantOption(it.index, it.label, it.container, it.bandwidth, it.width, it.height, it.totalBytes)
+        },
+    )
+    is SelectionKindDto.FileExists -> SelectionKind.FileExists(
+        fileName = fileName,
+        saveDir = saveDir,
+        existingSize = existingSize?.toLong(),
+        existingModifiedUnixMs = existingModifiedUnixMs,
+        incomingSize = incomingSize,
+        renamePreview = renamePreview,
+        actions = actions.map { it.toCore() },
+    )
+}
+
+internal fun FileExistsActionDto.toCore(): FileExistsAction = when (this) {
+    FileExistsActionDto.RENAME -> FileExistsAction.Rename
+    FileExistsActionDto.OVERWRITE -> FileExistsAction.Overwrite
+    FileExistsActionDto.SKIP -> FileExistsAction.Skip
+}
+
+internal fun FileExistsAction.toDto(): FileExistsActionDto = when (this) {
+    FileExistsAction.Rename -> FileExistsActionDto.RENAME
+    FileExistsAction.Overwrite -> FileExistsActionDto.OVERWRITE
+    FileExistsAction.Skip -> FileExistsActionDto.SKIP
+}
+
+internal fun SelectionOutcomeDto.toCore(): SelectionOutcome = when (this) {
+    is SelectionOutcomeDto.Hls -> SelectionOutcome.Hls(index)
+    is SelectionOutcomeDto.Bt -> SelectionOutcome.Bt(indices)
+    is SelectionOutcomeDto.Variant -> SelectionOutcome.Variant(index)
+    is SelectionOutcomeDto.FileExists -> SelectionOutcome.FileExists(action.toCore())
+    is SelectionOutcomeDto.Cancelled -> SelectionOutcome.Cancelled
+}
+
+internal fun SelectionOutcome.toDto(): SelectionOutcomeDto = when (this) {
+    is SelectionOutcome.Hls -> SelectionOutcomeDto.Hls(index)
+    is SelectionOutcome.Bt -> SelectionOutcomeDto.Bt(indices)
+    is SelectionOutcome.Variant -> SelectionOutcomeDto.Variant(index)
+    is SelectionOutcome.FileExists -> SelectionOutcomeDto.FileExists(action.toDto())
+    SelectionOutcome.Cancelled -> SelectionOutcomeDto.Cancelled
+}
+
+internal fun RssSourceDto.toCore() = RssSource(
+    sourceId = sourceId,
+    name = name,
+    url = url,
+    enabled = enabled,
+    autoDownload = autoDownload,
+    intervalMinutes = intervalMinutes,
+    lastSuccessAt = lastSuccessAt,
+    lastError = lastError,
+    failCount = failCount,
+    unreadCount = unreadCount,
+)
+
+internal fun CloudDeviceDto.toCore() = CloudDevice(
+    deviceId = deviceId,
+    name = name,
+    platform = platform,
+    isOnline = isOnline,
+    isCurrent = isCurrent,
+    appVersion = appVersion,
+    defaultSaveDir = defaultSaveDir,
+    pathStyle = pathStyle,
+)
+
+internal fun LinkDeviceDto.toCore() = LinkDevice(
+    fingerprint = fingerprint,
+    name = name,
+    platform = platform,
+    online = online,
+    defaultSaveDir = defaultSaveDir,
+    pathStyle = pathStyle,
+)
+
+internal fun CategoryDto.toCore() = Category(
+    id = id,
+    name = name,
+    icon = icon,
+    extensions = extensions,
+    regexPattern = regexPattern,
+    position = position,
+    visible = visible,
+    builtinType = builtinType,
+)

@@ -31,6 +31,7 @@ jobs:
       web: ${{ steps.f.outputs.web }}
       website: ${{ steps.f.outputs.website }}
       extension: ${{ steps.f.outputs.extension }}
+      android: ${{ steps.f.outputs.android }}
     steps:
       - uses: actions/checkout@v4
       - uses: dorny/paths-filter@v3
@@ -50,6 +51,8 @@ jobs:
               - 'web/**'
               - 'assets/i18n/**'
               - 'website-v2/src/lib/gpui-theme/**'
+              - 'assets/icon-packs/**'
+              - 'crates/icon_pack/tests/fixtures/**'
               - '.github/workflows/ci.yml'
             website:
               - 'website-v2/**'
@@ -57,6 +60,13 @@ jobs:
               - '.github/workflows/ci.yml'
             extension:
               - 'fluxDown/**'
+              - '.github/workflows/ci.yml'
+            android:
+              - 'mobile/Android/**'
+              - 'native/**'
+              - 'assets/i18n/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
               - '.github/workflows/ci.yml'
 
   rust-lint:
@@ -109,6 +119,8 @@ jobs:
             packages: "-p fluxdown_api -p fluxdown_protocol -p fluxdown_daemon -p fluxdown_engine_protocol -p fluxdown_link -p fluxdown_logfile -p fluxdown_cli"
           - name: agent
             packages: "-p fluxdown_agent"
+          - name: mobile
+            packages: "-p fluxdown_mobile"
           - name: gpui
             packages: "-p fluxdown_ui_account -p fluxdown_ui_app -p fluxdown_ui_command_palette -p fluxdown_ui_components -p fluxdown_ui_downloads -p fluxdown_ui_extensions -p fluxdown_ui_i18n -p fluxdown_ui_rss -p fluxdown_ui_settings -p fluxdown_ui_shell -p fluxdown_ui_theme"
     steps:
@@ -183,3 +195,38 @@ jobs:
       - run: npm ci
       - run: npm run build
       - run: npm run build:firefox
+
+  # 原生 Android：Kotlin 单测（含经 UniFFI 生成绑定的本机主机端到端冒烟）+ 组装 APK + lint。
+  # :bridge 经 cargo-ndk 交叉编译 fluxdown_mobile；门禁只编 arm64-v8a 以控制时长。
+  # runner 须 ≥ ubuntu-24.04：install-action 下发的 cargo-ndk 预编译包要求 GLIBC 2.39（22.04 只有 2.35）；
+  # Android 产物不依赖宿主 glibc，无需像桌面 Linux 发行物那样锁 22.04 基线。
+  android:
+    name: Native Android (test + assemble + lint)
+    needs: changes
+    if: needs.changes.outputs.android == 'true'
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: mobile/Android
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ci-android
+          cache-on-failure: true
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-ndk
+      # NDK：runner 预装于 $ANDROID_HOME/ndk/<版本>，:bridge 自动取最高版本。
+      - name: Gradle test + assemble + lint
+        run: >-
+          ./gradlew --no-daemon -Pfluxdown.abis=arm64-v8a
+          :core:testDebugUnitTest :fluxui:testDebugUnitTest :bridge:testDebugUnitTest
+          :app:assembleDebug :app:lintDebug

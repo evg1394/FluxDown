@@ -6,8 +6,6 @@ export interface ThemeContextValue {
   mode: ThemeModeName
   preference: ThemePreference
   prefs: AppearancePreferences
-  /** 亮 ↔ 暗切换：写 agent 偏好 `appearance.theme_mode`（GPUI `toggle_theme` 同语义）。 */
-  toggle: () => Promise<void>
 }
 
 export const ThemeContext = createContext<ThemeContextValue | null>(null)

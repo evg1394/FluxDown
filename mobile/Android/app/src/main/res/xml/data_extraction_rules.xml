@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?><!--
+   Android 12+：云备份与设备到设备迁移都不带走任何应用数据（与 backup_rules.xml 保持一致）。
+   - DataStore（files/datastore/fluxdown.preferences_pb）内的远端主机访问密钥是 Keystore 密文，
+     Keystore 密钥不可迁移，恢复后无法解密；
+   - 引擎数据目录（files/fluxdown）与下载文件是本机状态，不应被云端回灌或克隆到另一台设备；
+   - 偏好与密文同在一个 DataStore 文件，无法单独放行外观偏好，故整体排除。
+   新增确认可跨设备恢复的文件时，用 <include> 精确放行。
+-->
+<data-extraction-rules>
+    <cloud-backup>
+        <exclude domain="root" path="." />
+        <exclude domain="file" path="." />
+        <exclude domain="database" path="." />
+        <exclude domain="sharedpref" path="." />
+        <exclude domain="external" path="." />
+    </cloud-backup>
+    <device-transfer>
+        <exclude domain="root" path="." />
+        <exclude domain="file" path="." />
+        <exclude domain="database" path="." />
+        <exclude domain="sharedpref" path="." />
+        <exclude domain="external" path="." />
+    </device-transfer>
+</data-extraction-rules>

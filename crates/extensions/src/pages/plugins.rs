@@ -5,13 +5,13 @@ use std::collections::{HashMap, HashSet};
 
 use fluxdown_protocol::{InstalledPlugin, MarketEntryDto, PluginDto};
 use fluxdown_ui_components::{
-    ControlExt as _, FluxIcon, IconControlExt as _, card, form, form_field, input_with_action,
-    tabular_numbers,
+    BusyExt as _, ControlExt as _, FluxIcon, IconControlExt as _, card, form, form_field,
+    input_with_action, tabular_numbers,
 };
 use fluxdown_ui_theme::active_theme;
 use gpui::{
     AppContext as _, Context, Div, Entity, InteractiveElement as _, IntoElement, ParentElement,
-    SharedString, StatefulInteractiveElement as _, Styled, Window, prelude::FluentBuilder as _, px,
+    SharedString, StatefulInteractiveElement as _, Styled, Window, prelude::FluentBuilder as _,
 };
 use gpui_component::{
     Disableable as _, Icon, WindowExt as _,
@@ -222,7 +222,7 @@ impl ExtensionsView {
                                     .ghost()
                                     .control(cx)
                                     .label(translator.text("marketRefreshTooltip").to_owned())
-                                    .loading(self.plugins.market.loading)
+                                    .busy(self.plugins.market.loading)
                                     .disabled(self.plugins.market.loading || stale)
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.load_market(window, cx);
@@ -282,7 +282,7 @@ impl ExtensionsView {
                             .icon(FluxIcon::FolderOpen)
                             .label(translator.text("pluginInstallZipButton").to_owned())
                             .control(cx)
-                            .loading(self.plugins.installing_file)
+                            .busy(self.plugins.installing_file)
                             .disabled(stale || self.plugins.installing_file)
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.pick_plugin_zip(window, cx);
@@ -322,7 +322,7 @@ impl ExtensionsView {
                                         .primary()
                                         .label(translator.text("pluginInstallDirButton").to_owned())
                                         .control(cx)
-                                        .loading(self.plugins.installing_dir)
+                                        .busy(self.plugins.installing_dir)
                                         .disabled(
                                             stale || dev_dir_empty || self.plugins.installing_dir,
                                         )
@@ -469,7 +469,7 @@ impl ExtensionsView {
                                 })
                                 .to_owned(),
                         )
-                        .loading(pending)
+                        .busy(pending)
                         .disabled(busy || pending)
                         .on_click(cx.listener(move |this, _, window, cx| {
                             this.request_market_install(entry.clone(), window, cx);
@@ -485,7 +485,7 @@ impl ExtensionsView {
                         .control_icon(cx)
                         .icon(FluxIcon::RotateCw)
                         .tooltip(translator.text("pluginReloadTooltip").to_owned())
-                        .loading(reloading)
+                        .busy(reloading)
                         .disabled(busy)
                         .on_click(cx.listener(move |this, _, window, cx| {
                             this.reload_plugin(identity.clone(), window, cx);
@@ -750,7 +750,7 @@ impl ExtensionsView {
                     .outline()
                     .control(cx)
                     .label(install_label)
-                    .loading(pending)
+                    .busy(pending)
                     .disabled(!actionable || pending || stale)
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.request_market_install(target.clone(), window, cx);
@@ -1310,7 +1310,7 @@ impl ExtensionsView {
             let form_for_save = form.clone();
             dialog
                 .title(fluxdown_ui_components::dialog_title(title.clone(), cx))
-                .w(px(560.))
+                .w(active_theme(cx).text_extent(560.))
                 .overlay_closable(!is_saving)
                 // min_h_0：窗口矮于对话框时让内容区收缩，交给表单内部滚动。
                 .content(move |content, _, _| content.min_h_0().child(form_for_content.clone()))
@@ -1334,7 +1334,7 @@ impl ExtensionsView {
                                 } else {
                                     save.clone()
                                 })
-                                .loading(is_saving)
+                                .busy(is_saving)
                                 .disabled(is_saving)
                                 .on_click(move |_, window, cx| {
                                     form_for_save.update(cx, |form, cx| form.submit(window, cx));
@@ -1363,7 +1363,7 @@ impl ExtensionsView {
             let dialog_for_cancel = dialog_for_cancel.clone();
             dialog_view
                 .title(fluxdown_ui_components::dialog_title(title.clone(), cx))
-                .w(px(520.))
+                .w(active_theme(cx).text_extent(520.))
                 .on_cancel(move |_, _, cx| {
                     dialog_for_cancel.update(cx, |this, cx| this.cancel_session(cx));
                     true

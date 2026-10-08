@@ -17,6 +17,7 @@ mod demo;
 mod device_identity;
 pub mod device_meta;
 pub mod diagnostics;
+pub mod embedded;
 pub mod event_hub;
 pub mod gateway;
 mod http_client;
@@ -40,6 +41,9 @@ pub mod sync;
 mod task_events;
 pub mod update;
 mod web_assets;
+
+pub use embedded::{AgentStartError, EmbeddedAgent, EmbeddedConfig, start_embedded};
+pub use gateway::{LocalConnection, LocalEventError};
 
 use fluxdown_protocol::{ServiceHello, ServiceRole};
 

@@ -1,0 +1,332 @@
+import Foundation
+
+// 局域网直连（L1，`agent.link.*`，无需登录）。镜像 `native/protocol/src/agent.rs`（`LinkPairingRequestDto` /
+// `LinkPairingCodeDto` / 各 Params）与 `daemon.rs`（`LinkDiscoveredPeer` / `LinkDeviceInfo` / `LinkPair*Response`）；
+// 规则镜像 Web `account/pairing.ts` 与 GPUI `crates/account/src/link.rs`。
+
+/// 一台已配对设备的对外视图（`LinkDeviceInfo`）。严禁含 link_secret 等敏感字段。
+public struct LinkDeviceInfo: Sendable, Hashable, Identifiable, Codable {
+    public var fingerprint: String
+    public var name: String
+    public var platform: String?
+    public var online: Bool
+    /// Unix 时间（秒或毫秒，按量级判断，见 ``LinkRules/date(fromUnix:)``）。
+    public var pairedAt: Int64
+    public var lastSeenAt: Int64
+    public var defaultSaveDir: String?
+    public var pathStyle: PathStyle?
+
+    public init(
+        fingerprint: String, name: String, platform: String? = nil, online: Bool = false, pairedAt: Int64 = 0,
+        lastSeenAt: Int64 = 0, defaultSaveDir: String? = nil, pathStyle: PathStyle? = nil
+    ) {
+        self.fingerprint = fingerprint
+        self.name = name
+        self.platform = platform
+        self.online = online
+        self.pairedAt = pairedAt
+        self.lastSeenAt = lastSeenAt
+        self.defaultSaveDir = defaultSaveDir
+        self.pathStyle = pathStyle
+    }
+
+    public var id: String { fingerprint }
+
+    public var effectivePathStyle: PathStyle? { PathStyle.effective(reported: pathStyle, platform: platform) }
+
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        fingerprint = try c.decode(String.self, forKey: .fingerprint)
+        name = try c.decode(String.self, forKey: .name)
+        platform = try c.decodeIfPresent(String.self, forKey: .platform)
+        online = try c.decodeIfPresent(Bool.self, forKey: .online) ?? false
+        pairedAt = try c.decodeIfPresent(Int64.self, forKey: .pairedAt) ?? 0
+        lastSeenAt = try c.decodeIfPresent(Int64.self, forKey: .lastSeenAt) ?? 0
+        defaultSaveDir = try c.decodeIfPresent(String.self, forKey: .defaultSaveDir)
+        pathStyle = try c.decodeIfPresent(PathStyle.self, forKey: .pathStyle)
+    }
+}
+
+/// `agent.linkDiscovered` 分区元素 / `agent.link.probe` 结果：被发现、尚未配对的设备。
+public struct LinkDiscoveredPeer: Sendable, Hashable, Codable {
+    /// 对端指纹（经 `/ping` TOFU 获得；mDNS 未探测到时为 nil）。
+    public var fingerprint: String?
+    public var name: String
+    public var platform: String?
+    public var host: String
+    public var port: UInt16
+    public var appVersion: String?
+    /// `mdns` | `manual`。
+    public var source: String
+
+    public init(
+        fingerprint: String? = nil, name: String, platform: String? = nil, host: String, port: UInt16,
+        appVersion: String? = nil, source: String = "mdns"
+    ) {
+        self.fingerprint = fingerprint
+        self.name = name
+        self.platform = platform
+        self.host = host
+        self.port = port
+        self.appVersion = appVersion
+        self.source = source
+    }
+}
+
+/// `agent.linkPairingRequests` 分区元素：等待本机确认的入站配对请求（对端已输入本机配对码）。
+public struct LinkPairingRequestDto: Sendable, Hashable, Identifiable, Codable {
+    public var sessionId: String
+    public var peerName: String
+    public var peerFingerprint: String
+    public var peerPlatform: String?
+    /// 双方肉眼核对的短认证串（6 位数字）。
+    public var sas: String
+    public var expiresAtUnixMs: Int64
+
+    public init(
+        sessionId: String, peerName: String, peerFingerprint: String, peerPlatform: String? = nil, sas: String,
+        expiresAtUnixMs: Int64
+    ) {
+        self.sessionId = sessionId
+        self.peerName = peerName
+        self.peerFingerprint = peerFingerprint
+        self.peerPlatform = peerPlatform
+        self.sas = sas
+        self.expiresAtUnixMs = expiresAtUnixMs
+    }
+
+    public var id: String { sessionId }
+}
+
+/// `agent.link.pairingCode` 结果：本机当前展示的配对码。
+public struct LinkPairingCodeDto: Sendable, Hashable, Codable {
+    public var code: String
+    public var expiresAtUnixMs: Int64
+    /// 本机可被对端直连的地址（`http(s)://host:port`）；空 = 网关仅回环（局域网未开启）。
+    public var addresses: [String]
+    public var fingerprint: String
+    public var deviceName: String
+
+    public init(code: String, expiresAtUnixMs: Int64, addresses: [String] = [], fingerprint: String = "", deviceName: String = "") {
+        self.code = code
+        self.expiresAtUnixMs = expiresAtUnixMs
+        self.addresses = addresses
+        self.fingerprint = fingerprint
+        self.deviceName = deviceName
+    }
+}
+
+public struct LinkDiscoveryParams: Sendable, Hashable, Codable {
+    public var enabled: Bool
+
+    public init(enabled: Bool) { self.enabled = enabled }
+}
+
+/// `agent.link.probe` 参数：`address` 接受 `host`、`host:port`、`http(s)://host[:port][/base]`；
+/// 未写协议按 `http`，未写端口 `http` 用 17800、`https` 用 443。
+public struct LinkAddressParams: Sendable, Hashable, Codable {
+    public var address: String
+
+    public init(address: String) { self.address = address }
+}
+
+public struct LinkPairBeginParams: Sendable, Hashable, Codable {
+    public var address: String
+    public var code: String
+
+    public init(address: String, code: String) {
+        self.address = address
+        self.code = code
+    }
+}
+
+public struct LinkPairBeginResponse: Sendable, Hashable, Codable {
+    public var token: String
+    /// 供双方肉眼核对的短认证串。
+    public var sas: String
+    public var peerName: String
+    public var peerFingerprint: String
+
+    public init(token: String, sas: String, peerName: String, peerFingerprint: String) {
+        self.token = token
+        self.sas = sas
+        self.peerName = peerName
+        self.peerFingerprint = peerFingerprint
+    }
+}
+
+public struct LinkPairFinishParams: Sendable, Hashable, Codable {
+    public var token: String
+    public var accept: Bool
+
+    public init(token: String, accept: Bool) {
+        self.token = token
+        self.accept = accept
+    }
+}
+
+/// `accept=false` 或对端拒绝时 `paired=false`，`device` 省略。
+public struct LinkPairFinishResponse: Sendable, Hashable, Codable {
+    public var paired: Bool
+    public var device: LinkDeviceInfo?
+
+    public init(paired: Bool, device: LinkDeviceInfo? = nil) {
+        self.paired = paired
+        self.device = device
+    }
+}
+
+public struct LinkApproveParams: Sendable, Hashable, Codable {
+    public var sessionId: String
+    public var accept: Bool
+
+    public init(sessionId: String, accept: Bool) {
+        self.sessionId = sessionId
+        self.accept = accept
+    }
+}
+
+/// `agent.link.remove` 的设备定位参数。
+public struct LinkDeviceParams: Sendable, Hashable, Codable {
+    public var fingerprint: String
+
+    public init(fingerprint: String) { self.fingerprint = fingerprint }
+}
+
+/// `agent.link.dispatch` 参数：把下载直接下发到已配对的局域网设备。
+public struct LinkDispatchParams: Sendable, Hashable, Codable {
+    public var fingerprint: String
+    public var url: String
+    public var fileName: String?
+    /// 目标设备上的保存目录；省略 = 目标设备默认下载目录。
+    public var saveDir: String?
+
+    public init(fingerprint: String, url: String, fileName: String? = nil, saveDir: String? = nil) {
+        self.fingerprint = fingerprint
+        self.url = url
+        self.fileName = fileName
+        self.saveDir = saveDir
+    }
+}
+
+/// `agent.link.dispatch` 结果：目标设备上新建任务的 ID。
+public struct LinkDispatchResult: Sendable, Hashable, Codable {
+    public var taskId: String
+
+    public init(taskId: String) { self.taskId = taskId }
+}
+
+// MARK: - 纯规则
+
+public enum LinkRules {
+    public static let pairingCodeLength = 6
+
+    /// 发现的对端 → `agent.link.pairBegin` 接受的 `host:port`（IPv6 加方括号）。
+    public static func address(of peer: LinkDiscoveredPeer) -> String {
+        let host = peer.host.contains(":") && !peer.host.hasPrefix("[") ? "[\(peer.host)]" : peer.host
+        return "\(host):\(peer.port)"
+    }
+
+    /// 配对码只保留数字并截断到 6 位。
+    public static func normalizePairingCode(_ raw: String) -> String {
+        String(raw.filter { $0.isASCII && $0.isNumber }.prefix(pairingCodeLength))
+    }
+
+    public static func isPairingCodeComplete(_ code: String) -> Bool {
+        code.count == pairingCodeLength && code.allSatisfy { $0.isASCII && $0.isNumber }
+    }
+
+    /// 手动地址只做非空 / 无空白检查：`host`、`host:port`、`http(s)://…` 的解析与端口校验由 agent 负责。
+    public static func isManualAddressValid(_ address: String) -> Bool {
+        let text = address.trimmingCharacters(in: .whitespacesAndNewlines)
+        return !text.isEmpty && !text.contains(where: \.isWhitespace)
+    }
+
+    /// 手动输入无法提交的原因（映射到本地化提示）。
+    public enum InputError: Error, Sendable, Hashable {
+        case addressMissing, codeIncomplete
+
+        public var key: String {
+            switch self {
+            case .addressMissing: "localPairingHostRequired"
+            case .codeIncomplete: "localPairingCodeIncomplete"
+            }
+        }
+    }
+
+    /// 校验并规整 `pairBegin` 输入：地址原样交给 agent 解析，配对码去掉空白 / 连字符后必须是 6 位数字。
+    public static func validate(address: String, code: String) -> Result<LinkPairBeginParams, InputError> {
+        let address = address.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard isManualAddressValid(address) else { return .failure(.addressMissing) }
+        let code = String(code.filter { !$0.isWhitespace && $0 != "-" })
+        guard isPairingCodeComplete(code) else { return .failure(.codeIncomplete) }
+        return .success(LinkPairBeginParams(address: address, code: code))
+    }
+
+    /// 发现列表里的一台设备（已去重、标注是否已配对）。
+    public struct DiscoveredEntry: Sendable, Hashable, Identifiable {
+        public var name: String
+        public var platform: String?
+        /// 交给 `pairBegin` / `probe` 的地址。
+        public var address: String
+        /// 已与本机配对（按指纹判断），不可再选。
+        public var paired: Bool
+
+        public var id: String { address }
+    }
+
+    /// 发现快照 → 列表：已配对标记、同一地址只保留一条、按名称（不区分大小写）排序。
+    public static func discoveredEntries(_ peers: [LinkDiscoveredPeer], paired: [LinkDeviceInfo]) -> [DiscoveredEntry] {
+        let known = Set(paired.map(\.fingerprint))
+        var seen = Set<String>()
+        var entries: [DiscoveredEntry] = []
+        for peer in peers {
+            let hostPort = Self.address(of: peer)
+            guard seen.insert(hostPort).inserted else { continue }
+            let trimmed = peer.name.trimmingCharacters(in: .whitespacesAndNewlines)
+            entries.append(DiscoveredEntry(
+                name: trimmed.isEmpty ? peer.host : peer.name,
+                platform: peer.platform,
+                address: hostPort,
+                paired: peer.fingerprint.map(known.contains) ?? false
+            ))
+        }
+        return entries.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+    }
+
+    /// 配对码 / 入站请求距离过期还剩多少秒（向上取整，已过期为 0）。
+    public static func secondsUntil(expiresAtUnixMs: Int64, nowMs: Int64) -> Int64 {
+        let remaining = expiresAtUnixMs.subtractingReportingOverflow(nowMs)
+        let ms = remaining.overflow ? Int64.max : remaining.partialValue
+        if ms <= 0 { return 0 }
+        return (ms.addingReportingOverflow(999).overflow ? Int64.max : ms + 999) / 1000
+    }
+
+    /// 短认证串按 3 位一组展示（`123456` → `123 456`）。
+    public static func groupSAS(_ sas: String) -> String {
+        let chars = Array(sas.filter { !$0.isWhitespace })
+        return stride(from: 0, to: chars.count, by: 3)
+            .map { String(chars[$0 ..< min($0 + 3, chars.count)]) }
+            .joined(separator: " ")
+    }
+
+    /// 配对码按 3-3 分组展示。
+    public static func groupCode(_ code: String) -> String { groupSAS(code) }
+
+    /// `LinkDeviceInfo.pairedAt / lastSeenAt` 时间戳：量级 < 1e12 视为秒，否则毫秒；≤ 0 = nil。
+    public static func date(fromUnix value: Int64) -> Date? {
+        guard value > 0 else { return nil }
+        let seconds = value < 1_000_000_000_000 ? Double(value) : Double(value) / 1000
+        return Date(timeIntervalSince1970: seconds)
+    }
+
+    /// 入站请求排序：先到期的在前（最紧迫先处理）。
+    public static func queue(_ requests: [LinkPairingRequestDto]) -> [LinkPairingRequestDto] {
+        requests.enumerated().sorted { lhs, rhs in
+            if lhs.element.expiresAtUnixMs != rhs.element.expiresAtUnixMs {
+                return lhs.element.expiresAtUnixMs < rhs.element.expiresAtUnixMs
+            }
+            return lhs.offset < rhs.offset
+        }.map(\.element)
+    }
+}

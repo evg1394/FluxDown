@@ -5346,6 +5346,11 @@ async fn do_segment(
                 e
             );
         }
+        // hint 模式没有 probe：文件起点的那条连接是唯一看到 Content-Disposition /
+        // Content-Type 的实际 GET 响应，记为命名证据供完成期精修推断名（先写者胜）。
+        if actual_start == 0 {
+            crate::downloader::record_response_naming(db, task_id, &resp).await;
+        }
     }
 
     // --- 服务器自报真实总大小 > 规划总大小 → 规划偏小，继续会静默截断 -------------

@@ -7,8 +7,9 @@ use fluxdown_protocol::{
     RssValidateResponse, method,
 };
 use fluxdown_ui_components::{
-    ControlExt as _, FluxIcon, card, dialog_scroll_body, dialog_title, field_error, field_hint,
-    form, form_field, form_row, input_with_action, option_group, option_row, segmented_tabs,
+    BusyExt as _, ControlExt as _, FluxIcon, card, dialog_scroll_body, dialog_title, field_error,
+    field_hint, form, form_field, form_row, input_with_action, option_group, option_row,
+    segmented_tabs,
 };
 use fluxdown_ui_i18n::Translator;
 use fluxdown_ui_theme::active_theme;
@@ -102,7 +103,7 @@ pub(super) fn open_editor(
         let editor = editor.clone();
         dialog
             .title(dialog_title(title.clone(), cx))
-            .w(px(640.))
+            .w(active_theme(cx).text_extent(640.))
             .overlay_closable(false)
             .keyboard(false)
             .close_button(false)
@@ -648,7 +649,7 @@ impl Editor {
                     .outline()
                     .label(self.t("rssWizardValidate", cx))
                     .control(cx)
-                    .loading(self.validating)
+                    .busy(self.validating)
                     .disabled(!can_validate)
                     .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.validate(cx))),
                 cx,
@@ -914,7 +915,7 @@ impl Render for Editor {
                         cx,
                     ))
                     .control(cx)
-                    .loading(self.saving)
+                    .busy(self.saving)
                     .disabled(!can_save)
                     .on_click(
                         cx.listener(|this, _: &ClickEvent, window, cx| this.save(window, cx)),

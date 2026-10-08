@@ -26,20 +26,37 @@ export interface ResolveVariantOptionDto {
   totalBytes: number;
 }
 
+/** 「文件已存在」可选动作；`cancelled` 结果 = 取消下载（任务暂停）。 */
+export type FileExistsAction = 'rename' | 'overwrite' | 'skip';
+
 /** 选择种类，`type` 内部标记。 */
 export type SelectionKind =
   | { type: 'hls'; options: HlsQualityOptionDto[] }
   | { type: 'bt'; files: BtFileDto[] }
-  | { type: 'variant'; options: ResolveVariantOptionDto[] };
+  | { type: 'variant'; options: ResolveVariantOptionDto[] }
+  | {
+      type: 'fileExists';
+      fileName: string;
+      saveDir: string;
+      existingSize?: number;
+      /** 已有文件修改时间（Unix 毫秒）。 */
+      existingModifiedUnixMs?: number;
+      /** 新下载的总大小；未知时缺省。 */
+      incomingSize?: number;
+      /** 选「重命名」时将落盘的文件名。 */
+      renamePreview: string;
+      actions: FileExistsAction[];
+    };
 
 /**
  * 选择结果，`kind` 内部标记。`bt.indices` 空数组 = 全部文件；
- * `cancelled` 对 HLS 会被拒绝（invalidArgument）。
+ * `cancelled` 对 HLS 会被拒绝（invalidArgument）；对 `fileExists` = 取消下载。
  */
 export type SelectionOutcome =
   | { kind: 'hls'; index: number }
   | { kind: 'bt'; indices: number[] }
   | { kind: 'variant'; index: number }
+  | { kind: 'fileExists'; action: FileExistsAction }
   | { kind: 'cancelled' };
 
 /** 待选择请求（快照 `pendingSelections` / `selectionPending` 事件）。 */

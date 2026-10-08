@@ -103,8 +103,9 @@ function cookieDomainFromUrl(url) {
 }
 
 // yt-dlp 格式选择器：始终取「最佳画质」作为顶层默认档（画质由用户在下载时经
-// variants 弹框选择，不在设置里固定）。preferMp4 仅影响容器偏好（H.264/AAC mp4
-// 优先 vs 允许 VP9 WebM），不限制画质。免打扰/headless 无弹框时即用此最佳档。
+// variants 弹框选择，不在设置里固定）。preferMp4 仅影响容器偏好（H.264/AV1 MP4
+// 优先 vs 允许 VP9 WebM），不限制画质——AV1/VP9 等不兼容编码由 hooks.js 的 onDone
+// 转码兜底，决不能用 avc1 顶替 1440p/2160p 高画质。免打扰/headless 无弹框时即用此最佳档。
 function buildFormat(preferMp4) {
   if (preferMp4) {
     return (
@@ -210,8 +211,12 @@ function pickVideoAtOrBelow(formats, targetHeight, preferMp4) {
     if (!hasV) continue;
     var h = Number(f.height) || 0;
     if (h <= 0 || h > targetHeight) continue;
-    var score = h * 1e6 + (Number(f.tbr) || 0);
-    if (preferMp4 && f.ext === 'mp4') score += 1e12;
+    // 分辨率绝对主导：1e12 乘数保证高分辨率档（如 2160p/1440p）决不被较低分辨率
+    // 的 avc1 档（如 1080p）顶替；AV1/VP9 不兼容编码由 hooks.js 的 onDone 转码兜底。
+    // 同分辨率下，preferMp4 优先 H.264（avc1）+ mp4 容器：
+    var score = h * 1e12 + (Number(f.tbr) || 0);
+    if (preferMp4 && /^avc1/i.test(f.vcodec || '')) score += 1e9;
+    if (preferMp4 && f.ext === 'mp4') score += 1e6;
     if (score > bestScore) {
       bestScore = score;
       best = f;
@@ -355,6 +360,11 @@ var PLATFORMS = [
   { id: 'dailymotion', hosts: ['dailymotion.com', 'dai.ly'], cookieKey: 'cookiesGeneric' },
   { id: 'soundcloud', hosts: ['soundcloud.com'], cookieKey: 'cookiesGeneric' },
   { id: 'acfun', hosts: ['acfun.cn'], cookieKey: 'cookiesGeneric' },
+  { id: 'instagram', hosts: ['instagram.com'], cookieKey: 'cookiesGeneric' },
+  { id: 'twitter', hosts: ['twitter.com', 'x.com'], cookieKey: 'cookiesGeneric' },
+  { id: 'tiktok', hosts: ['tiktok.com'], cookieKey: 'cookiesGeneric' },
+  { id: 'reddit', hosts: ['reddit.com', 'redd.it'], cookieKey: 'cookiesGeneric' },
+  { id: 'facebook', hosts: ['facebook.com', 'fb.watch'], cookieKey: 'cookiesGeneric' },
 ];
 
 // 由下载 URL 主机名判定平台。返回 PLATFORMS 表项，未命中白名单则 null（防御性：
@@ -460,7 +470,7 @@ globalThis.resolve = async (ctx) => {
 
   var platform = detectPlatform(ctx.url);
   if (!platform) {
-    throw new Error('该链接不在本插件支持的平台白名单内（仅 YouTube / Bilibili / Niconico / Twitch / Vimeo / Dailymotion / SoundCloud / AcFun）: ' + ctx.url);
+    throw new Error('该链接不在本插件支持的平台白名单内（仅 YouTube / Bilibili / Niconico / Twitch / Vimeo / Dailymotion / SoundCloud / AcFun / Instagram / Twitter(X) / TikTok / Reddit / Facebook）: ' + ctx.url);
   }
   var fmt = buildFormat(flux.settings.preferMp4);
   var ck = await buildCookieContext(ctx, platform);
@@ -498,6 +508,12 @@ globalThis.resolve = async (ctx) => {
   // 附加参数（高级）：追加到命令末尾（URL 之前）。FluxDown bridge 按白名单校验（仅放行规范长选项全名）。
   var extra = parseExtraArgs(flux.settings.extraArgs);
   for (var ei = 0; ei < extra.length; ei++) args.push(extra[ei]);
+  // 剔除 -J 里的重字段（automatic_captions / heatmap / subtitles）：YouTube 单个
+  // 视频的 -J 常超 4 MiB（automatic_captions 单字段 ~4 MiB），会撞 FluxDown 的
+  // stdout 回传上限导致 JSON 解析失败；这些字段本插件并不消费，剥掉后输出降到 ~200 KB。
+  args.push('--parse-metadata', 'automatic_captions:(?P<automatic_captions>)');
+  args.push('--parse-metadata', 'heatmap:(?P<heatmap>)');
+  args.push('--parse-metadata', 'subtitles:(?P<subtitles>)');
   args.push(ctx.url);
 
   if (verbose) {
@@ -551,6 +567,16 @@ globalThis.resolve = async (ctx) => {
       } catch (e) {}
     }
     throw new Error(friendlyError(ctx.url, r, !!cookiesText));
+  }
+
+  // 截断优先于解析：FluxDown 回传 stdout 有上限（YTDLP_STDOUT_CAP），超限会被
+  // 截成非法 JSON。先据 truncatedStdout 给出可定位的错误，而不是让 JSON.parse
+  // 抛出「Unexpected end of JSON input」这种难以排查的信息。
+  if (r.truncatedStdout) {
+    throw new Error(
+      'yt-dlp 输出超过 FluxDown 回传上限，已被截断（该站点 -J 体积过大；' +
+        '可通过「附加 yt-dlp 参数」加 --parse-metadata 剔除重字段，或减少输出）'
+    );
   }
 
   var info;

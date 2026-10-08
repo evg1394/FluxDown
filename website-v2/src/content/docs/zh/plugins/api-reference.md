@@ -270,7 +270,7 @@ const info = JSON.parse(out.stdout);
 | `subdir` | 无 | 沙箱根目录下的工作子目录；安全相对路径，不得逃逸。 |
 | `timeoutMs` | 300000 | 单次调用超时，上限 3600000（60 分钟）。 |
 
-resolve 出 `{ code, stdout, stderr, timedOut, truncatedStdout, truncatedStderr }`——`code` 是退出码（被杀死/无码时为 `-1`），`stdout`/`stderr` 会截断（256 KB / 64 KB），`timedOut` 为 `true` 表示被超时杀掉。
+resolve 出 `{ code, stdout, stderr, timedOut, truncatedStdout, truncatedStderr }`——`code` 是退出码（被杀死/无码时为 `-1`），`stdout`/`stderr` 会截断（16 MB / 256 KB），`timedOut` 为 `true` 表示被超时杀掉。解析 `stdout` 为 JSON 前请先检查 `truncatedStdout`，给出明确错误，而不是让 `JSON.parse` 在截断的尾部上失败。
 
 **沙箱隔离。** 和 `flux.ffmpeg` 不同，`flux.ytdlp` 在**所有**上下文里都可用——`resolve` 和每个 hook——因为它不依赖产物文件。沙箱根目录不是任务的产物目录，而是 bridge 自持的每插件 scratch 目录（懒创建于 FluxDown 数据目录下），跨调用复用。它就是本次调用的工作目录，`subdir` 在其中划出子目录。读写的文件一律用**相对**名引用。这正是 `flux.fs` 读写的同一个工作区——喂给 yt-dlp cookie、配置或字幕文件的方式就是：调用前 `flux.fs.writeFile('cookies.txt', …)`，在 `args` 里以相对名引用该文件，调用结束后 `flux.fs.remove('cookies.txt')`。
 

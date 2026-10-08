@@ -269,7 +269,7 @@ Available **only** when the manifest declares `permissions: ["ytdlp"]` — other
 | `subdir` | none | Working sub-directory under the jail root; safe relative path, may not escape. |
 | `timeoutMs` | 300000 | Per-call timeout, capped at 3600000 (60 min). |
 
-Resolves to `{ code, stdout, stderr, timedOut, truncatedStdout, truncatedStderr }` — `code` is the exit code (`-1` when killed / none), `stdout`/`stderr` are truncated (256 KB / 64 KB), `timedOut` is `true` when the timeout killed the run.
+Resolves to `{ code, stdout, stderr, timedOut, truncatedStdout, truncatedStderr }` — `code` is the exit code (`-1` when killed / none), `stdout`/`stderr` are truncated (16 MB / 256 KB), `timedOut` is `true` when the timeout killed the run. Check `truncatedStdout` before parsing `stdout` as JSON and surface a clear error instead of letting `JSON.parse` fail on a truncated tail.
 
 **The jail.** Unlike `flux.ffmpeg`, `flux.ytdlp` works in **every** context — `resolve` and every hook — since it has no dependency on a produced file. The jail isn't a task's output folder; it's a scratch directory the bridge keeps per plugin (lazily created under FluxDown's data directory), reused across calls. That's the working directory for the call, and `subdir` carves out a sub-folder inside it. Reference any files you read or write there by **relative** name. This is the same workspace `flux.fs` reads and writes — it's how you feed yt-dlp a cookie jar, config file, or subtitles: `flux.fs.writeFile('cookies.txt', …)` beforehand, reference the file by its relative name in `args`, then `flux.fs.remove('cookies.txt')` once the call returns.
 

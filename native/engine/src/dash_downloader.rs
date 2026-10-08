@@ -7,7 +7,6 @@ use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 
 use crate::downloader::{
     DB_SAVE_INTERVAL_SECS, DownloadError, DownloadParams, ProgressUpdate, TEMP_EXT,
-    extract_from_url, sanitize_filename,
 };
 use crate::events::EventSink;
 use crate::hls_downloader::{
@@ -16,6 +15,7 @@ use crate::hls_downloader::{
 };
 use crate::logger::log_info;
 use crate::model::HlsQualityOption;
+use crate::naming::{extract_from_url, sanitize_filename};
 use crate::output;
 use crate::selection::SelectionOutcome;
 use crate::transfer_activity::{TaskRuntime, TaskSegment, TransferTracker};
@@ -233,7 +233,61 @@ pub(crate) async fn ffmpeg_usable(ffmpeg: &Path) -> bool {
     )
 }
 
-/// ffmpeg 流复制（`-c copy`，不转码）封装 mp4，写到 `output`。
+/// 以 `codec_args` 运行一次 ffmpeg 封装；取消或无法启动时清理 `output`。
+async fn run_ffmpeg_mux_step(
+    ffmpeg: &Path,
+    video: &Path,
+    audio: Option<&Path>,
+    output: &Path,
+    codec_args: &[&str],
+    cancel_token: &tokio_util::sync::CancellationToken,
+) -> Result<std::process::Output, DownloadError> {
+    use tokio::process::Command;
+
+    let mut cmd = Command::new(ffmpeg);
+    crate::proc::no_console_window(&mut cmd);
+    cmd.arg("-y").arg("-i").arg(video);
+    if let Some(audio) = audio {
+        cmd.arg("-i").arg(audio);
+        cmd.args(["-map", "0:v:0", "-map", "1:a:0"]);
+    } else {
+        cmd.args(["-map", "0:v?", "-map", "0:a?"]);
+    }
+    cmd.args(codec_args);
+    cmd.arg(output)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true);
+
+    let output_fut = cmd.output();
+    tokio::select! {
+        _ = cancel_token.cancelled() => {
+            if let Err(error) = tokio::fs::remove_file(output).await
+                && error.kind() != std::io::ErrorKind::NotFound
+            {
+                crate::logger::report_warning("dash-download", "remove_temporary_file", &error);
+            }
+            Err(DownloadError::Cancelled)
+        }
+        res = output_fut => {
+            match res {
+                Ok(o) => Ok(o),
+                Err(e) => {
+                    if let Err(error) = tokio::fs::remove_file(output).await
+                        && error.kind() != std::io::ErrorKind::NotFound
+                    {
+                        crate::logger::report_warning("dash-download", "remove_temporary_file", &error);
+                    }
+                    Err(DownloadError::Other(format!("failed to run ffmpeg: {e}")))
+                }
+            }
+        }
+    }
+}
+
+/// ffmpeg 流复制（`-c copy`）封装 mp4，写到 `output`；独立音轨因编码不被 mp4 容器
+/// 支持而失败时，回退为视频直拷 + 音频转码 AAC 再试一次。
 ///
 /// - `audio = Some`：取 `video` 的首个视频流与 `audio` 的首个音频流；
 /// - `audio = None`：取 `video` 的全部视频与音频流（丢弃 TS 里 ffmpeg mp4 muxer
@@ -250,7 +304,9 @@ pub(crate) async fn ffmpeg_copy_to_mp4(
     cancel_token: &tokio_util::sync::CancellationToken,
     ffmpeg: &Path,
 ) -> Result<(), DownloadError> {
-    use tokio::process::Command;
+    if cancel_token.is_cancelled() {
+        return Err(DownloadError::Cancelled);
+    }
 
     // ENOSPC 预检:None(网络盘/超时,无法探测)乐观放行——预检是优化,
     // 安全网是下方既有的 ffmpeg 失败清理路径。
@@ -265,63 +321,99 @@ pub(crate) async fn ffmpeg_copy_to_mp4(
         }
     }
 
-    let mut cmd = Command::new(ffmpeg);
-    crate::proc::no_console_window(&mut cmd);
-    cmd.arg("-y").arg("-i").arg(video);
-    if let Some(audio) = audio {
-        cmd.arg("-i").arg(audio);
-        cmd.args(["-map", "0:v:0", "-map", "1:a:0"]);
-    } else {
-        cmd.args(["-map", "0:v?", "-map", "0:a?"]);
-    }
-    // `.kill_on_drop(true)` ensures if we're cancelled (select! drops the
-    // future), the child process is killed automatically.
-    let output_fut = cmd
-        .args(["-c", "copy", "-movflags", "+faststart", "-f", "mp4"])
-        .arg(output)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::piped())
-        .kill_on_drop(true)
-        .output();
+    let copy_args = ["-c", "copy", "-movflags", "+faststart", "-f", "mp4"];
+    let first_result =
+        run_ffmpeg_mux_step(ffmpeg, video, audio, output, &copy_args, cancel_token).await?;
 
-    let result: std::process::Output = tokio::select! {
-            _ = cancel_token.cancelled() => {
-                // The future is dropped here; kill_on_drop ensures the child is killed.
-    if let Err(error) = tokio::fs::remove_file(output).await
-        && error.kind() != std::io::ErrorKind::NotFound
-    {
-        crate::logger::report_warning("dash-download", "remove_temporary_file", &error);
+    if first_result.status.success() {
+        return Ok(());
     }
-                return Err(DownloadError::Cancelled);
-            }
-            o = output_fut => match o {
-                Ok(o) => o,
-                Err(e) => {
-    if let Err(error) = tokio::fs::remove_file(output).await
-        && error.kind() != std::io::ErrorKind::NotFound
-    {
-        crate::logger::report_warning("dash-download", "remove_temporary_file", &error);
-    }
-                    return Err(DownloadError::Other(format!("failed to run ffmpeg: {e}")));
-                }
-            },
-        };
 
-    if !result.status.success() {
+    let first_stderr = String::from_utf8_lossy(&first_result.stderr);
+
+    // 若直接 stream copy 失败，判断是否为音频编码/标签不兼容容器导致的错误。
+    // 如果存在独立音频轨且未取消，尝试将音频转码为通用 AAC（-c:v copy -c:a aac -b:a 192k），
+    // 消除 QuickTime / Apple AVFoundation / Windows Media Player 无声及容器封装失败。
+    let is_codec_incompatible = first_stderr.contains("Could not find tag for codec")
+        || first_stderr.contains("codec not currently supported in container");
+
+    if audio.is_some() && is_codec_incompatible && !cancel_token.is_cancelled() {
         if let Err(error) = tokio::fs::remove_file(output).await
             && error.kind() != std::io::ErrorKind::NotFound
         {
             crate::logger::report_warning("dash-download", "remove_temporary_file", &error);
         }
-        let stderr = String::from_utf8_lossy(&result.stderr);
+
+        log_info!(
+            "[dash] ffmpeg copy-muxing failed ({}); attempting AAC audio transcoding fallback for {}",
+            first_stderr.chars().take(200).collect::<String>(),
+            output.display()
+        );
+
+        let aac_fallback_args = [
+            "-c:v",
+            "copy",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "192k",
+            "-movflags",
+            "+faststart",
+            "-f",
+            "mp4",
+        ];
+
+        let retry_result = run_ffmpeg_mux_step(
+            ffmpeg,
+            video,
+            audio,
+            output,
+            &aac_fallback_args,
+            cancel_token,
+        )
+        .await?;
+
+        if retry_result.status.success() {
+            log_info!(
+                "[dash] ffmpeg AAC transcoding fallback succeeded for {}",
+                output.display()
+            );
+            return Ok(());
+        }
+
+        let retry_stderr = String::from_utf8_lossy(&retry_result.stderr);
+        let err = std::io::Error::other(format!(
+            "copy failed: {}; fallback failed: {}",
+            first_stderr.chars().take(200).collect::<String>(),
+            retry_stderr.chars().take(200).collect::<String>()
+        ));
+        crate::logger::report_warning("dash-download", "ffmpeg_mux_fallback_failed", &err);
+
+        if let Err(error) = tokio::fs::remove_file(output).await
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            crate::logger::report_warning("dash-download", "remove_temporary_file", &error);
+        }
+
         return Err(DownloadError::Other(format!(
-            "ffmpeg exited with {}: {}",
-            result.status,
-            stderr.chars().take(500).collect::<String>()
+            "ffmpeg copy failed with {}: {}; aac fallback failed with {}: {}",
+            first_result.status,
+            first_stderr.chars().take(300).collect::<String>(),
+            retry_result.status,
+            retry_stderr.chars().take(300).collect::<String>(),
         )));
     }
-    Ok(())
+
+    if let Err(error) = tokio::fs::remove_file(output).await
+        && error.kind() != std::io::ErrorKind::NotFound
+    {
+        crate::logger::report_warning("dash-download", "remove_temporary_file", &error);
+    }
+    Err(DownloadError::Other(format!(
+        "ffmpeg exited with {}: {}",
+        first_result.status,
+        first_stderr.chars().take(500).collect::<String>()
+    )))
 }
 
 /// Attempt to mux separate audio and video files into a single MP4 using ffmpeg.
@@ -612,6 +704,26 @@ async fn run_dash_download_inner(p: &DownloadParams) -> Result<i64, DownloadErro
     if audio_bytes > 0 {
         let audio_path = build_audio_path(&dest_path);
         let expected = (video_bytes + audio_bytes).max(0) as u64;
+        let total_downloaded = video_bytes + audio_bytes;
+        if let Err(e) = p.db.update_task_status(&p.task_id, 5, "").await {
+            crate::logger::report_warning("dash-download", "update_task_status_preparing", &e);
+        }
+        if p.progress_tx
+            .send(ProgressUpdate {
+                task_id: p.task_id.clone(),
+                downloaded_bytes: total_downloaded,
+                total_bytes: total_downloaded,
+                status: 5,
+                error_message: String::new(),
+                file_name: String::new(),
+                segment_details: None,
+                ..Default::default()
+            })
+            .await
+            .is_err()
+        {
+            tracing::debug!("download progress receiver closed");
+        }
         match mux_audio_video(
             &dest_path,
             &audio_path,
@@ -891,7 +1003,7 @@ async fn download_track_coordinated(
 ///
 /// - 视频轨是对外可见的最终文件：按 [`crate::downloader::claim_final_name`] 的
 ///   `create_new` 占名不覆盖同名旧文件；原名被占时 dedup 换名并把新文件名写回 DB
-///   （完成信号随后上报）。`allow_overwrite`（覆盖策略）或 `is_resume`（原名上的
+///   （完成信号随后上报）。覆盖授权（`p.overwrite`）或 `is_resume`（原名上的
 ///   文件是本任务续传遗留）时对原名删除旧文件后重试一次。
 /// - 音频轨是内部 sidecar（`build_audio_path`），归属本任务：替换遗留同名文件。
 async fn finalize_track_rename(
@@ -936,7 +1048,11 @@ async fn finalize_track_rename(
         temp,
         save_dir,
         name,
-        p.allow_overwrite || p.is_resume,
+        &if p.is_resume {
+            crate::file_exists::OverwritePolicy::Any
+        } else {
+            p.overwrite.clone()
+        },
         &avoid,
     )
     .await?;
@@ -1001,7 +1117,8 @@ async fn run_track_pair_inner(p: &DownloadParams, audio_url: &str) -> Result<i64
     // 只更新文件名，不触碰 total_bytes：resume 再入时 total 已是有意义的
     // 轨对合计，若像旧代码那样 update_task_file_info(name, 0) 会在任一
     // re-probe 失败时把总量永久归零（C5），拖垮暂停/重启后的分布图比例尺。
-    p.db.update_task_file_name(&p.task_id, &auto_name).await?;
+    p.db.update_task_file_name(&p.task_id, &auto_name, false)
+        .await?;
 
     if p.cancel_token.is_cancelled() {
         return Err(DownloadError::Cancelled);
@@ -1209,6 +1326,26 @@ async fn run_track_pair_inner(p: &DownloadParams, audio_url: &str) -> Result<i64
     let mut mux_succeeded = true;
     if audio_bytes > 0 {
         let expected = (video_bytes + audio_bytes).max(0) as u64;
+        let pair_actual = video_bytes + audio_bytes;
+        if let Err(e) = p.db.update_task_status(&p.task_id, 5, "").await {
+            crate::logger::report_warning("dash-download", "update_task_status_preparing", &e);
+        }
+        if p.progress_tx
+            .send(ProgressUpdate {
+                task_id: p.task_id.clone(),
+                downloaded_bytes: pair_actual,
+                total_bytes: pair_actual,
+                status: 5,
+                error_message: String::new(),
+                file_name: String::new(),
+                segment_details: None,
+                ..Default::default()
+            })
+            .await
+            .is_err()
+        {
+            tracing::debug!("download progress receiver closed");
+        }
         match mux_audio_video(
             &dest_path,
             &audio_path,
@@ -2891,5 +3028,167 @@ mod tests {
         let mut other_range = segs.clone();
         other_range[1].range = Some("0-199".to_string());
         assert_ne!(segments_fingerprint(&init, &other_range), base);
+    }
+
+    #[tokio::test]
+    async fn test_ffmpeg_copy_to_mp4_fallback() {
+        let Some(ffmpeg_bin) = std::env::var("FLUXDOWN_TEST_FFMPEG")
+            .ok()
+            .map(std::path::PathBuf::from)
+        else {
+            eprintln!("[skip] 未设置 FLUXDOWN_TEST_FFMPEG，跳过真实 ffmpeg 回退测试");
+            return;
+        };
+        if !ffmpeg_bin.exists() {
+            eprintln!("[skip] FLUXDOWN_TEST_FFMPEG 指定的二进制不存在: {ffmpeg_bin:?}");
+            return;
+        }
+
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or_default();
+        let temp_dir_path =
+            std::env::temp_dir().join(format!("fluxdown_mux_test_{}_{nanos}", std::process::id()));
+        std::fs::create_dir_all(&temp_dir_path).expect("create temp dir");
+
+        struct ScopedDir(std::path::PathBuf);
+        impl Drop for ScopedDir {
+            fn drop(&mut self) {
+                if let Err(e) = std::fs::remove_dir_all(&self.0)
+                    && e.kind() != std::io::ErrorKind::NotFound
+                {
+                    eprintln!("failed to clean up test dir: {e}");
+                }
+            }
+        }
+        let _guard = ScopedDir(temp_dir_path.clone());
+
+        let v_path = temp_dir_path.join("test_v.mp4");
+        let a_path = temp_dir_path.join("test_a.wav");
+        let out_path = temp_dir_path.join("out.mp4");
+
+        // 1. 生成 0.2 秒的 x264 视频
+        let mut gen_v = std::process::Command::new(&ffmpeg_bin);
+        gen_v
+            .args([
+                "-y",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc=size=32x32:rate=10",
+                "-t",
+                "0.2",
+                "-c:v",
+                "libx264",
+            ])
+            .arg(&v_path);
+        assert!(
+            gen_v.status().map(|s| s.success()).unwrap_or(false),
+            "生成测试视频失败"
+        );
+
+        // 2. 生成 0.2 秒的 adpcm_ms 音频（WAV 容器，纯内置原生编解码器）
+        // MP4 容器 muxer 明确不支持将 adpcm_ms 裸流直接复制（-c copy）入容器，
+        // 必然触发 "Could not find tag for codec adpcm_ms in stream #1, codec not currently supported in container"
+        let mut gen_a = std::process::Command::new(&ffmpeg_bin);
+        gen_a
+            .args([
+                "-y",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440",
+                "-t",
+                "0.2",
+                "-c:a",
+                "adpcm_ms",
+            ])
+            .arg(&a_path);
+        assert!(
+            gen_a.status().map(|s| s.success()).unwrap_or(false),
+            "生成测试音频失败"
+        );
+
+        // 3. 验证初次纯 -c copy 确实会失败，以确保测试并非在空转
+        let mut verify_fail = std::process::Command::new(&ffmpeg_bin);
+        verify_fail
+            .args(["-y", "-i"])
+            .arg(&v_path)
+            .arg("-i")
+            .arg(&a_path)
+            .args(["-c", "copy", "-f", "mp4"])
+            .arg(temp_dir_path.join("direct_copy.mp4"));
+        let direct_copy_status = verify_fail.status().map(|s| s.success()).unwrap_or(false);
+        assert!(
+            !direct_copy_status,
+            "direct -c copy 必须失败才能证明回退生效"
+        );
+
+        // 4. 调用 ffmpeg_copy_to_mp4，断言其通过 AAC 回退路径成功输出
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let res = super::ffmpeg_copy_to_mp4(
+            &v_path,
+            Some(&a_path),
+            &out_path,
+            100_000,
+            &cancel,
+            &ffmpeg_bin,
+        )
+        .await;
+        assert!(
+            res.is_ok(),
+            "ffmpeg_copy_to_mp4 必须通过 AAC 回退成功封装: {res:?}"
+        );
+        assert!(out_path.exists(), "产物 out.mp4 必须存在");
+
+        // 5. probe 产物：验证音频轨确实被重编码为 aac
+        let probe = std::process::Command::new(&ffmpeg_bin)
+            .arg("-i")
+            .arg(&out_path)
+            .output()
+            .expect("probe output");
+        let probe_stderr = String::from_utf8_lossy(&probe.stderr);
+        assert!(
+            probe_stderr.contains("Audio: aac"),
+            "回退产物必须为 aac 音频: {probe_stderr}"
+        );
+
+        // 6. 验证取消语义：当 cancel_token 取消时，应当返回 Cancelled 且清理产物
+        let cancel_tok = tokio_util::sync::CancellationToken::new();
+        cancel_tok.cancel();
+        let out_cancelled = temp_dir_path.join("out_cancelled.mp4");
+        let res_cancelled = super::ffmpeg_copy_to_mp4(
+            &v_path,
+            Some(&a_path),
+            &out_cancelled,
+            100_000,
+            &cancel_tok,
+            &ffmpeg_bin,
+        )
+        .await;
+        assert!(
+            matches!(res_cancelled, Err(super::DownloadError::Cancelled)),
+            "已取消的调用必须返回 DownloadError::Cancelled: {res_cancelled:?}"
+        );
+        assert!(!out_cancelled.exists(), "取消调用的输出文件必须被清理");
+
+        // 7. 测试 audio = None 时正常复制，不走回退
+        let out_video_only = temp_dir_path.join("out_v_only.mp4");
+        let res_v = super::ffmpeg_copy_to_mp4(
+            &v_path,
+            None,
+            &out_video_only,
+            100_000,
+            &cancel,
+            &ffmpeg_bin,
+        )
+        .await;
+        assert!(res_v.is_ok(), "audio = None 时纯视频封装应成功");
+        assert!(out_video_only.exists(), "out_video_only.mp4 产物应存在");
     }
 }

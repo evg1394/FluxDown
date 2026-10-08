@@ -1,12 +1,14 @@
-// 活动栏（桌面）：48px 宽、chrome 底；路由在上、动作（主题 / 设置）在下。
+// 活动栏（桌面）：48px 宽、chrome 底；路由在上、动作（账户 / 设置）在下。
 // 选中项：中性底 `navSelected` + 图标 `navSelectedIcon`（强调色只落在图标上）。
 
 import { Link, useLocation } from '@tanstack/react-router'
 import { useT } from '../i18n'
 import { cn } from '../lib/cn'
-import { useTheme } from '../theme'
-import { Icon, Tooltip, toast } from '../ui'
-import { isActivityActive, themeToggleIcon } from './activity'
+import { Icon, Tooltip } from '../ui'
+import { AccountAvatar } from './AccountAvatar'
+import { useAccountAvatar } from './accountAvatarState'
+import { AccountMenu } from './AccountMenu'
+import { isActivityActive } from './activity'
 import type { ActivityEntry } from './activity'
 import { useVisibleActivityEntries } from './useVisibleActivityEntries'
 
@@ -18,35 +20,36 @@ const BUTTON_ACTIVE = 'bg-nav-selected text-nav-selected-foreground hover:bg-nav
 export function ActivityRail() {
   const t = useT()
   const location = useLocation()
-  const theme = useTheme()
+  const account = useAccountAvatar()
   const entries = useVisibleActivityEntries()
   const top = entries.filter((entry) => !entry.bottom)
   const bottom = entries.filter((entry) => entry.bottom)
 
   const renderEntry = (entry: ActivityEntry) => {
     const active = isActivityActive(entry, location.pathname)
-    const icon = entry.id === 'theme' ? themeToggleIcon(theme.mode) : entry.icon
-    const glyph = <Icon icon={icon} size="xl" className={cn(active && 'text-nav-selected-icon')} />
     const className = cn(BUTTON, active && BUTTON_ACTIVE)
+    if (entry.id === 'account') {
+      const label = account.label ?? t('accountLogin')
+      return (
+        <AccountMenu
+          key={entry.id}
+          avatar={account}
+          trigger={(open) => (
+            <Tooltip content={label} side="right">
+              <button type="button" aria-label={label} className={cn(BUTTON, (active || open) && BUTTON_ACTIVE)}>
+                <AccountAvatar state={account} />
+              </button>
+            </Tooltip>
+          )}
+        />
+      )
+    }
     const label = t(entry.labelKey)
     return (
       <Tooltip key={entry.id} content={label} side="right">
-        {entry.to ? (
-          <Link to={entry.to} aria-label={label} aria-current={active ? 'page' : undefined} className={className}>
-            {glyph}
-          </Link>
-        ) : (
-          <button
-            type="button"
-            aria-label={label}
-            className={className}
-            onClick={() => {
-              if (entry.id === 'theme') theme.toggle().catch((error: unknown) => toast.error(error))
-            }}
-          >
-            {glyph}
-          </button>
-        )}
+        <Link to={entry.to ?? '/'} aria-label={label} aria-current={active ? 'page' : undefined} className={className}>
+          <Icon icon={entry.icon} size="xl" className={cn(active && 'text-nav-selected-icon')} />
+        </Link>
       </Tooltip>
     )
   }

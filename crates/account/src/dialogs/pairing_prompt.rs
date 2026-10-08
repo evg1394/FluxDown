@@ -4,11 +4,11 @@
 //! 过期 / 已被其他窗口处理（从快照消失）时自动关闭。必须明确选择：不响应 Esc 与点击遮罩。
 
 use fluxdown_protocol::{LinkApproveParams, LinkPairingRequestDto, method};
-use fluxdown_ui_components::{ControlExt as _, field_error, field_hint};
+use fluxdown_ui_components::{BusyExt as _, ControlExt as _, field_error, field_hint};
 use fluxdown_ui_theme::active_theme;
 use gpui::{
     App, AppContext as _, ClickEvent, Context, Entity, FontWeight, Global, IntoElement,
-    ParentElement, Render, SharedString, Styled, Window, div, prelude::FluentBuilder as _, px,
+    ParentElement, Render, SharedString, Styled, Window, div, prelude::FluentBuilder as _,
 };
 use gpui_component::{
     Disableable as _, WindowExt as _,
@@ -69,7 +69,7 @@ fn open_now(host: &Entity<AccountHost>, session_id: &str, window: &mut Window, c
         let view = view.clone();
         dialog
             .title(fluxdown_ui_components::dialog_title(title.clone(), cx))
-            .w(px(480.))
+            .w(active_theme(cx).text_extent(480.))
             .close_button(false)
             .overlay_closable(false)
             .keyboard(false)
@@ -249,7 +249,7 @@ impl Render for PairingPrompt {
                             .primary()
                             .label(self.t("incomingPairingAccept", cx))
                             .control(cx)
-                            .loading(self.busy)
+                            .busy(self.busy)
                             .disabled(self.busy)
                             .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                                 this.respond(true, window, cx);

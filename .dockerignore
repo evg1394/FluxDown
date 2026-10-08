@@ -6,6 +6,7 @@
 !.cargo
 !native
 !crates
+!third_party
 !scripts
 scripts/*
 !scripts/desktop-dev

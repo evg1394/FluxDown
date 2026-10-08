@@ -63,6 +63,8 @@ pub enum ErrorReason {
     InvalidCredentials,
     /// FluxCloud：邮箱验证码错误或已过期。
     InvalidVerificationCode,
+    /// FluxCloud：修改密码时提供的当前密码不正确。
+    WrongPassword,
     /// FluxCloud：请求过于频繁（发码 / 登录 / 校验限流）。
     RateLimited,
     /// FluxCloud：邮箱已被注册。
@@ -89,6 +91,8 @@ pub enum ErrorReason {
     DeviceUntrusted,
     /// FluxCloud：登录会话已失效（被撤销 / 刷新令牌过期）。
     SessionExpired,
+    /// FluxCloud：账号密码已被修改或重置，本设备会话随之失效。
+    PasswordChanged,
     /// FluxCloud：无法连接云服务（网络 / DNS / TLS / 代理）。
     CloudUnreachable,
     /// 远程任务：目标设备当前离线，指令无法送达。

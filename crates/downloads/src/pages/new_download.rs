@@ -63,11 +63,11 @@ use gpui_component::{
 };
 
 /// 「自定义线程数」数字输入宽度。
-const CUSTOM_THREADS_WIDTH: Pixels = px(96.);
+const CUSTOM_THREADS_WIDTH: f32 = 96.;
 /// 预设下拉（UA、校验算法）定宽，右侧输入框吃满剩余宽度。
-const PRESET_DROPDOWN_WIDTH: Pixels = px(140.);
+const PRESET_DROPDOWN_WIDTH: f32 = 140.;
 /// 请求头名称列宽。
-const HEADER_NAME_WIDTH: Pixels = px(168.);
+const HEADER_NAME_WIDTH: f32 = 168.;
 /// 链接停止变化多久后才查询站点凭据（逐键输入时不逐字符发 RPC）。
 const SITE_AUTH_LOOKUP_DEBOUNCE: Duration = Duration::from_millis(250);
 
@@ -1205,10 +1205,14 @@ impl NewDownloadView {
     ///
     /// 不要再加 `px`/`py`：多行 `Input` 已按尺寸给内部编辑区设置了内边距，外层再叠
     /// 一层会让文字离边框两倍远。
-    fn textarea(state: &Entity<TextareaState>, height: Pixels, cx: &App) -> Textarea {
-        let tokens = active_theme(cx).tokens();
+    ///
+    /// `height` 为默认字号下的高度；至少容纳 `lines` 行正文加上下小间距，文字放大后随行高增长。
+    fn textarea(state: &Entity<TextareaState>, height: Pixels, lines: f32, cx: &App) -> Textarea {
+        let theme = active_theme(cx);
+        let tokens = theme.tokens();
+        let text_height = tokens.typography.sm.line_height * lines + tokens.spacing.xs * 2.;
         Textarea::new(state)
-            .h(height)
+            .h(height.max(text_height))
             .w_full()
             .text_size(tokens.typography.sm.size)
             .line_height(tokens.typography.sm.line_height)
@@ -1266,7 +1270,7 @@ impl NewDownloadView {
                         this.child(field_hint(self.strings.format_url_count(count), cx))
                     }),
             )
-            .child(Self::textarea(&self.urls, px(128.), cx))
+            .child(Self::textarea(&self.urls, px(128.), 6., cx))
             .when(has_text && count == 0, |this| {
                 this.child(field_error(self.strings.no_valid_url.clone(), cx))
             })
@@ -1431,7 +1435,7 @@ impl NewDownloadView {
                     Input::new(&self.custom_threads)
                         .control(cx)
                         .flex_none()
-                        .w(CUSTOM_THREADS_WIDTH),
+                        .w(active_theme(cx).text_extent(CUSTOM_THREADS_WIDTH)),
                 )
             });
         form_field(self.strings.threads.clone(), control, None, cx)
@@ -1551,7 +1555,7 @@ impl NewDownloadView {
             .collect();
         let preset = self.dropdown(
             "new-download-ua-preset",
-            Some(PRESET_DROPDOWN_WIDTH),
+            Some(active_theme(cx).text_extent(PRESET_DROPDOWN_WIDTH)),
             self.ua_preset,
             options,
             |this, key, window, cx| this.set_ua_preset(key, window, cx),
@@ -1568,7 +1572,7 @@ impl NewDownloadView {
     fn render_cookie(&self, cx: &mut Context<Self>) -> Div {
         form_field(
             self.strings.cookie.clone(),
-            Self::textarea(&self.cookie, px(72.), cx),
+            Self::textarea(&self.cookie, px(72.), 3., cx),
             Some(self.strings.cookie_desc.clone()),
             cx,
         )
@@ -1581,7 +1585,7 @@ impl NewDownloadView {
             .collect();
         let preset = self.dropdown(
             "new-download-hash-algorithm",
-            Some(PRESET_DROPDOWN_WIDTH),
+            Some(active_theme(cx).text_extent(PRESET_DROPDOWN_WIDTH)),
             self.hash_algorithm,
             options,
             |this, algorithm, _, cx| {
@@ -1611,7 +1615,7 @@ impl NewDownloadView {
                     .child(
                         div()
                             .flex_none()
-                            .w(HEADER_NAME_WIDTH)
+                            .w(active_theme(cx).text_extent(HEADER_NAME_WIDTH))
                             .child(Input::new(&row.key).control(cx).w_full()),
                     )
                     .child(

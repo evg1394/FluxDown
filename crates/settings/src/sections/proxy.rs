@@ -15,6 +15,7 @@ pub(crate) fn page(ctx: &SectionContext, cx: &mut App) -> SettingsPage {
     let mode = ctx.store.read(cx).daemon_str("proxy_mode");
     if mode == "system"
         && ctx.store.read(cx).system_proxy().is_none()
+        && !ctx.store.read(cx).load_attempted("systemProxy")
         && ctx
             .store
             .update(cx, |store, _| store.begin_load("systemProxy"))

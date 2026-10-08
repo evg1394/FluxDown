@@ -7,7 +7,11 @@
 //! - 保持期：最近一次表格内指针活动后 [`INTERACTION_HOLD`] 内；或排序键是动态键
 //!   （速度 / 进度）且距上次真正重排不足 [`LIVE_RESORT_INTERVAL`]。
 
-use std::time::{Duration, Instant};
+use std::{
+    cell::Cell,
+    rc::Rc,
+    time::{Duration, Instant},
+};
 
 use super::RowId;
 
@@ -16,11 +20,30 @@ pub(crate) const INTERACTION_HOLD: Duration = Duration::from_millis(1500);
 /// 动态排序键（速度 / 进度）两次重排的最小间隔。
 pub(crate) const LIVE_RESORT_INTERVAL: Duration = Duration::from_secs(2);
 
+/// 指针活动记录句柄：表格的指针监听器直接写它，而不是 `Entity::update` 表格。
+///
+/// gpui-fast 把渲染期外的 entity 写入记为内容变化；鼠标移动 / 滚轮每次都写表格会让
+/// 随后的滚动 notify 变成整页重建。保持期只在刷新 / 重排定时器（非渲染路径）里读取，
+/// 无需被渲染依赖追踪。
+#[derive(Clone, Default)]
+pub(crate) struct InteractionHold(Rc<Cell<Option<Instant>>>);
+
+impl InteractionHold {
+    /// 记录一次表格内指针活动，开启 / 顺延保持期。
+    pub(crate) fn note(&self, now: Instant) {
+        self.0.set(Some(now + INTERACTION_HOLD));
+    }
+
+    fn until(&self) -> Option<Instant> {
+        self.0.get()
+    }
+}
+
 #[derive(Default)]
 pub(crate) struct RowOrder {
     /// 上次应用的行顺序（分组前）。
     order: Vec<RowId>,
-    hold_until: Option<Instant>,
+    hold: InteractionHold,
     last_sorted_at: Option<Instant>,
     /// 有被推迟的重排：当前顺序与最新排序结果不同。
     stale: bool,
@@ -29,7 +52,12 @@ pub(crate) struct RowOrder {
 impl RowOrder {
     /// 记录一次表格内指针活动，开启 / 顺延保持期。
     pub(crate) fn note_interaction(&mut self, now: Instant) {
-        self.hold_until = Some(now + INTERACTION_HOLD);
+        self.hold.note(now);
+    }
+
+    /// 共享的指针活动句柄（交给不持有表格可变引用的事件监听器）。
+    pub(crate) fn interaction_hold(&self) -> InteractionHold {
+        self.hold.clone()
     }
 
     /// 应用一次排序结果。`sorted` 是按当前比较器排好的行；`content_only` 表示自上次
@@ -68,11 +96,11 @@ impl RowOrder {
             .filter(|_| live_key)
             .map(|at| at + LIVE_RESORT_INTERVAL);
         // 过期必然源于保持期，两者至少有一个；`Option::max` 取较晚者。
-        self.hold_until.max(throttle)
+        self.hold.until().max(throttle)
     }
 
     fn holding(&self, live_key: bool, now: Instant) -> bool {
-        self.hold_until.is_some_and(|until| now < until)
+        self.hold.until().is_some_and(|until| now < until)
             || (live_key
                 && self
                     .last_sorted_at

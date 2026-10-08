@@ -6,7 +6,8 @@
 //! - 浏览器鉴权：`/rpc` 子协议携带密钥、Origin 同源校验、`/api/v1/setup*` 首次初始化；
 //! - 浏览器文件面 `/api/web/*`：把上传 / 下载流式转发到 daemon 的 loopback HTTP；
 //! - SPA 托管（内嵌或 `FLUXDOWN_WEBROOT`）与演示模式 `/demo/file`；
-//! - 桌面专属集成（NMH、开机自启迁移、`agent.platform.*`、托盘 / 剪贴板）全部关闭。
+//! - 桌面专属集成（NMH、开机自启迁移、托盘 / 剪贴板）关闭；`agent.platform.*` 只对
+//!   本机来源连接放行打开 / 定位任务产物（[`ServerHandle::local_platform_permitted`]）。
 //!
 //! 环境变量语义见 [`ServerConfig::from_lookup`]；`FLUXDOWN_DATA_DIR` /
 //! `FLUXDOWN_DATABASE_URL` / `FLUXDOWN_SAVE_DIR` 不在这里解析，由 daemon 从继承的环境读取。
@@ -83,6 +84,9 @@ pub struct ServerConfig {
     /// `/ping` 的 `language` 回退值（`en` / `zh`）。
     pub language: Option<String>,
     pub demo: DemoMode,
+    /// `FLUXDOWN_ALLOW_LOCAL_PLATFORM` 为真：所有已鉴权 `/rpc` 连接都可在服务器主机上打开 /
+    /// 定位任务产物（显式越权开关，默认关）。
+    pub allow_local_platform: bool,
 }
 
 impl ServerConfig {
@@ -100,6 +104,7 @@ impl ServerConfig {
     /// | `FLUXDOWN_WEBROOT` | 磁盘托管 SPA |
     /// | `FLUXDOWN_LANG` | `/ping` 语言回退，`zh-CN` → `zh` |
     /// | `FLUXDOWN_DEMO` / `FLUXDOWN_DEMO_URL` | 演示模式 |
+    /// | `FLUXDOWN_ALLOW_LOCAL_PLATFORM` | 所有已鉴权连接都可在服务器主机上打开 / 定位任务产物 |
     pub fn from_lookup(get: impl Fn(&str) -> Option<String>) -> Result<Self, ServerConfigError> {
         let bind_text = get("FLUXDOWN_BIND")
             .map(|value| value.trim().to_owned())
@@ -140,6 +145,13 @@ impl ServerConfig {
             }
             None => DemoMode::Off,
         };
+        let allow_local_platform =
+            get("FLUXDOWN_ALLOW_LOCAL_PLATFORM").is_some_and(|value| flag_truthy(&value));
+        if allow_local_platform {
+            tracing::warn!(
+                "FLUXDOWN_ALLOW_LOCAL_PLATFORM is on: every authenticated client may open downloaded files on this host"
+            );
+        }
         Ok(Self {
             bind,
             token,
@@ -147,6 +159,7 @@ impl ServerConfig {
             webroot,
             language,
             demo,
+            allow_local_platform,
         })
     }
 
@@ -398,6 +411,109 @@ pub fn origin_allowed(headers: &HeaderMap) -> bool {
     })
 }
 
+/// 请求是否来自字面本机：TCP 对端是环回；`X-Forwarded-For` / `X-Real-IP` / `Forwarded: for=`
+/// 的每一跳都是环回 IP；`Host` / `Origin` / `X-Forwarded-Host` / `Forwarded: host=` 的每个
+/// authority 都是 `localhost` 或环回 IP，且至少出现一个。
+///
+/// 同名头的所有实例都参与判定，任何无法解析的值都判否（fail closed）：同机反代虽从环回连入，
+/// 但浏览器访问的是公网域名（`Origin` / `Host` / `X-Forwarded-Host` 暴露出来），不会被当成本机。
+fn literal_local_origin(peer: IpAddr, headers: &HeaderMap) -> bool {
+    if !is_loopback_ip(peer) {
+        return false;
+    }
+    for name in ["x-forwarded-for", "x-real-ip"] {
+        for value in headers.get_all(name) {
+            let Ok(value) = value.to_str() else {
+                return false;
+            };
+            if !value.split(',').all(|hop| parse_loopback_ip(hop.trim())) {
+                return false;
+            }
+        }
+    }
+    let mut saw_authority = false;
+    for value in headers.get_all(header::FORWARDED) {
+        let Ok(value) = value.to_str() else {
+            return false;
+        };
+        for pair in value.split([',', ';']) {
+            let Some((key, raw)) = pair.split_once('=') else {
+                continue;
+            };
+            let raw = raw.trim().trim_matches('"');
+            let key = key.trim();
+            if key.eq_ignore_ascii_case("for") {
+                if !loopback_forwarded_node(raw) {
+                    return false;
+                }
+            } else if key.eq_ignore_ascii_case("host") {
+                saw_authority = true;
+                if !loopback_authority(raw) {
+                    return false;
+                }
+            }
+        }
+    }
+    for (name, is_origin) in [
+        (header::HOST, false),
+        (header::ORIGIN, true),
+        (HeaderName::from_static("x-forwarded-host"), false),
+    ] {
+        for value in headers.get_all(name) {
+            let Ok(value) = value.to_str() else {
+                return false;
+            };
+            for item in value.split(',') {
+                saw_authority = true;
+                let item = item.trim();
+                let authority = if is_origin {
+                    match item.split_once("://") {
+                        Some((_, authority)) => authority.trim_end_matches('/'),
+                        None => return false,
+                    }
+                } else {
+                    item
+                };
+                if !loopback_authority(authority) {
+                    return false;
+                }
+            }
+        }
+    }
+    saw_authority
+}
+
+fn is_loopback_ip(ip: IpAddr) -> bool {
+    ip.to_canonical().is_loopback()
+}
+
+fn parse_loopback_ip(text: &str) -> bool {
+    text.parse::<IpAddr>().is_ok_and(is_loopback_ip)
+}
+
+/// RFC 7239 节点：`IPv4[:port]` 或 `"[IPv6][:port]"`；`unknown` / 混淆标识判否。
+fn loopback_forwarded_node(node: &str) -> bool {
+    let host = match node.strip_prefix('[') {
+        Some(rest) => rest.split_once(']').map(|(ip, _)| ip),
+        None => Some(node.split_once(':').map_or(node, |(ip, _)| ip)),
+    };
+    host.is_some_and(parse_loopback_ip)
+}
+
+/// `host[:port]` 的主机是否为 `localhost`（允许 FQDN 末尾点）或环回 IP。
+fn loopback_authority(value: &str) -> bool {
+    value
+        .parse::<axum::http::uri::Authority>()
+        .is_ok_and(|authority| {
+            let host = authority
+                .host()
+                .trim_start_matches('[')
+                .trim_end_matches(']')
+                .trim_end_matches('.');
+            host.eq_ignore_ascii_case("localhost") || parse_loopback_ip(host)
+        })
+}
+
 /// 按来源地址的访问密钥失败节流：窗口内失败达到上限即锁定到窗口结束。
 /// 回环来源不受限（本机反代会让所有外部请求都呈现为回环，限速只会变成全站锁定）。
 #[derive(Default)]
@@ -492,6 +608,8 @@ pub struct ServerHandleParts {
     pub daemon: DaemonClientConfig,
     pub webroot: Option<PathBuf>,
     pub demo: bool,
+    /// [`ServerConfig::allow_local_platform`]。
+    pub allow_local_platform: bool,
     pub diagnostics: Arc<crate::diagnostics::DiagnosticsService>,
 }
 
@@ -507,6 +625,7 @@ pub struct ServerHandle {
     daemon_http: DaemonHttp,
     webroot: Option<PathBuf>,
     demo: bool,
+    allow_local_platform: bool,
     throttle: AuthThrottle,
 }
 
@@ -532,6 +651,7 @@ impl ServerHandle {
             blobs: parts.blobs,
             webroot: parts.webroot,
             demo: parts.demo,
+            allow_local_platform: parts.allow_local_platform,
             throttle: AuthThrottle::default(),
         })
     }
@@ -540,6 +660,14 @@ impl ServerHandle {
     #[must_use]
     pub fn access_key(&self) -> &TokenCell {
         &self.token
+    }
+
+    /// 本连接能否在服务器主机上打开 / 定位任务产物（`agent.platform.openTask` /
+    /// `revealTask`）。运维显式开启 `FLUXDOWN_ALLOW_LOCAL_PLATFORM` 时所有已鉴权连接都放行；
+    /// 否则只放行字面本机来源（见 [`literal_local_origin`]）。建连时判定一次，整条连接沿用。
+    #[must_use]
+    pub fn local_platform_permitted(&self, peer: IpAddr, headers: &HeaderMap) -> bool {
+        self.allow_local_platform || literal_local_origin(peer, headers)
     }
 
     async fn wait_ready(&self) -> bool {
@@ -1116,6 +1244,115 @@ mod tests {
     }
 
     #[test]
+    fn allow_local_platform_is_an_explicit_truthy_flag() {
+        assert!(!config_from(&[]).unwrap().allow_local_platform);
+        assert!(
+            !config_from(&[("FLUXDOWN_ALLOW_LOCAL_PLATFORM", "0")])
+                .unwrap()
+                .allow_local_platform
+        );
+        assert!(
+            config_from(&[("FLUXDOWN_ALLOW_LOCAL_PLATFORM", " On ")])
+                .unwrap()
+                .allow_local_platform
+        );
+    }
+
+    fn header_map(pairs: &[(&'static str, &'static str)]) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        for (name, value) in pairs {
+            headers.append(*name, HeaderValue::from_static(value));
+        }
+        headers
+    }
+
+    #[test]
+    fn literal_local_origin_accepts_only_loopback_peers_hops_and_authorities() {
+        let loopback: IpAddr = "127.0.0.1".parse().unwrap();
+        let local = |pairs: &[(&'static str, &'static str)]| {
+            literal_local_origin(loopback, &header_map(pairs))
+        };
+
+        assert!(local(&[
+            ("host", "localhost:17800"),
+            ("origin", "http://localhost:17800"),
+        ]));
+        assert!(literal_local_origin(
+            "::1".parse().unwrap(),
+            &header_map(&[("host", "[::1]:17800")])
+        ));
+        // 双栈监听下本机 IPv4 连接呈现为 IPv4 映射地址。
+        assert!(literal_local_origin(
+            "::ffff:127.0.0.1".parse().unwrap(),
+            &header_map(&[("host", "[::ffff:127.0.0.1]:17800")])
+        ));
+        assert!(local(&[("host", "localhost.:17800")]));
+        assert!(local(&[
+            ("host", "localhost:17800"),
+            ("x-forwarded-for", "127.0.0.1, ::1"),
+        ]));
+        assert!(local(&[
+            ("host", "localhost:17800"),
+            (
+                "forwarded",
+                "for=\"[::1]:1234\", for=127.0.0.1:80;proto=http"
+            ),
+        ]));
+        // 只有 `by=` / `proto=` 的 Forwarded 不提供来源地址，结果由 Host 决定。
+        assert!(local(&[
+            ("host", "localhost:17800"),
+            ("forwarded", "by=127.0.0.1;proto=http"),
+        ]));
+        assert!(!local(&[
+            ("host", "downloads.example.com"),
+            ("forwarded", "by=127.0.0.1"),
+        ]));
+
+        assert!(!literal_local_origin(
+            "192.0.2.10".parse().unwrap(),
+            &header_map(&[("host", "localhost:17800")])
+        ));
+        assert!(!local(&[]), "an authority must be present");
+        assert!(!local(&[
+            ("host", "127.0.0.1:17800"),
+            ("x-forwarded-for", "192.0.2.10"),
+        ]));
+        assert!(!local(&[
+            ("host", "127.0.0.1:17800"),
+            ("x-real-ip", "unknown")
+        ]));
+        // 同机反代对外提供公网域名：Origin / X-Forwarded-Host 暴露真实访问地址。
+        assert!(!local(&[
+            ("host", "127.0.0.1:17800"),
+            ("origin", "https://downloads.example.com"),
+            ("x-forwarded-host", "downloads.example.com"),
+        ]));
+        assert!(!local(&[("host", "localhost:17800"), ("origin", "null")]));
+        // 同名头的每个实例都参与判定。
+        assert!(!local(&[
+            ("host", "localhost:17800"),
+            ("host", "downloads.example.com"),
+        ]));
+        assert!(!local(&[
+            ("host", "localhost:17800"),
+            ("x-forwarded-for", "127.0.0.1"),
+            ("x-forwarded-for", "192.0.2.10"),
+        ]));
+        for forwarded in [
+            "for=192.0.2.10",
+            "for=\"[2001:db8::1]\"",
+            "for=_gazonk",
+            "for=unknown",
+            "for=127.0.0.1;host=downloads.example.com",
+        ] {
+            assert!(
+                !local(&[("host", "localhost:17800"), ("forwarded", forwarded)]),
+                "{forwarded}"
+            );
+        }
+    }
+
+    #[test]
     fn builtin_demo_url_follows_the_bound_port() {
         let config = config_from(&[("FLUXDOWN_DEMO", "1")]).unwrap();
         assert_eq!(config.demo, DemoMode::Builtin);
@@ -1321,6 +1558,10 @@ mod tests {
 
     impl Harness {
         async fn new(label: &str, token: &str) -> Self {
+            Self::with_local_platform(label, token, false).await
+        }
+
+        async fn with_local_platform(label: &str, token: &str, allow_local_platform: bool) -> Self {
             let dir = std::env::temp_dir().join(format!(
                 "fluxdown_agent_{label}_{}_{}",
                 std::process::id(),
@@ -1355,6 +1596,7 @@ mod tests {
                     daemon,
                     webroot: None,
                     demo: false,
+                    allow_local_platform,
                 })
                 .unwrap(),
             );
@@ -1407,6 +1649,27 @@ mod tests {
                 tracing::warn!(path = %dir.display(), error = %error, "remove server test directory");
             }
         }
+    }
+
+    #[tokio::test]
+    async fn explicit_flag_extends_task_file_actions_to_remote_connections() {
+        let remote: IpAddr = "192.0.2.10".parse().unwrap();
+        let public = header_map(&[
+            ("host", "downloads.example.com"),
+            ("origin", "https://downloads.example.com"),
+        ]);
+        let local = header_map(&[("host", "localhost:17800")]);
+        let loopback: IpAddr = "127.0.0.1".parse().unwrap();
+
+        let default = Harness::new("local_platform_default", "flux2026").await;
+        assert!(!default.handle.local_platform_permitted(remote, &public));
+        assert!(default.handle.local_platform_permitted(loopback, &local));
+        default.finish().await;
+
+        let explicit =
+            Harness::with_local_platform("local_platform_explicit", "flux2026", true).await;
+        assert!(explicit.handle.local_platform_permitted(remote, &public));
+        explicit.finish().await;
     }
 
     #[tokio::test]

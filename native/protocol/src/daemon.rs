@@ -23,6 +23,41 @@ pub enum SelectionKind {
     Variant {
         options: Vec<ResolveVariantOptionDto>,
     },
+    /// 保存目录里已有同名最终文件（`file_exists_behavior = ask`）。字段全部由主机算好：
+    /// 远程客户端看不到主机文件系统。
+    #[serde(rename_all = "camelCase")]
+    FileExists {
+        /// 发生冲突的目标文件名。
+        file_name: String,
+        /// 主机上的保存目录（只用于展示）。
+        save_dir: String,
+        /// 已有文件大小（字节）；读取失败时缺省。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        existing_size: Option<u64>,
+        /// 已有文件修改时间（Unix 毫秒）；读取失败时缺省。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        existing_modified_unix_ms: Option<i64>,
+        /// 新下载的大小（字节）；未知时缺省。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        incoming_size: Option<i64>,
+        /// 选「重命名」时的预览名（询问时刻计算，最终名可能不同）。
+        rename_preview: String,
+        /// 该任务允许的动作；恒含 `rename`。
+        actions: Vec<FileExistsAction>,
+    },
+}
+
+/// 文件已存在时可选的处理动作。
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub enum FileExistsAction {
+    /// 自动追加序号另存。
+    Rename,
+    /// 下载完成后替换旧文件（失败或取消不会动旧文件）。
+    Overwrite,
+    /// 不下载，任务直接记为完成。
+    Skip,
 }
 
 /// 引擎可接受的类型化选择结果。
@@ -37,6 +72,7 @@ pub enum SelectionOutcome {
     Hls { index: i32 },
     Bt { indices: Vec<i32> },
     Variant { index: i32 },
+    FileExists { action: FileExistsAction },
     Cancelled,
 }
 

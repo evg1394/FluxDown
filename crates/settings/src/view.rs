@@ -109,7 +109,11 @@ impl SettingsView {
         })
         .detach();
         // 站点凭据由新建任务等流程在窗口外写入且无事件推送：每次打开窗口重新加载一次。
-        store.update(cx, |store, _| store.reset_load("siteAuth"));
+        // 系统集成状态上次失败的话，重新打开窗口也给一次重试机会。
+        store.update(cx, |store, _| {
+            store.reset_load("siteAuth");
+            store.reset_load("integration");
+        });
         let placeholder = translator.read(cx).text("settingsSearchHint").to_owned();
         let search = cx.new(|cx| InputState::new(window, cx).placeholder(placeholder));
         cx.observe(&search, |_, _, cx| cx.notify()).detach();
@@ -205,6 +209,7 @@ impl SettingsView {
     fn render_sidebar(&self, pages: &[SettingsPage], cx: &mut Context<Self>) -> impl IntoElement {
         let theme = active_theme(cx);
         let tokens = theme.tokens().clone();
+        let sidebar_width = theme.text_extent(SIDEBAR_WIDTH);
         let extended = theme.extended().clone();
         let items: Vec<_> = pages
             .iter()
@@ -213,7 +218,7 @@ impl SettingsView {
 
         v_flex()
             .flex_none()
-            .w(px(SIDEBAR_WIDTH))
+            .w(sidebar_width)
             .h_full()
             .min_h_0()
             .px(tokens.spacing.sm)
@@ -397,7 +402,7 @@ impl Render for SettingsView {
         }
         // 内容区可用宽度：窗口宽 - 侧栏 - 左右留白（列数判定用，不参与布局）。
         let content_width = f32::from(window.viewport_size().width)
-            - SIDEBAR_WIDTH
+            - f32::from(active_theme(cx).text_extent(SIDEBAR_WIDTH))
             - CONTENT_PADDING_LEFT
             - CONTENT_PADDING_RIGHT;
         let feedback = self.feedback(cx);

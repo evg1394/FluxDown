@@ -287,6 +287,22 @@ export interface ChangeNicknameParams {
   nickname: string;
 }
 
+/** 已登录修改 / 设置密码：`currentPassword` 与 `code`（`sendPasswordCode` 发到绑定邮箱）二选一。 */
+export interface ChangePasswordParams {
+  /** 至少 8 位。 */
+  newPassword: string;
+  currentPassword?: string;
+  code?: string;
+}
+
+/** 未登录重置密码：`sendPasswordResetCode` 发到该邮箱的验证码 + 新密码。 */
+export interface ResetPasswordParams {
+  email: string;
+  code: string;
+  /** 至少 8 位。 */
+  newPassword: string;
+}
+
 // ── agent.gateway / device / preferences / power ──
 
 export interface GatewayRevealTokenResult {

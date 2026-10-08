@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import { parseTimestampSecs } from './task'
 import type { DownloadTaskView, TaskState } from './task'
-import { compareNatural, compareViews, defaultViewPrefs, nextHeaderSort, parseViewPrefs, smartTier } from './viewPrefs'
+import { columnShown, compareNatural, compareViews, defaultViewPrefs, nextHeaderSort, parseViewPrefs, smartTier } from './viewPrefs'
 import type { ViewPrefs, ViewSortKey } from './viewPrefs'
 
 interface Spec {
@@ -228,6 +228,17 @@ describe('偏好解析', () => {
     const future = parseViewPrefs({ density: 'future', group_by: 'status' })
     expect(future.density).toBe(defaultViewPrefs().density)
     expect(future.group_by).toBe('status')
+  })
+
+  test('宽松密度主列恒显示，指标列并入主列，其余列照偏好（与 GPUI 一致）', () => {
+    expect(columnShown('file_name', false, 'relaxed')).toBe(true)
+    for (const kind of ['size', 'progress', 'speed', 'eta'] as const) {
+      expect(columnShown(kind, true, 'relaxed')).toBe(false)
+      expect(columnShown(kind, true, 'comfortable')).toBe(true)
+    }
+    expect(columnShown('status', true, 'relaxed')).toBe(true)
+    expect(columnShown('source', false, 'relaxed')).toBe(false)
+    expect(columnShown('file_name', false, 'compact')).toBe(false)
   })
 
   test('status 是合法排序键，非法值回落默认', () => {

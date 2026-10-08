@@ -17,11 +17,21 @@ function asciiLower(text: string): string {
   return text.replace(/[A-Z]/g, (c) => c.toLowerCase())
 }
 
-/** 外部捕获 → 条目：捕获文件名与链接路径末段逐字相同时省略 `out=`。 */
+/** 外部捕获 → 条目：捕获文件名与链接路径末段（百分号解码后）逐字相同时省略 `out=`。 */
 export function captureEntry(url: string, fileName: string): UrlEntry {
   const name = fileName.trim()
-  const redundant = urlFileSegment(url) === name
+  const segment = urlFileSegment(url)
+  const redundant = segment !== null && (segment === name || safeDecode(segment) === name)
   return { url, fileName: redundant ? '' : name, checksum: '' }
+}
+
+/** UTF-8 百分号解码；非法序列返回 null（调用方保留原文）。 */
+function safeDecode(segment: string): string | null {
+  try {
+    return decodeURIComponent(segment)
+  } catch {
+    return null
+  }
 }
 
 /** `scheme://host/a/b.zip?x#y` → `b.zip`；无路径或以 `/` 结尾时为 null。 */

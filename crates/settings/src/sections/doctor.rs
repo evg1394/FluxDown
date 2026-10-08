@@ -4,7 +4,7 @@ use fluxdown_protocol::{ApplicationErrorCode, DiagnosticLevel, ErrorReason, RpcE
 use fluxdown_ui_components::{ButtonVariant, FluxIcon, button, loading_button};
 use fluxdown_ui_theme::active_theme;
 use gpui::{
-    App, ClipboardItem, FontWeight, IntoElement as _, ParentElement, SharedString, Styled, div, px,
+    App, ClipboardItem, FontWeight, IntoElement as _, ParentElement, SharedString, Styled, div,
 };
 use gpui_component::{h_flex, v_flex};
 use serde_json::Value;
@@ -182,7 +182,7 @@ fn report_item(ctx: &SectionContext) -> SettingsRow {
                 .child(
                     meta_text(cx)
                         .flex_none()
-                        .w(px(64.))
+                        .w(theme.text_extent(64.))
                         .font_weight(FontWeight::MEDIUM)
                         .text_color(level_color)
                         .child(SharedString::from(translator.text(level_key).to_owned())),

@@ -15,6 +15,7 @@ import { notePointerActivity } from '../model/rowOrder'
 import { formatBytes, formatDateTime, MAX_ETA_SECS, PROTOCOL_LABEL, sourceSite } from '../model/task'
 import type { DownloadTaskView } from '../model/task'
 import {
+  columnShown,
   COLUMN_LABEL_KEY,
   COLUMN_SORT_KEY,
   FILE_NAME_MAX_WIDTH,
@@ -28,6 +29,7 @@ import {
 import type { ColumnKind, ResolvedColumn, ViewDensity } from '../model/viewPrefs'
 import { useDownloads } from '../state'
 import type { VisibleRow } from '../state'
+import { useConflictTaskIds } from '../dialogs/fileConflict'
 import { FileCell, KindGlyph, ProgressCell, StatusCell } from './cells'
 import { formatEta } from './text'
 import type { Translate } from './text'
@@ -75,6 +77,7 @@ interface RowProps {
   view: DownloadTaskView
   columns: readonly LayoutColumn[]
   density: ViewDensity
+  conflict: boolean
   selected: boolean
   anySelected: boolean
   queueName: (queueId: string) => string
@@ -91,7 +94,7 @@ function renderCell(props: RowProps, column: LayoutColumn) {
   const downloading = view.state === 'downloading'
   switch (column.kind) {
     case 'file_name':
-      return <FileCell t={t} view={view} density={density} />
+      return <FileCell t={t} view={view} density={density} conflict={props.conflict} />
     case 'progress': {
       const barWidth = Math.max(0, column.width - 2 * CELL_PADDING_X - PROGRESS_LABEL_WIDTH - PROGRESS_GAP)
       return <ProgressCell view={view} barWidth={barWidth} />
@@ -205,16 +208,13 @@ const TaskRow = memo(function TaskRow(props: RowProps) {
       >
         <div className={cn('pointer-events-none absolute inset-y-0 left-1 right-1 rounded-[var(--fx-components-task-row-radius)]', selected ? 'bg-accent' : 'group-hover/row:bg-row-hover')} />
         <div className="relative flex shrink-0 items-center justify-center" style={{ width: SELECTION_COLUMN_WIDTH }}>
-          <div className={cn(anySelected || selected ? 'hidden' : 'group-hover/row:hidden')}>
-            <KindGlyph view={view} />
-          </div>
-          <div
-            className={cn('p-1', anySelected || selected ? 'flex' : 'hidden group-hover/row:flex')}
-            onClick={(event) => event.stopPropagation()}
-            onDoubleClick={(event) => event.stopPropagation()}
-          >
-            <Checkbox checked={selected} onCheckedChange={() => onToggle(view)} aria-label={view.name} />
-          </div>
+          {anySelected ? (
+            <div className="flex p-1" onClick={(event) => event.stopPropagation()} onDoubleClick={(event) => event.stopPropagation()}>
+              <Checkbox checked={selected} onCheckedChange={() => onToggle(view)} aria-label={view.name} />
+            </div>
+          ) : (
+            <KindGlyph view={view} tile={density === 'relaxed'} />
+          )}
         </div>
         {columns.map((column) => (
           <div
@@ -272,6 +272,7 @@ function GroupHeaderRow({
 export function TaskTable() {
   const t = useT()
   const ctx = useDownloads()
+  const conflictTaskIds = useConflictTaskIds()
   const { rows, prefs, selected, visibleKeys, views, groupSummaries } = ctx
   const scrollRef = useRef<HTMLDivElement>(null)
   // 拖拽调宽中的临时宽度（松手后写回偏好）。
@@ -280,7 +281,7 @@ export function TaskTable() {
 
   const resolved = useMemo(() => resolveColumns(prefs.columns), [prefs.columns])
   const columns = useMemo<LayoutColumn[]>(() => {
-    const shown = resolved.filter((column) => column.visible)
+    const shown = resolved.filter((column) => columnShown(column.kind, column.visible, prefs.density))
     return shown.map((column) => {
       let width = column.width
       let fluid = false
@@ -297,7 +298,7 @@ export function TaskTable() {
       }
       return { ...column, width, fluid }
     })
-  }, [resolved, prefs.file_name_width, resizing])
+  }, [resolved, prefs.file_name_width, prefs.density, resizing])
   const totalMinWidth = useMemo(
     () =>
       SELECTION_COLUMN_WIDTH +
@@ -422,15 +423,16 @@ export function TaskTable() {
             className="group/all flex shrink-0 items-center justify-center"
             style={{ width: SELECTION_COLUMN_WIDTH }}
           >
-            <div className={cn(allChecked || someChecked ? 'flex' : 'invisible group-hover/all:visible')}>
+            {/* 非多选模式（普通单击选中）表头全选框按未选处理；表头选择条只在显式多选模式出现，单项操作走右键菜单。 */}
+            <div className={cn(ctx.multiSelect ? 'flex' : 'invisible group-hover/all:visible')}>
               <Checkbox
-                checked={allChecked ? true : someChecked ? 'indeterminate' : false}
-                onCheckedChange={() => (allChecked ? ctx.clearSelection() : ctx.selectAll())}
+                checked={!ctx.multiSelect ? false : allChecked ? true : someChecked ? 'indeterminate' : false}
+                onCheckedChange={() => (ctx.multiSelect && allChecked ? ctx.clearSelection() : ctx.selectAll())}
                 aria-label={t('selectedCount', { n: visibleKeys.length })}
               />
             </div>
           </div>
-          {ctx.summary.any && !(ctx.detailOpen && ctx.summary.count === 1) ? (
+          {ctx.multiSelect ? (
             <SelectionHeaderBar />
           ) : (
             <>
@@ -514,8 +516,9 @@ export function TaskTable() {
                     view={row.view}
                     columns={columns}
                     density={prefs.density}
+                    conflict={row.view.source === 'local' && conflictTaskIds.has(row.view.taskId)}
                     selected={selected.has(row.key)}
-                    anySelected={selected.size > 0}
+                    anySelected={ctx.multiSelect}
                     queueName={ctx.queueName}
                     onClick={onClick}
                     onDoubleClick={onDoubleClick}

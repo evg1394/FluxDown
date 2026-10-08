@@ -25,10 +25,38 @@ use crate::view::AccountView;
 const TINT_ALPHA: f32 = 0.12;
 
 /// 昵称首字符大写；无可用字符返回 `None`（头像回退图标）。
-fn avatar_initial(name: &str) -> Option<String> {
+pub(crate) fn avatar_initial(name: &str) -> Option<String> {
     let trimmed = name.trim();
     let first = trimmed.chars().next()?;
     Some(first.to_uppercase().collect())
+}
+
+/// 展示名：昵称为空时取邮箱 `@` 前部分。
+pub(crate) fn display_name(session: &AgentSessionDto) -> String {
+    if session.user.nickname.trim().is_empty() {
+        session
+            .user
+            .email
+            .split('@')
+            .next()
+            .unwrap_or(&session.user.email)
+            .to_owned()
+    } else {
+        session.user.nickname.clone()
+    }
+}
+
+/// 套餐徽标完整文字与颜色；`badge` 为空（服务端未配置徽标的套餐）返回 `None`。
+pub(crate) fn plan_badge_text(
+    plan: &CloudPlan,
+    membership_ordinal: Option<i64>,
+) -> Option<SharedString> {
+    let badge = plan.badge.as_deref().filter(|badge| !badge.is_empty())?;
+    Some(with_membership_ordinal(
+        badge,
+        plan.badge_numbered.then_some(membership_ordinal).flatten(),
+        plan.badge_number_digits,
+    ))
 }
 
 /// profile 卡片的瞬时 UI 状态；与会话数据分开传，避免参数逐个铺开。
@@ -56,17 +84,7 @@ pub(crate) fn render(
         refreshing,
         last_error,
     } = state;
-    let display_name = if session.user.nickname.trim().is_empty() {
-        session
-            .user
-            .email
-            .split('@')
-            .next()
-            .unwrap_or(&session.user.email)
-            .to_owned()
-    } else {
-        session.user.nickname.clone()
-    };
+    let display_name = display_name(session);
     let initial = avatar_initial(&display_name);
     let extended = active_theme(cx).extended().clone();
     let plan_badge = session
@@ -293,19 +311,14 @@ pub(crate) fn render(
 }
 
 /// 套餐徽标：`badge` 为空则不渲染（免费/专业版等服务端未配置徽标的套餐）。
-fn plan_badge(
+pub(crate) fn plan_badge(
     tokens: &SemanticThemeTokens,
     extended: &ExtendedTokens,
     plan: &CloudPlan,
     membership_ordinal: Option<i64>,
 ) -> Option<gpui::AnyElement> {
-    let badge = plan.badge.as_deref().filter(|badge| !badge.is_empty())?;
+    let text = plan_badge_text(plan, membership_ordinal)?;
     let color = parse_hex_color(&plan.badge_color).unwrap_or(tokens.colors.accent_foreground);
-    let text = with_membership_ordinal(
-        badge,
-        plan.badge_numbered.then_some(membership_ordinal).flatten(),
-        plan.badge_number_digits,
-    );
     Some(plan_tag(tokens, extended, text, color, &plan.badge_style))
 }
 
@@ -396,7 +409,7 @@ fn plan_tag(
 }
 
 /// Flutter `_tryParseHexColor`：接受可选 `#` 前缀的 6 位 `RRGGBB` 或 8 位 `AARRGGBB`。
-fn parse_hex_color(value: &str) -> Option<Hsla> {
+pub(crate) fn parse_hex_color(value: &str) -> Option<Hsla> {
     let hex = value.trim().trim_start_matches('#');
     let parsed = u32::from_str_radix(hex, 16).ok()?;
     let (argb, alpha) = match hex.len() {

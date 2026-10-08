@@ -7,7 +7,10 @@ mod assets;
 mod view;
 mod window_controls;
 
-use gpui::{Pixels, Point, SharedString, WindowDecorations, WindowOptions, point, px, size};
+use fluxdown_ui_theme::active_theme;
+use gpui::{
+    App, Pixels, Point, SharedString, Window, WindowDecorations, WindowOptions, point, px, size,
+};
 use gpui_component::TitleBar;
 
 pub use assets::*;
@@ -24,6 +27,37 @@ const TRAFFIC_LIGHT_INSET_PX: f32 = (TITLE_BAR_HEIGHT_PX - TRAFFIC_LIGHT_BUTTON_
 /// 交通灯在 [`TITLE_BAR_HEIGHT_PX`] 高的标题栏内垂直居中的位置。
 fn traffic_light_position() -> Point<Pixels> {
     point(px(TRAFFIC_LIGHT_INSET_PX), px(TRAFFIC_LIGHT_INSET_PX))
+}
+
+/// 标题栏内控件（`density.control` 高）上下各留的空白：默认 28 + 12 + 12 的 40 恰为 `density.title_bar`。
+const TITLE_BAR_CONTROL_PADDING_PX: f32 = 6.;
+
+/// 标题栏实际高度：不低于 `density.title_bar`，文字放大使 `density.control` 变高时随之撑高，
+/// 默认（控件 28px）恒为 40px。
+pub(crate) fn title_bar_height(cx: &App) -> Pixels {
+    let density = active_theme(cx).density();
+    density
+        .title_bar
+        .max(density.control + px(TITLE_BAR_CONTROL_PADDING_PX * 2.))
+}
+
+/// 交通灯纵向偏移随标题栏高度居中（macOS）；`applied` 记录已应用的值，未变化时不触碰 AppKit。
+#[cfg(target_os = "macos")]
+pub(crate) fn sync_traffic_light(window: &Window, height: Pixels, applied: &mut Pixels) {
+    let inset_y = (height - px(TRAFFIC_LIGHT_BUTTON_HEIGHT_PX)) / 2.;
+    if *applied != inset_y {
+        *applied = inset_y;
+        window.set_traffic_light_position(point(px(TRAFFIC_LIGHT_INSET_PX), inset_y));
+    }
+}
+
+/// 非 macOS 无交通灯，无需同步。
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn sync_traffic_light(_window: &Window, _height: Pixels, _applied: &mut Pixels) {}
+
+/// 交通灯初始纵向偏移（默认 40px 标题栏下的居中值）。
+pub(crate) const fn initial_traffic_light_y() -> Pixels {
+    px(TRAFFIC_LIGHT_INSET_PX)
 }
 
 /// 以 gpui-component `TitleBar` 窗口选项为基础，交通灯改为对齐 shell 标题栏高度。

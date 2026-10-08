@@ -27,7 +27,7 @@ pub(crate) enum ActivityEntry {
     Downloads,
     Rss,
     Webhooks,
-    Theme,
+    Account,
     Settings,
 }
 
@@ -36,7 +36,7 @@ impl ActivityEntry {
         Self::Downloads,
         Self::Rss,
         Self::Webhooks,
-        Self::Theme,
+        Self::Account,
         Self::Settings,
     ];
 
@@ -46,7 +46,7 @@ impl ActivityEntry {
             Self::Downloads => "activity-downloads",
             Self::Rss => "activity-rss",
             Self::Webhooks => "activity-webhooks",
-            Self::Theme => "activity-theme",
+            Self::Account => "activity-account",
             Self::Settings => "activity-settings",
         }
     }
@@ -57,7 +57,7 @@ impl ActivityEntry {
             Self::Downloads => fluxdown_ui_i18n::keys::MOBILE_NAV_DOWNLOADS,
             Self::Rss => "sidebarRss",
             Self::Webhooks => "webhookNavTitle",
-            Self::Theme => "activityThemeToggle",
+            Self::Account => "settingsCatAccount",
             Self::Settings => fluxdown_ui_i18n::keys::SETTINGS,
         }
     }
@@ -68,7 +68,7 @@ impl ActivityEntry {
             Self::Downloads => Some(DOWNLOADS_ROUTE),
             Self::Rss => Some(RSS_ROUTE),
             Self::Webhooks => Some(WEBHOOKS_ROUTE),
-            Self::Theme | Self::Settings => None,
+            Self::Account | Self::Settings => None,
         }
     }
 
@@ -86,10 +86,10 @@ impl ActivityEntry {
                 title_key: "showActivityWebhooks",
                 desc_key: "showActivityWebhooksDesc",
             }),
-            Self::Theme => Some(ActivityBarToggle {
-                pref_key: "ui.show_activity_theme",
-                title_key: "showActivityTheme",
-                desc_key: "showActivityThemeDesc",
+            Self::Account => Some(ActivityBarToggle {
+                pref_key: "ui.show_activity_account",
+                title_key: "showActivityAccount",
+                desc_key: "showActivityAccountDesc",
             }),
         }
     }
@@ -121,7 +121,19 @@ pub(crate) fn apply_visibility(
     }
 }
 
-/// 活动栏 / 命令面板的明暗切换：只写 [`THEME_MODE_KEY`]，换肤由偏好投影统一完成——
+/// 活动栏账户按钮 / 命令面板：打开设置窗口并定位到账户页（登录、资料与套餐都在这里）。
+pub(crate) fn open_account(cx: &mut App) {
+    crate::windows::settings::reveal(
+        cx,
+        fluxdown_ui_settings::SettingsTarget {
+            page: "account",
+            tab: "",
+            row: None,
+        },
+    );
+}
+
+/// 命令面板的明暗切换：只写 [`THEME_MODE_KEY`]，换肤由偏好投影统一完成——
 /// 直接改内存主题会在下一次偏好快照 / 事件回流时被旧偏好覆盖。
 pub(crate) fn toggle_theme(_window: &mut Window, cx: &mut App) {
     let target = if active_theme(cx).mode().is_dark() {

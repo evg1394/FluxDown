@@ -2,6 +2,7 @@ pub(crate) mod categories;
 pub(crate) mod counts;
 pub(crate) mod devices;
 pub(crate) mod dispatch;
+pub(crate) mod file_conflict;
 pub(crate) mod file_rescan;
 pub(crate) mod manifest;
 pub(crate) mod new_download;
@@ -19,6 +20,7 @@ use std::rc::Rc;
 pub(crate) use store::{RowId, TaskStore};
 
 use fluxdown_protocol::TaskRuntimeDto;
+use fluxdown_ui_icon_pack::FileKind;
 use gpui::SharedString;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -254,19 +256,6 @@ impl TaskProtocol {
     }
 }
 
-#[derive(Clone, Copy)]
-pub(crate) enum TaskKind {
-    Application,
-    DiskImage,
-    Mobile,
-    Video,
-    Audio,
-    Document,
-    Image,
-    Archive,
-    Other,
-}
-
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Hash)]
 pub enum TaskSource {
     Local,
@@ -312,7 +301,7 @@ pub(crate) struct DownloadTaskView {
     pub(crate) eta_seconds: Option<u64>,
     pub(crate) created_at_secs: i64,
     pub(crate) completed_at_secs: i64,
-    pub(crate) kind: TaskKind,
+    pub(crate) kind: FileKind,
     pub(crate) protocol: TaskProtocol,
     pub(crate) progress: f32,
     pub(crate) progress_label: String,
@@ -334,6 +323,8 @@ pub(crate) struct DownloadTaskView {
     pub(crate) save_dir: String,
     pub(crate) group_id: String,
     pub(crate) error_message: String,
+    /// 该任务有待确认的「文件已存在」请求（任务表「待确认」角标）。
+    pub(crate) conflict_pending: bool,
     pub(crate) file_missing: bool,
     pub(crate) seeding_status: i32,
     pub(crate) uploaded_bytes: i64,
@@ -423,7 +414,7 @@ impl DownloadTaskView {
         url: &str,
     ) -> Self {
         let metadata_pending = name.trim().is_empty();
-        let kind = task_kind(&name);
+        let kind = FileKind::of_name(&name);
         let protocol = TaskProtocol::detect(url, &name);
         let size_bytes = total_bytes.max(0) as u64;
         let downloaded = downloaded_bytes.max(0) as u64;
@@ -475,6 +466,7 @@ impl DownloadTaskView {
             save_dir: String::new(),
             group_id: String::new(),
             error_message: String::new(),
+            conflict_pending: false,
             file_missing: false,
             seeding_status: 0,
             uploaded_bytes: 0,
@@ -571,23 +563,6 @@ fn file_extension(name: &str) -> SharedString {
         .filter(|extension| !extension.is_empty() && !extension.contains('/'))
         .map(SharedString::from)
         .unwrap_or_default()
-}
-
-fn task_kind(name: &str) -> TaskKind {
-    let extension = name
-        .rsplit_once('.')
-        .map(|(_, extension)| extension.to_ascii_lowercase());
-    match extension.as_deref() {
-        Some("exe" | "msi" | "appimage") => TaskKind::Application,
-        Some("apk" | "ipa") => TaskKind::Mobile,
-        Some("iso" | "dmg") => TaskKind::DiskImage,
-        Some("zip" | "rar" | "7z" | "tar" | "gz") => TaskKind::Archive,
-        Some("mp4" | "mkv" | "webm" | "avi") => TaskKind::Video,
-        Some("mp3" | "flac" | "wav" | "m4a") => TaskKind::Audio,
-        Some("pdf" | "doc" | "docx" | "txt") => TaskKind::Document,
-        Some("png" | "jpg" | "jpeg" | "gif" | "webp") => TaskKind::Image,
-        _ => TaskKind::Other,
-    }
 }
 
 pub(crate) fn format_bytes(bytes: u64) -> String {

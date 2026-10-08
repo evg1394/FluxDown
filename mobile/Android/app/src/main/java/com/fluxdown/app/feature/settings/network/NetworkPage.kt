@@ -1,0 +1,585 @@
+package com.fluxdown.app.feature.settings.network
+
+import androidx.annotation.StringRes
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.unit.dp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.fluxdown.app.R
+import com.fluxdown.app.actions.LocalTaskActions
+import com.fluxdown.app.feature.settings.PickerSheetHost
+import com.fluxdown.app.feature.settings.PickerSpec
+import com.fluxdown.app.feature.settings.SettingRowBox
+import com.fluxdown.app.feature.settings.SettingsCtx
+import com.fluxdown.app.feature.settings.SettingsEntry
+import com.fluxdown.app.feature.settings.SettingsPageFrame
+import com.fluxdown.app.feature.settings.SettingsSearchContext
+import com.fluxdown.app.feature.settings.flowItem
+import com.fluxdown.app.feature.settings.rememberSettingsCtx
+import com.fluxdown.app.feature.settings.settingText
+import com.fluxdown.app.i18n.str
+import com.fluxdown.app.nav.LocalNavigator
+import com.fluxdown.app.nav.SettingsPage
+import com.fluxdown.app.shell.LocalAppContainer
+import com.fluxdown.app.shell.hostState
+import com.fluxdown.core.protocol.NetworkPortInput
+import com.fluxdown.core.protocol.NetworkProxyMode
+import com.fluxdown.core.protocol.NetworkProxyTest
+import com.fluxdown.core.protocol.NetworkRow
+import com.fluxdown.core.store.Connection
+import com.fluxdown.fluxui.controls.FluxActionRow
+import com.fluxdown.fluxui.controls.FluxFieldRow
+import com.fluxdown.fluxui.controls.FluxKeyValue
+import com.fluxdown.fluxui.controls.FluxListRow
+import com.fluxdown.fluxui.controls.FluxSegmented
+import com.fluxdown.fluxui.controls.GlassSection
+import com.fluxdown.fluxui.controls.GlassSectionScope
+import com.fluxdown.fluxui.controls.SegOption
+import com.fluxdown.fluxui.controls.SelectOption
+import com.fluxdown.fluxui.controls.FluxField
+import com.fluxdown.fluxui.feedback.FluxSpinner
+import com.fluxdown.fluxui.icons.FluxIcon
+import com.fluxdown.fluxui.icons.FluxIcons
+import com.fluxdown.fluxui.material.rememberFlowInGate
+import com.fluxdown.fluxui.overlay.FluxBanner
+import com.fluxdown.fluxui.overlay.FluxBannerKind
+import com.fluxdown.fluxui.overlay.FluxDialogButton
+import com.fluxdown.fluxui.overlay.FluxDialogButtonStyle
+import com.fluxdown.fluxui.overlay.FluxDialogSpec
+import com.fluxdown.fluxui.overlay.FluxToastKind
+import com.fluxdown.fluxui.overlay.LocalFluxOverlays
+import com.fluxdown.fluxui.theme.FluxText
+import com.fluxdown.fluxui.theme.FluxTheme
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+
+@StringRes
+private fun NetworkProxyMode.titleRes(): Int = when (this) {
+    NetworkProxyMode.None -> R.string.proxyModeNone
+    NetworkProxyMode.System -> R.string.proxyModeSystem
+    NetworkProxyMode.Manual -> R.string.proxyModeManual
+    NetworkProxyMode.Auto -> R.string.proxyModeAuto
+}
+
+@StringRes
+private fun NetworkProxyMode.descRes(): Int = when (this) {
+    NetworkProxyMode.None -> R.string.proxyModeNoneDesc
+    NetworkProxyMode.System -> R.string.proxyModeSystemDesc
+    NetworkProxyMode.Manual -> R.string.proxyModeManualDesc
+    NetworkProxyMode.Auto -> R.string.proxyModeAutoDesc
+}
+
+private val ProxyTypes = listOf("http", "https", "socks4", "socks5")
+
+/** 代理模式在引擎里会让多 CDN 并发失效；自动模式保留直连，不冲突。 */
+private fun NetworkProxyMode.isProxied(): Boolean = this == NetworkProxyMode.System || this == NetworkProxyMode.Manual
+
+/**
+ * S8 · 网络与代理：代理模式（none / system / manual / auto）、系统代理检测、手动配置、连通性测试、已保存的网站凭据。
+ * `proxy_*` 键是主机配置、不参与云同步（不显示 ☁︎）。写入全部经 ConfigEditor；断线（只读）时主机侧控件置灰。
+ */
+@Composable
+internal fun NetworkPage() {
+    val nav = LocalNavigator.current
+    val container = LocalAppContainer.current
+    val overlays = LocalFluxOverlays.current
+    val actions = LocalTaskActions.current
+    val haptics = FluxTheme.haptics
+    val hostState = hostState()
+    val hostRef by container.host.collectAsStateWithLifecycle()
+    val isLive by remember { derivedStateOf { hostState.value.connection == Connection.Live } }
+    var picker by remember { mutableStateOf<PickerSpec?>(null) }
+    val ctx = rememberSettingsCtx { picker = it }
+    val proxy = remember { NetworkProxyModel() }
+    val siteAuth = remember { SiteAuthModel() }
+    var sheet by remember { mutableStateOf<SiteAuthTarget?>(null) }
+    val gate = rememberFlowInGate()
+    val scope = rememberCoroutineScope()
+    val errorText: (com.fluxdown.core.host.HostException) -> String = { actions.errorText(it) }
+
+    val form = ctx.form
+    val mode = NetworkProxyMode.of(form.value("proxy_mode"))
+    val request = NetworkProxyTest.request(mode, form, proxy.system)
+    val hostId = hostRef.id
+    val remoteHostName = if (ctx.isLocalHost) null else hostRef.displayName
+
+    val cancelText = str(R.string.cancel)
+    val cdnTitle = str(R.string.proxyCdnMultiConfirmTitle)
+    val cdnDesc = str(R.string.proxyCdnMultiConfirmDesc)
+    val cdnEnable = str(R.string.proxyCdnMultiConfirmEnable)
+    val tlsHint = str(R.string.proxyTestTlsEndpointHint)
+    val clearTitle = str(R.string.settingsSiteAuthClearAll)
+    val deleteTitle = str(R.string.settingsSiteAuthDelete)
+
+    // 测试参数（模式 / 类型 / 地址 / 端口 / 凭据 / 检测结果）或主机变化后，旧结果不再代表当前配置。
+    LaunchedEffect(request) { proxy.resetTest() }
+    LaunchedEffect(hostId) {
+        proxy.resetTest()
+        proxy.resetDetection()
+    }
+    // 系统代理检测：切到系统模式 / 切换主机 / 连接恢复时重新检测。
+    LaunchedEffect(hostId, isLive, mode == NetworkProxyMode.System) {
+        if (isLive && mode == NetworkProxyMode.System) proxy.detect(container.session, errorText)
+    }
+    LaunchedEffect(hostId, isLive) { siteAuth.load(container.session, hostId, errorText) }
+
+    fun selectMode(next: NetworkProxyMode) {
+        if (next == mode) return
+        if (next.isProxied() && !mode.isProxied() && form.bool("cdn_multi_enabled")) {
+            overlays.showDialog(
+                FluxDialogSpec(
+                    title = cdnTitle,
+                    message = cdnDesc,
+                    icon = FluxIcons.TriangleAlert,
+                    buttons = listOf(
+                        FluxDialogButton(cancelText, FluxDialogButtonStyle.Secondary),
+                        FluxDialogButton(cdnEnable, FluxDialogButtonStyle.Primary) {
+                            ctx.editor.setNow(mapOf("cdn_multi_enabled" to "false", "proxy_mode" to next.wire))
+                        },
+                    ),
+                ),
+            )
+        } else {
+            ctx.editor.set("proxy_mode", next.wire)
+        }
+    }
+
+    fun reportFailure(e: com.fluxdown.core.host.HostException) {
+        haptics.reject()
+        overlays.toast(actions.errorText(e), FluxToastKind.Error)
+    }
+
+    fun deleteEntry(site: String, user: String) {
+        val session = container.session
+        overlays.showDialog(
+            FluxDialogSpec(
+                title = deleteTitle,
+                message = if (user.isEmpty()) site else "$site · $user",
+                icon = FluxIcons.Trash2,
+                buttons = listOf(
+                    FluxDialogButton(cancelText, FluxDialogButtonStyle.Secondary),
+                    FluxDialogButton(deleteTitle, FluxDialogButtonStyle.Destructive) {
+                        scope.launch {
+                            try {
+                                siteAuth.delete(site, session)
+                                haptics.tick()
+                            } catch (e: com.fluxdown.core.host.HostException) {
+                                reportFailure(e)
+                            }
+                        }
+                    },
+                ),
+            ),
+        )
+    }
+
+    val clearMessage = str(R.string.mobileSiteAuthClearConfirm, "n" to siteAuth.entries.size)
+    fun clearAll() {
+        val session = container.session
+        overlays.showDialog(
+            FluxDialogSpec(
+                title = clearTitle,
+                message = clearMessage,
+                icon = FluxIcons.TriangleAlert,
+                buttons = listOf(
+                    FluxDialogButton(cancelText, FluxDialogButtonStyle.Secondary),
+                    FluxDialogButton(clearTitle, FluxDialogButtonStyle.Destructive) {
+                        scope.launch {
+                            try {
+                                siteAuth.clearAll(session)
+                                haptics.tick()
+                            } catch (e: com.fluxdown.core.host.HostException) {
+                                reportFailure(e)
+                            }
+                        }
+                    },
+                ),
+            ),
+        )
+    }
+
+    Box(Modifier.fillMaxSize()) {
+        SettingsPageFrame(title = str(R.string.settingsCatProxy), onBack = { nav.pop() }) {
+            var index = 0
+            if (ctx.readOnly) {
+                flowItem(index++, gate, "banner") {
+                    FluxBanner(str(R.string.localServiceDisconnected), kind = FluxBannerKind.Warn, slim = true)
+                }
+            }
+            if (form.isLoaded) {
+                flowItem(index++, gate, "mode") {
+                    GlassSection(footer = str(R.string.proxyBtNote)) {
+                        row {
+                            SettingRowBox(ctx, NetworkRow.Mode.rowId, "proxy_mode") {
+                                val title = str(R.string.proxySettings)
+                                val options = NetworkProxyMode.entries.map {
+                                    SelectOption(it.wire, str(it.titleRes()), hint = str(it.descRes()))
+                                }
+                                FluxListRow(
+                                    title = title,
+                                    subtitle = str(R.string.proxySettingsDesc),
+                                    value = str(mode.titleRes()),
+                                    chevron = true,
+                                    enabled = !ctx.readOnly,
+                                    onClick = {
+                                        ctx.openPicker(
+                                            PickerSpec(title, options, mode.wire) { selectMode(NetworkProxyMode.of(it)) },
+                                        )
+                                    },
+                                )
+                            }
+                        }
+                    }
+                }
+                when (mode) {
+                    NetworkProxyMode.None -> Unit
+                    NetworkProxyMode.Auto -> flowItem(index++, gate, "auto") {
+                        GlassSection {
+                            custom(padded = true) {
+                                Row(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.Top) {
+                                    FluxIcon(FluxIcons.Info, null, size = 18.dp, tint = FluxTheme.colors.inkMuted)
+                                    FluxText(
+                                        str(R.string.proxyModeAutoDesc),
+                                        style = FluxTheme.type.sm,
+                                        color = FluxTheme.colors.inkMuted,
+                                        modifier = Modifier.weight(1f),
+                                    )
+                                }
+                            }
+                        }
+                    }
+                    NetworkProxyMode.System -> flowItem(index++, gate, "system") {
+                        SystemSection(ctx, proxy, request != null, onRetry = {
+                            val session = container.session
+                            scope.launch { proxy.detect(session, errorText) }
+                        }, onTest = { runTest(scope, container.session, proxy, request, errorText, tlsHint) })
+                    }
+                    NetworkProxyMode.Manual -> flowItem(index++, gate, "manual") {
+                        GlassSection(
+                            title = str(R.string.proxyModeManual),
+                            footer = str(R.string.proxyModeManualDesc),
+                        ) {
+                            row {
+                                SettingRowBox(ctx, NetworkRow.Type.rowId, "proxy_type") {
+                                    FluxFieldRow(title = str(R.string.proxyType)) {
+                                        FluxSegmented(
+                                            options = ProxyTypes.map { SegOption(it, it.uppercase()) },
+                                            selected = form.string("proxy_type", "http"),
+                                            onSelect = { ctx.editor.set("proxy_type", it) },
+                                        )
+                                    }
+                                }
+                            }
+                            settingText(
+                                ctx, "proxy_host", R.string.proxyHost, null, R.string.proxyHostPlaceholder,
+                                id = NetworkRow.Host.rowId,
+                            )
+                            row { SettingRowBox(ctx, NetworkRow.Port.rowId, "proxy_port") { PortField(ctx) } }
+                            settingText(
+                                ctx, "proxy_username", R.string.proxyUsername, null, R.string.proxyUsernamePlaceholder,
+                                id = NetworkRow.Username.rowId, mono = false,
+                            )
+                            settingText(
+                                ctx, "proxy_password", R.string.proxyPassword, null, R.string.proxyPasswordPlaceholder,
+                                id = NetworkRow.Password.rowId, secret = true,
+                            )
+                            settingText(
+                                ctx, "proxy_no_list", R.string.proxyNoList, R.string.proxyNoListDesc,
+                                R.string.proxyNoListPlaceholder, id = NetworkRow.NoList.rowId,
+                            )
+                            if (request != null) {
+                                testRow(ctx, proxy.test) { runTest(scope, container.session, proxy, request, errorText, tlsHint) }
+                            }
+                        }
+                    }
+                }
+            } else {
+                flowItem(index++, gate, "loading") {
+                    GlassSection {
+                        row {
+                            val loading = str(R.string.mobileLoading)
+                            FluxListRow(
+                                title = loading,
+                                trailing = { FluxSpinner(size = 18.dp, label = loading) },
+                            )
+                        }
+                    }
+                }
+            }
+            flowItem(index++, gate, "siteAuth") {
+                SiteAuthSection(
+                    ctx = ctx,
+                    model = siteAuth,
+                    remoteHostName = remoteHostName,
+                    onEdit = { sheet = it },
+                    onDelete = { deleteEntry(it.site, it.user) },
+                    onClear = ::clearAll,
+                    onReload = {
+                        val session = container.session
+                        scope.launch { siteAuth.load(session, hostId, errorText) }
+                    },
+                )
+            }
+        }
+        PickerSheetHost(picker = picker, onDismiss = { picker = null })
+        SiteAuthEditSheet(
+            target = sheet,
+            model = siteAuth,
+            onDismiss = { sheet = null },
+            onSaved = { haptics.tick() },
+        )
+    }
+}
+
+private fun runTest(
+    scope: kotlinx.coroutines.CoroutineScope,
+    session: com.fluxdown.core.host.HostSession,
+    proxy: NetworkProxyModel,
+    request: com.fluxdown.core.protocol.ProxyTestRequest?,
+    errorText: (com.fluxdown.core.host.HostException) -> String,
+    tlsHint: String,
+) {
+    if (request == null) return
+    scope.launch { proxy.runTest(request, session, errorText, tlsHint) }
+}
+
+// ───────────────────────────── 系统代理 ─────────────────────────────
+
+@Composable
+private fun SystemSection(
+    ctx: SettingsCtx,
+    proxy: NetworkProxyModel,
+    hasRequest: Boolean,
+    onRetry: () -> Unit,
+    onTest: () -> Unit,
+) {
+    val detection = proxy.detection
+    val dto = proxy.system
+    GlassSection(title = str(R.string.proxyModeSystem), footer = str(R.string.proxyModeSystemDesc)) {
+        when (detection) {
+            NetworkProxyModel.Detection.Idle, NetworkProxyModel.Detection.Detecting -> row {
+                val detecting = str(R.string.proxySystemDetecting)
+                FluxListRow(title = detecting, trailing = { FluxSpinner(size = 18.dp, label = detecting) })
+            }
+            is NetworkProxyModel.Detection.Detected -> row(hasIcon = true) {
+                if (detection.dto.detected) {
+                    FluxListRow(title = str(R.string.proxySystemDetected), icon = FluxIcons.CircleCheck)
+                } else {
+                    FluxListRow(title = str(R.string.proxySystemNotConfigured), icon = FluxIcons.Info)
+                }
+            }
+            is NetworkProxyModel.Detection.Failed -> {
+                row(hasIcon = true) {
+                    FluxListRow(title = detection.message, icon = FluxIcons.CircleAlert, danger = true)
+                }
+                row(hasIcon = true) {
+                    FluxActionRow(str(R.string.mobileRetry), onClick = onRetry, icon = FluxIcons.RefreshCw)
+                }
+            }
+        }
+        if (dto != null) {
+            row { SettingRowBox(ctx, "network.system.type", null) { FluxKeyValue(str(R.string.proxyType), dto.proxyType.uppercase()) } }
+            row { SettingRowBox(ctx, "network.system.host", null) { FluxKeyValue(str(R.string.proxyHost), dto.host, mono = true) } }
+            row { SettingRowBox(ctx, "network.system.port", null) { FluxKeyValue(str(R.string.proxyPort), dto.port.toString(), mono = true) } }
+            if (dto.noList.isNotEmpty()) {
+                row { SettingRowBox(ctx, "network.system.noList", null) { FluxKeyValue(str(R.string.proxyNoList), dto.noList, mono = true) } }
+            }
+            if (hasRequest) testRow(ctx, proxy.test, onTest)
+        }
+    }
+}
+
+// ───────────────────────────── 测试连接 ─────────────────────────────
+
+/** `proxyTestConnection`：慢 RPC——行内转圈 + 「测试中…」，页面其余部分保持可交互；结果行成功 / 失败着色，失败伴随 REJECT 触感。 */
+private fun GlassSectionScope.testRow(ctx: SettingsCtx, test: NetworkProxyModel.Test, onRun: () -> Unit) {
+    row(hasIcon = true) {
+        SettingRowBox(ctx, NetworkRow.Test.rowId, null) {
+            val haptics = FluxTheme.haptics
+            val running = test == NetworkProxyModel.Test.Running
+            LaunchedEffect(test) {
+                when (test) {
+                    is NetworkProxyModel.Test.Success -> haptics.tick()
+                    is NetworkProxyModel.Test.Failure -> haptics.reject()
+                    else -> Unit
+                }
+            }
+            Column {
+                FluxActionRow(
+                    title = str(if (running) R.string.proxyTesting else R.string.proxyTestConnection),
+                    onClick = onRun,
+                    icon = FluxIcons.Network,
+                    loading = running,
+                    enabled = !ctx.readOnly,
+                )
+                val c = FluxTheme.colors
+                when (test) {
+                    is NetworkProxyModel.Test.Success -> ResultLine(
+                        str(R.string.proxyTestSuccess, "ms" to test.latencyMs),
+                        c.mintText,
+                    )
+                    is NetworkProxyModel.Test.Failure -> ResultLine(
+                        str(R.string.proxyTestFailed, "error" to test.detail),
+                        c.coralText,
+                    )
+                    NetworkProxyModel.Test.Idle, NetworkProxyModel.Test.Running -> Unit
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ResultLine(text: String, color: androidx.compose.ui.graphics.Color) {
+    FluxText(
+        text,
+        style = FluxTheme.type.sm,
+        color = color,
+        modifier = Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, bottom = 12.dp),
+    )
+}
+
+// ───────────────────────────── 端口 ─────────────────────────────
+
+/** `proxy_port`：文本；只接受 ASCII 数字，提交（失焦 / 完成 / 离开页面）时钳位到 1–65535，空 = 清空。 */
+@Composable
+private fun PortField(ctx: SettingsCtx) {
+    val current = ctx.form.string("proxy_port")
+    var draft by remember(current) { mutableStateOf(current) }
+    var adjusted by remember { mutableStateOf<Int?>(null) }
+    var hadFocus by remember { mutableStateOf(false) }
+    val latestDraft by rememberUpdatedState(draft)
+    val latestCurrent by rememberUpdatedState(current)
+    val focusManager = LocalFocusManager.current
+
+    fun commit() {
+        val result = NetworkPortInput.commit(draft)
+        draft = result.wire
+        adjusted = result.adjusted
+        if (result.wire != current) ctx.editor.set("proxy_port", result.wire)
+    }
+
+    LaunchedEffect(adjusted) {
+        if (adjusted != null) {
+            delay(3000)
+            adjusted = null
+        }
+    }
+    DisposableEffect(Unit) {
+        onDispose {
+            val wire = NetworkPortInput.commit(latestDraft).wire
+            if (wire != latestCurrent) ctx.editor.set("proxy_port", wire)
+        }
+    }
+
+    val hint = adjusted?.let { str(R.string.mobileAdjustedTo, "n" to it) }
+    FluxFieldRow(title = str(R.string.proxyPort)) {
+        FluxField(
+            value = draft,
+            onValueChange = { draft = NetworkPortInput.digits(it) },
+            placeholder = str(R.string.proxyPortPlaceholder),
+            warning = hint,
+            mono = true,
+            enabled = !ctx.readOnly,
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number, imeAction = ImeAction.Done),
+            keyboardActions = KeyboardActions(onDone = {
+                commit()
+                focusManager.clearFocus()
+            }),
+            onFocusChange = { focused ->
+                if (focused) {
+                    hadFocus = true
+                } else if (hadFocus) {
+                    hadFocus = false
+                    commit()
+                }
+            },
+        )
+    }
+}
+
+// ───────────────────────────── 搜索索引 / 读数 ─────────────────────────────
+
+@StringRes
+private fun NetworkRow.titleRes(): Int = when (this) {
+    NetworkRow.Mode -> R.string.proxySettings
+    NetworkRow.Type -> R.string.proxyType
+    NetworkRow.Host -> R.string.proxyHost
+    NetworkRow.Port -> R.string.proxyPort
+    NetworkRow.Username -> R.string.proxyUsername
+    NetworkRow.Password -> R.string.proxyPassword
+    NetworkRow.NoList -> R.string.proxyNoList
+    NetworkRow.Test -> R.string.proxyTestConnection
+    NetworkRow.SiteAuth -> R.string.settingsSiteAuthTitle
+    NetworkRow.SiteAuthAdd -> R.string.settingsSiteAuthAdd
+    NetworkRow.SiteAuthClear -> R.string.settingsSiteAuthClearAll
+}
+
+@StringRes
+private fun NetworkRow.detailRes(): Int? = when (this) {
+    NetworkRow.Mode -> R.string.proxySettingsDesc
+    NetworkRow.NoList -> R.string.proxyNoListDesc
+    NetworkRow.SiteAuth -> R.string.settingsSiteAuthDesc
+    else -> null
+}
+
+@StringRes
+private fun NetworkRow.Group.titleRes(): Int = when (this) {
+    NetworkRow.Group.Mode -> R.string.proxySettings
+    NetworkRow.Group.Manual -> R.string.proxyModeManual
+    NetworkRow.Group.SiteAuth -> R.string.settingsSiteAuthTitle
+}
+
+private fun NetworkRow.itemKey(): String = when (group) {
+    NetworkRow.Group.Mode -> "mode"
+    NetworkRow.Group.Manual -> "manual"
+    NetworkRow.Group.SiteAuth -> "siteAuth"
+}
+
+/** 本页所有可见行：代理模式；手动模式下的手动字段与测试按钮；站点凭据（标题 / 添加 / 全部清除）。系统模式的测试按钮取决于异步检测结果，不进索引。 */
+internal fun networkSearchEntries(ctx: SettingsSearchContext): List<SettingsEntry> {
+    val mode = NetworkProxyMode.of(ctx.form.value("proxy_mode"))
+    return NetworkRow.visible(mode, ctx.form.isLoaded).map { row ->
+        ctx.entry(
+            id = row.rowId,
+            page = SettingsPage.Network,
+            itemKey = row.itemKey(),
+            title = row.titleRes(),
+            detail = row.detailRes(),
+            breadcrumb = if (row.titleRes() == row.group.titleRes()) {
+                ctx.crumb(R.string.settingsCatProxy)
+            } else {
+                ctx.crumb(R.string.settingsCatProxy, row.group.titleRes())
+            },
+            icon = if (row.group == NetworkRow.Group.SiteAuth) FluxIcons.Key else FluxIcons.Globe,
+        )
+    }
+}
+
+/** 设置首页读数：当前代理模式（配置未加载时 null）。 */
+internal fun networkReadout(ctx: SettingsSearchContext): String? {
+    if (!ctx.form.isLoaded) return null
+    return ctx.str(NetworkProxyMode.of(ctx.form.value("proxy_mode")).titleRes())
+}

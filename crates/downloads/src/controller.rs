@@ -16,6 +16,7 @@ use fluxdown_protocol::{
 use crate::model::{
     CategoryIndex, DownloadTaskView, TaskState, TaskStore,
     devices::{DeviceEntry, local_device_id, other_devices},
+    file_conflict::FileConflictSet,
 };
 
 /// 本机偏好：新建下载对话框上次使用的保存目录（设备本地，不进云同步）。
@@ -315,6 +316,8 @@ pub struct DownloadsController {
     categories: Rc<CategoryIndex>,
     /// 本机在云账号里的设备 id（会话优先，名册 `is_current` 兜底；未登录为 `None`）。
     session_device: Option<String>,
+    /// 待确认的「文件已存在」请求；任务行角标由它派生，随快照 / 选择事件增量维护。
+    conflicts: FileConflictSet,
     stale: bool,
 }
 
@@ -344,6 +347,7 @@ impl DownloadsController {
             preferences: BTreeMap::new(),
             categories: Rc::new(CategoryIndex::from_preference(None)),
             session_device: None,
+            conflicts: FileConflictSet::default(),
             stale: true,
         }
     }
@@ -603,6 +607,7 @@ impl DownloadsController {
         }
         self.boosted = snapshot.priority.first().cloned();
         self.queue_positions = queue_position_map(&snapshot.queue_positions);
+        self.conflicts.replace(&snapshot.pending_selections);
     }
 
     fn apply_daemon_event(&mut self, event: &DaemonEvent) -> bool {
@@ -802,6 +807,20 @@ impl DownloadsController {
                 }
                 changed
             }
+            DaemonEvent::SelectionPending(request) => {
+                if !self.conflicts.upsert(request) {
+                    return false;
+                }
+                self.rebuild_conflict_row(&request.task_id);
+                true
+            }
+            DaemonEvent::SelectionResolved { request_id } => {
+                let Some(item) = self.conflicts.remove(request_id) else {
+                    return false;
+                };
+                self.rebuild_conflict_row(&item.task_id);
+                true
+            }
             _ => false,
         }
     }
@@ -819,6 +838,7 @@ impl DownloadsController {
             .copied()
             .unwrap_or(0);
         view.runtime_connected = !self.stale;
+        view.conflict_pending = self.conflicts.contains_task(&task.task_id);
         view
     }
 
@@ -869,6 +889,13 @@ impl DownloadsController {
             .map(DownloadTaskView::remote)
             .collect();
         self.store.replace_remote(rows);
+    }
+
+    /// 待确认请求增减后只重建该任务的行（任务不在列表里则无事可做）。
+    fn rebuild_conflict_row(&mut self, task_id: &str) {
+        if let Some(ix) = self.store.find_local(task_id) {
+            self.rebuild_row(ix);
+        }
     }
 
     fn rebuild_row(&mut self, ix: usize) {
@@ -1077,6 +1104,82 @@ mod tests {
         // 文件移回原目录：标记翻回，行重新可打开 / 拖出。
         assert!(controller.apply_daemon_event(&missing(false)));
         assert!(controller.store().local()[0].has_local_file());
+    }
+
+    fn file_exists_request(
+        request_id: &str,
+        task_id: &str,
+    ) -> fluxdown_protocol::SelectionRequestDto {
+        serde_json::from_value(json!({
+            "requestId": request_id,
+            "taskId": task_id,
+            "kind": {
+                "type": "fileExists",
+                "fileName": "a.bin",
+                "saveDir": "/dl",
+                "renamePreview": "a (1).bin",
+                "actions": ["rename"],
+            },
+            "defaultChoice": {"kind": "fileExists", "action": "rename"},
+            "deadlineUnixMs": 0,
+        }))
+        .expect("valid fileExists request")
+    }
+
+    #[test]
+    fn pending_file_exists_selection_marks_only_its_task_row_until_resolved() {
+        let mut controller = DownloadsController::new(Arc::new(NullPort));
+        for id in ["a", "b"] {
+            controller.local.push(task(id));
+        }
+        controller.rebuild_all();
+        let pending = |controller: &DownloadsController| -> Vec<bool> {
+            controller
+                .store()
+                .local()
+                .iter()
+                .map(|row| row.conflict_pending)
+                .collect()
+        };
+        assert_eq!(pending(&controller), [false, false]);
+
+        let request = file_exists_request("r1", "b");
+        assert!(controller.apply_daemon_event(&DaemonEvent::SelectionPending(request.clone())));
+        assert_eq!(pending(&controller), [false, true]);
+        // 重复到达同一请求不是变化。
+        assert!(!controller.apply_daemon_event(&DaemonEvent::SelectionPending(request)));
+        // 重连 / 晚到的整体快照自带的待确认请求同样立刻带角标，并替换掉旧集合。
+        let mut snapshot = fluxdown_protocol::AgentSnapshot {
+            daemon_connected: true,
+            ..Default::default()
+        };
+        snapshot.daemon.tasks = vec![task("a"), task("b")];
+        snapshot.daemon.pending_selections = vec![file_exists_request("r2", "a")];
+        controller.replace_snapshot(&snapshot);
+        assert_eq!(pending(&controller), [true, false]);
+        snapshot.daemon.pending_selections.clear();
+        controller.replace_snapshot(&snapshot);
+        assert_eq!(pending(&controller), [false, false]);
+
+        assert!(
+            controller.apply_daemon_event(&DaemonEvent::SelectionPending(file_exists_request(
+                "r1", "b"
+            )))
+        );
+        assert_eq!(pending(&controller), [false, true]);
+
+        // 未知请求 id 的解决事件不是变化；已知的才清除角标。
+        assert!(
+            !controller.apply_daemon_event(&DaemonEvent::SelectionResolved {
+                request_id: "nope".to_owned()
+            })
+        );
+        assert!(
+            controller.apply_daemon_event(&DaemonEvent::SelectionResolved {
+                request_id: "r1".to_owned()
+            })
+        );
+        assert_eq!(pending(&controller), [false, false]);
     }
 
     #[test]

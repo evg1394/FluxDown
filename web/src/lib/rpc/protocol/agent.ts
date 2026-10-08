@@ -32,6 +32,8 @@ export interface CloudUser {
   originId: number | null;
   originIdChanged: boolean;
   membershipOrdinal: number | null;
+  /** 是否已设置登录密码；旧版云端不下发时为 `null`（未知）。 */
+  hasPassword: boolean | null;
 }
 
 /** 套餐权益集合：前向兼容，未知键原样保留。 */
@@ -506,12 +508,73 @@ export interface ReleaseNoteDto {
   body: string;
 }
 
-export interface UpdateCheckResultDto {
-  channel: string;
+export type UpdatePhase =
+  | 'idle'
+  | 'checking'
+  | 'upToDate'
+  | 'available'
+  | 'downloading'
+  | 'ready'
+  | 'installing'
+  | 'failed';
+
+export type UpdateInstallKind =
+  | 'windowsSetup'
+  | 'windowsPortable'
+  | 'macosApp'
+  | 'linuxAppImage'
+  | 'linuxDeb'
+  | 'linuxArch'
+  | 'linuxPortable'
+  | 'serverBinary'
+  | 'docker'
+  | 'synology'
+  | 'qnap'
+  | 'openwrt'
+  | 'unknown';
+
+export type UpdateManualReason =
+  | 'managedPackage'
+  | 'notWritable'
+  | 'noAsset'
+  | 'elevationUnavailable'
+  | 'readOnlyLocation'
+  | 'unofficialBuild'
+  | 'unsupported'
+  | 'unknown';
+
+export type UpdateFailure =
+  | 'network'
+  | 'verify'
+  | 'storage'
+  | 'install'
+  | 'elevationCancelled'
+  | 'installIncomplete'
+  | 'unknown';
+
+/** 自更新状态（native/protocol `UpdateStatusDto`）；`agent.update.*` 返回它，也是 `AgentSnapshot.update`。 */
+export interface UpdateStatusDto {
+  phase: UpdatePhase;
   currentVersion: string;
+  /** 最近一次检查使用的渠道（`stable` | `frontier`）。 */
+  channel: string;
   latestVersion: string;
   hasUpdate: boolean;
+  installKind: UpdateInstallKind;
+  /** 为空表示可一键「更新并重启」。 */
+  manualReason?: UpdateManualReason | null;
+  assetName: string;
+  assetSize: number;
+  downloadedBytes: number;
+  /** 下载完成后立即安装（用户已点「更新并重启」，包仍在下载）。 */
+  installPending: boolean;
+  /** 手动升级用的资产直链；无可用资产时为空串。 */
   downloadUrl: string;
   releasePageUrl: string;
   notes: ReleaseNoteDto[];
+  failure?: UpdateFailure | null;
+  /** 失败的技术细节（英文）。 */
+  errorDetail: string;
+  /** 最近一次成功检查的 Unix 毫秒时间戳；0 = 尚未检查成功。 */
+  checkedAtMs: number;
 }

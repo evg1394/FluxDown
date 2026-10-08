@@ -8,16 +8,26 @@
 
 use tokio::time::Duration;
 
-use crate::downloader::extract_filename;
+use crate::naming::{
+    NameHints, NameSource, decode_legacy_bytes, extract_filename, sanitize_filename,
+};
 
 /// 探测超时（秒）
 const PROBE_TIMEOUT_SECS: u64 = 8;
 
+/// 元数据探测结果。
+#[derive(Debug, Default)]
+pub struct ProbedMeta {
+    /// 探测到的文件名；空 = 无法探测或已有名称（`file_name` 参数非空时跳过名称探测）。
+    pub file_name: String,
+    /// 名字由引擎推断（HTTP 响应没有 Content-Disposition，取自 URL / Content-Type）：
+    /// 落库时标记 `tasks.name_inferred`，HTTP 完成期可按实际 GET 响应精修。
+    pub name_inferred: bool,
+    /// 0 = 未知大小。
+    pub total_bytes: i64,
+}
+
 /// 探测队列任务的文件名和大小。
-///
-/// 返回 `(file_name, total_bytes)`。
-/// - `file_name` 为空表示无法探测或已有名称（file_name 参数非空时跳过名称探测）
-/// - `total_bytes` 为 0 表示未知大小
 ///
 /// `spec` 携带任务的鉴权上下文（cookies / referrer / extra_headers），HTTP HEAD
 /// probe 会用它通过 `downloader::build_request` 重建与真正下载一致的请求
@@ -30,10 +40,10 @@ pub async fn probe_task_meta(
     client: &reqwest::Client,
     proxy_config: &crate::proxy_config::ProxyConfig,
     spec: &crate::downloader::RequestSpec,
-) -> (String, i64) {
+) -> ProbedMeta {
     // torrent-file:// 任务的名称由 librqbit 元数据解析后上报，跳过探测
     if url.starts_with("torrent-file://") {
-        return (String::new(), 0);
+        return ProbedMeta::default();
     }
 
     // 仅取前 8 字节做协议判断，避免不必要的堆分配
@@ -49,21 +59,25 @@ pub async fn probe_task_meta(
         } else {
             String::new()
         };
-        return (name, 0);
+        return ProbedMeta {
+            file_name: name,
+            ..ProbedMeta::default()
+        };
     }
 
     // ed2k:// — 链接自带文件名与大小，无网络探测（HEAD 无意义）
     if lower_prefix.starts_with("ed2k://") {
         return match crate::ed2k::link::parse_ed2k_link(url) {
-            Ok(link) => {
-                let name = if file_name.is_empty() {
+            Ok(link) => ProbedMeta {
+                file_name: if file_name.is_empty() {
                     link.file_name
                 } else {
                     String::new()
-                };
-                (name, link.total_bytes as i64)
-            }
-            Err(_) => (String::new(), 0),
+                },
+                name_inferred: false,
+                total_bytes: link.total_bytes as i64,
+            },
+            Err(_) => ProbedMeta::default(),
         };
     }
 
@@ -87,7 +101,7 @@ fn extract_dn_from_magnet(url: &str) -> String {
         if let Some(val) = part.strip_prefix("dn=") {
             let decoded = url_decode(val);
             if !decoded.is_empty() {
-                return crate::downloader::sanitize_filename(&decoded);
+                return sanitize_filename(&decoded);
             }
         }
     }
@@ -115,9 +129,9 @@ fn hex_nibble(b: u8) -> Option<u8> {
 /// 该函数解析的是用户直接粘贴的 magnet 链接（不可信输入），且其 spawn 任务无
 /// catch_unwind 兜底，panic 会让整条探测链静默中止。
 ///
-/// **UTF-8 失败时回退 GBK**（F047）：老旧中文资源库常见 GBK 编码的 `dn=`（如
-/// `%CE%C4%BC%FE`），与 downloader / ftp_downloader / bt_downloader 三处保持
-/// 一致，避免排队态显示乱码、进入下载后又跳变为正确名。
+/// **UTF-8 失败时回退旧式字节解码**（F047）：老旧中文资源库常见 GBK 编码的 `dn=`（如
+/// `%CE%C4%BC%FE`），与 downloader / ftp_downloader / bt_downloader 共用
+/// [`decode_legacy_bytes`]，避免排队态显示乱码、进入下载后又跳变为正确名。
 ///
 /// `dn=` 是 query 参数，按 `application/x-www-form-urlencoded` 语义保留
 /// `+`→空格 行为。
@@ -141,7 +155,7 @@ fn url_decode(s: &str) -> String {
             i += 1;
         }
     }
-    crate::downloader::decode_bytes_utf8_or_gbk(&result).unwrap_or_else(|_| s.to_string())
+    decode_legacy_bytes(&result, NameHints::default())
 }
 
 // ---------------------------------------------------------------------------
@@ -152,25 +166,26 @@ async fn probe_ftp_meta(
     url: &str,
     file_name: &str, // DB 中已有的文件名；非空则跳过名称覆盖（与 HTTP guard 对称）
     proxy_config: &crate::proxy_config::ProxyConfig,
-) -> (String, i64) {
+) -> ProbedMeta {
     let result = tokio::time::timeout(
         Duration::from_secs(PROBE_TIMEOUT_SECS),
         crate::ftp_downloader::resolve_ftp_file_info(url, proxy_config),
     )
     .await;
     match result {
-        Ok(Ok(info)) => {
+        Ok(Ok(info)) => ProbedMeta {
             // If the user already set a custom file name, do not let the
             // server-side name overwrite it.  Return an empty name so the
             // caller skips the DB update (mirrors probe_http_meta behaviour).
-            let name = if file_name.is_empty() {
+            file_name: if file_name.is_empty() {
                 info.file_name
             } else {
                 String::new()
-            };
-            (name, info.total_bytes)
-        }
-        _ => (String::new(), 0),
+            },
+            name_inferred: false,
+            total_bytes: info.total_bytes,
+        },
+        _ => ProbedMeta::default(),
     }
 }
 
@@ -183,7 +198,7 @@ async fn probe_http_meta(
     file_name: &str,
     client: &reqwest::Client,
     spec: &crate::downloader::RequestSpec,
-) -> (String, i64) {
+) -> ProbedMeta {
     // F020（完整）：用 build_request 携带任务的 cookies/referrer/extra_headers
     // 重建 HEAD probe，使其与真正下载使用一致的鉴权上下文。HEAD method 显式覆盖
     // spec.method（即便任务是 POST 触发，probe 也只发 HEAD，与原行为一致；
@@ -192,40 +207,44 @@ async fn probe_http_meta(
     let result =
         tokio::time::timeout(Duration::from_secs(PROBE_TIMEOUT_SECS), request.send()).await;
 
-    match result {
-        Ok(Ok(response)) => {
-            // F020（部分）：若 HEAD 响应为 text/html，多半是被重定向到登录页或
-            // 返回了错误页（即便携带了鉴权，cookies 过期 / 资源已失效仍会如此）。
-            // 此时 Content-Disposition/Content-Length 属于错误页面，解析出的
-            // 文件名会污染 DB。跳过名称提取，返回空名。
-            let is_html = response
-                .headers()
-                .get(reqwest::header::CONTENT_TYPE)
-                .and_then(|v| v.to_str().ok())
-                .map(|ct| {
-                    let mime = ct
-                        .split(';')
-                        .next()
-                        .unwrap_or("")
-                        .trim()
-                        .to_ascii_lowercase();
-                    mime == "text/html" || mime == "application/xhtml+xml"
-                })
-                .unwrap_or(false);
-            let name = if file_name.is_empty() && !is_html {
-                extract_filename(response.headers(), url, response.url().as_str())
-            } else {
-                String::new()
-            };
-            // HEAD 响应的 `content_length()` 来自 body size_hint，恒为 0；必须读头部。
-            let size = if is_html || !response.status().is_success() {
-                0
-            } else {
-                head_content_length(response.headers())
-            };
-            (name, size)
-        }
-        _ => (String::new(), 0),
+    let Ok(Ok(response)) = result else {
+        return ProbedMeta::default();
+    };
+    // 非 2xx（预签名 GET URL 对 HEAD 回 403、PHP 端点回 405、错误页……）的响应头不描述
+    // 目标文件；拿它的 URL 段当名字落库，会让真正下载时 GET 拿到的 Content-Disposition
+    // 被这个占位名压住。text/html 同理，多半是登录页 / 错误页（F020）。
+    let is_html = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .map(|ct| {
+            let mime = ct
+                .split(';')
+                .next()
+                .unwrap_or("")
+                .trim()
+                .to_ascii_lowercase();
+            mime == "text/html" || mime == "application/xhtml+xml"
+        })
+        .unwrap_or(false);
+    if is_html || !response.status().is_success() {
+        return ProbedMeta::default();
+    }
+    let (file_name, name_inferred) = if file_name.is_empty() {
+        let resolved = extract_filename(response.headers(), url, response.url().as_str());
+        let inferred = !matches!(
+            resolved.source,
+            NameSource::Disposition | NameSource::QueryDisposition
+        );
+        (resolved.name, inferred)
+    } else {
+        (String::new(), false)
+    };
+    ProbedMeta {
+        file_name,
+        name_inferred,
+        // HEAD 响应的 `content_length()` 来自 body size_hint，恒为 0；必须读头部。
+        total_bytes: head_content_length(response.headers()),
     }
 }
 

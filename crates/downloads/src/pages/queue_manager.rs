@@ -32,7 +32,7 @@ use gpui_component::{
 use crate::controller::{DownloadsCommand, DownloadsPort, QueueFields};
 
 /// 左列队列列表宽度。
-const LIST_WIDTH: gpui::Pixels = px(184.);
+const LIST_WIDTH: f32 = 184.;
 /// 队列运行状态圆点直径。
 const STATUS_DOT_SIZE: gpui::Pixels = px(6.);
 /// 时 / 分下拉菜单最大高度（24 小时项需滚动）。
@@ -584,7 +584,7 @@ impl QueueManagerView {
         let tooltip_label = new_label.clone();
         v_flex()
             .flex_none()
-            .w(LIST_WIDTH)
+            .w(theme.text_extent(LIST_WIDTH))
             .h_full()
             .min_h_0()
             .px(tokens.spacing.sm)

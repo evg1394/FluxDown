@@ -1,6 +1,8 @@
 // 下载页任务行投影（移植 crates/downloads/src/model/mod.rs 的 DownloadTaskView）。
 // 本地任务来自 daemon 快照 + 引擎 taskProgress 的实时速度；远程任务来自 agent.remoteTasks。
 
+import { fileKindOf } from '../../../lib/icon-pack'
+import type { FileKind } from '../../../lib/icon-pack'
 import type { RemoteTaskDto, TaskDto, TaskRuntimeDto } from '../../../lib/rpc'
 
 export type TaskState = 'pending' | 'downloading' | 'paused' | 'completed' | 'failed'
@@ -23,8 +25,6 @@ export const PROTOCOL_LABEL: Record<TaskProtocol, string> = {
   ftp: 'FTP',
   hls: 'HLS',
 }
-
-export type TaskKind = 'application' | 'diskImage' | 'mobile' | 'video' | 'audio' | 'document' | 'image' | 'archive' | 'other'
 
 export type TaskSource = 'local' | 'remote'
 
@@ -55,7 +55,7 @@ export interface DownloadTaskView {
   etaSeconds: number | null
   createdAtSecs: number
   completedAtSecs: number
-  kind: TaskKind
+  kind: FileKind
   protocol: TaskProtocol
   /** 0..1。 */
   progress: number
@@ -114,49 +114,12 @@ export function detectProtocol(url: string, fileName: string): TaskProtocol {
   return 'http'
 }
 
-const KIND_BY_EXTENSION: Record<string, TaskKind> = {
-  exe: 'application',
-  msi: 'application',
-  appimage: 'application',
-  apk: 'mobile',
-  ipa: 'mobile',
-  iso: 'diskImage',
-  dmg: 'diskImage',
-  zip: 'archive',
-  rar: 'archive',
-  '7z': 'archive',
-  tar: 'archive',
-  gz: 'archive',
-  mp4: 'video',
-  mkv: 'video',
-  webm: 'video',
-  avi: 'video',
-  mp3: 'audio',
-  flac: 'audio',
-  wav: 'audio',
-  m4a: 'audio',
-  pdf: 'document',
-  doc: 'document',
-  docx: 'document',
-  txt: 'document',
-  png: 'image',
-  jpg: 'image',
-  jpeg: 'image',
-  gif: 'image',
-  webp: 'image',
-}
-
 /** 文件扩展名（小写，无点）。 */
 export function extensionOf(name: string): string | null {
   const dot = name.lastIndexOf('.')
   if (dot < 0) return null
   const ext = name.slice(dot + 1).toLowerCase()
   return ext === '' || ext.includes('/') ? null : ext
-}
-
-export function taskKindOf(name: string): TaskKind {
-  const ext = extensionOf(name)
-  return (ext && KIND_BY_EXTENSION[ext]) || 'other'
 }
 
 export function stateOfStatus(status: number): TaskState {
@@ -231,7 +194,7 @@ export function buildLocalView(
     etaSeconds: base.etaSeconds,
     createdAtSecs: parseTimestampSecs(task.createdAt),
     completedAtSecs: parseTimestampSecs(task.completedAt),
-    kind: taskKindOf(task.fileName),
+    kind: fileKindOf(task.fileName),
     protocol: detectProtocol(task.url, task.fileName),
     progress: base.progress,
     state: stateOfStatus(task.status),
@@ -274,7 +237,7 @@ export function buildRemoteView(task: RemoteTaskDto): DownloadTaskView {
     etaSeconds: base.etaSeconds,
     createdAtSecs: parseTimestampSecs(task.createdAt),
     completedAtSecs: 0,
-    kind: taskKindOf(task.fileName),
+    kind: fileKindOf(task.fileName),
     protocol: detectProtocol(task.url, task.fileName),
     progress: base.progress,
     state: stateOfStatus(REMOTE_STATUS[task.status] ?? 0),

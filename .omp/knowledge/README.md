@@ -36,7 +36,7 @@
 | Trait | 定义位置 | 方向 | 职责 |
 |---|---|---|---|
 | `EventSink` | `engine/src/events.rs` | 引擎→宿主 | 进度/分段拆分/队列变化/组变化等事件推送 |
-| `HostSelection` | `engine/src/selection.rs` | 引擎→宿主（请求决策） | HLS 画质 / BT 文件 / 插件 variant 选择（tristate：用户选/超时默认/无 selector 短路） |
+| `HostSelection` | `engine/src/selection.rs` | 引擎→宿主（请求决策） | HLS 画质 / BT 文件 / 插件 variant 选择 / 「文件已存在」询问（tristate：用户选/超时默认/无 selector 短路；`can_prompt()` 决定是否为询问让槽挂起） |
 | `ApiHost` | `native/api/src/service.rs` | 客户端→引擎（HTTP 契约） | REST/aria2/MCP 的能力面；必需方法 + 可默认降级方法 |
 
 ```mermaid
@@ -141,6 +141,7 @@ FluxDown/
 │   ├── link/           `fluxdown_link`：局域网直连 L1 协议（配对 / mDNS / 直连传输），agent 与 hub 共用
 │   ├── server/         `fluxdown_server`：**已冻结**的旧 headless 宿主（不构建/不发布），由 `agent --server` + `daemon` 取代
 │   ├── hub/            Flutter 移动端的 rinf FFI 适配层（唯一碰 rinf）——见 `hosts-and-api.md`「宿主与客户端 crate」
+│   ├── mobile/         `fluxdown_mobile`：原生移动端 UniFFI 核心（进程内 daemon + agent 嵌入 / 远端 `/rpc`）——见 `clients.md`「原生移动端」
 │   ├── cli/            `fluxdown_cli`：二进制 `fluxdown`——见 `hosts-and-api.md`「宿主与客户端 crate」
 │   └── nmh/            Native Messaging Host 中继二进制
 ├── web/                Web SPA（React 19 + TanStack + Tailwind v4，bun）——见 `clients.md`「Web SPA」
@@ -156,5 +157,6 @@ FluxDown/
 ├── bucket/             Scoop manifest
 ├── docs/               设计文档（实现状态见 `ops.md`「设计文档实现状态」）
 ├── android/ ios/   Flutter 移动端原生工程
+├── mobile/Android/     原生 Android（Compose + Flux Lumen，:core / :fluxui / :bridge / :app）——见 `clients.md`「原生移动端」
 └── .github/workflows/   ci.yml 主干门禁 + release.yml 组件发布——见 `ops.md`「发布与 CI」
 ```

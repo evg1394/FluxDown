@@ -400,14 +400,8 @@ async fn run_ed2k_download_inner(params: &DownloadParams) -> Result<(i64, String
             .into_iter()
             .map(|n| n.to_lowercase())
             .collect();
-        let final_name = finalize_rename(
-            &temp_path,
-            save_dir,
-            &file_name,
-            params.allow_overwrite,
-            &avoid,
-        )
-        .await?;
+        let final_name =
+            finalize_rename(&temp_path, save_dir, &file_name, &params.overwrite, &avoid).await?;
         persist_final_name(params, &task_id, &file_name, &final_name, 0).await?;
         return Ok((0, final_name));
     }
@@ -934,14 +928,9 @@ async fn run_ed2k_download_inner(params: &DownloadParams) -> Result<(i64, String
                 .into_iter()
                 .map(|n| n.to_lowercase())
                 .collect();
-            let final_name = finalize_rename(
-                &temp_path,
-                save_dir,
-                &file_name,
-                params.allow_overwrite,
-                &avoid,
-            )
-            .await?;
+            let final_name =
+                finalize_rename(&temp_path, save_dir, &file_name, &params.overwrite, &avoid)
+                    .await?;
             persist_final_name(params, &task_id, &file_name, &final_name, total).await?;
             Ok((total, final_name))
         }
@@ -1214,7 +1203,7 @@ async fn finalize_rename(
     temp: &Path,
     save_dir: &Path,
     name: &str,
-    allow_overwrite: bool,
+    overwrite: &crate::file_exists::OverwritePolicy,
     avoid: &HashSet<String>,
 ) -> Result<String, DownloadError> {
     let file = tokio::fs::OpenOptions::new()
@@ -1223,7 +1212,7 @@ async fn finalize_rename(
         .await
         .map_err(DownloadError::Io)?;
     file.sync_all().await.map_err(DownloadError::Io)?;
-    crate::downloader::claim_final_name(temp, save_dir, name, allow_overwrite, avoid).await
+    crate::downloader::claim_final_name(temp, save_dir, name, overwrite, avoid).await
 }
 
 /// 确定本任务使用的文件名：manager 传入的名字（已 dedup / 用户自定义 / 已预订临时路径）
@@ -1234,7 +1223,7 @@ fn resolve_file_name(param_name: &str, link_name: &str) -> String {
     } else {
         param_name
     };
-    crate::downloader::sanitize_filename(name)
+    crate::naming::sanitize_filename(name)
 }
 
 /// Migrate a matching legacy temporary file without losing its verified blocks.
@@ -1362,8 +1351,14 @@ mod tests {
             .await
             .unwrap_or_else(|error| panic!("test fixture write failed: {error}"));
 
-        let Ok(chosen) =
-            super::finalize_rename(&temp, &dir, "movie.iso", false, &HashSet::new()).await
+        let Ok(chosen) = super::finalize_rename(
+            &temp,
+            &dir,
+            "movie.iso",
+            &crate::file_exists::OverwritePolicy::Never,
+            &HashSet::new(),
+        )
+        .await
         else {
             panic!("finalize failed");
         };
@@ -1384,8 +1379,14 @@ mod tests {
         tokio::fs::write(&temp2, b"second")
             .await
             .unwrap_or_else(|error| panic!("test fixture write failed: {error}"));
-        let Ok(chosen2) =
-            super::finalize_rename(&temp2, &dir, "movie.iso", true, &HashSet::new()).await
+        let Ok(chosen2) = super::finalize_rename(
+            &temp2,
+            &dir,
+            "movie.iso",
+            &crate::file_exists::OverwritePolicy::Any,
+            &HashSet::new(),
+        )
+        .await
         else {
             panic!("overwrite finalize failed");
         };

@@ -2,51 +2,61 @@
 // 底部避开 Home 指示条（safe-area-inset-bottom）。条目与桌面活动栏同源（activity.ts）。
 
 import { Link, useLocation } from '@tanstack/react-router'
+import type { ReactNode } from 'react'
 import { useT } from '../i18n'
 import { cn } from '../lib/cn'
-import { useTheme } from '../theme'
-import { Icon, toast } from '../ui'
-import { isActivityActive, themeToggleIcon } from './activity'
+import { Icon } from '../ui'
+import { AccountAvatar } from './AccountAvatar'
+import { useAccountAvatar } from './accountAvatarState'
+import { AccountMenu } from './AccountMenu'
+import { isActivityActive } from './activity'
 import type { ActivityEntry } from './activity'
 import { useVisibleActivityEntries } from './useVisibleActivityEntries'
 
 /** 标签栏内容高度（不含安全区）。与 index.css 的 `--fx-bottom-bar` 保持一致。 */
 export const BOTTOM_BAR_HEIGHT = 56
 
+const TAB = 'flex min-h-touch min-w-touch flex-1 flex-col items-center justify-center gap-0.5 px-1 active:bg-nav-hover'
+
 export function BottomTabBar() {
   const t = useT()
   const location = useLocation()
-  const theme = useTheme()
+  const account = useAccountAvatar()
   const entries = useVisibleActivityEntries()
 
   const renderEntry = (entry: ActivityEntry) => {
     const active = isActivityActive(entry, location.pathname)
-    const icon = entry.id === 'theme' ? themeToggleIcon(theme.mode) : entry.icon
-    const label = entry.id === 'theme' ? t(theme.mode === 'dark' ? 'themeModeLight' : 'themeModeDark') : t(entry.labelKey)
-    const content = (
+    const content = (glyph: ReactNode, label: string, highlighted: boolean) => (
       <>
-        <Icon icon={icon} size="xl" className={cn(active && 'text-nav-selected-icon')} />
-        <span className={cn('max-w-full truncate text-caption', active ? 'font-medium text-foreground' : 'text-muted-foreground')}>
+        {glyph}
+        <span className={cn('max-w-full truncate text-caption', highlighted ? 'font-medium text-foreground' : 'text-muted-foreground')}>
           {label}
         </span>
       </>
     )
-    const className = 'flex min-h-touch min-w-touch flex-1 flex-col items-center justify-center gap-0.5 px-1 active:bg-nav-hover'
-    return entry.to ? (
-      <Link key={entry.id} to={entry.to} aria-current={active ? 'page' : undefined} className={className}>
-        {content}
+    if (entry.id === 'account') {
+      // 标签只放短标题；完整的昵称 · 徽标文字走无障碍标签。点击在底部 Sheet 展开账户卡片。
+      return (
+        <div key={entry.id} className="flex flex-1 [&>div]:flex-1">
+          <AccountMenu
+            avatar={account}
+            trigger={(open) => (
+              <button type="button" aria-label={account.label ?? t('accountLogin')} className={cn(TAB, 'w-full')}>
+                {content(
+                  <span className="flex h-6 items-center"><AccountAvatar state={account} /></span>,
+                  t(account.label === null ? 'accountLogin' : entry.labelKey),
+                  active || open,
+                )}
+              </button>
+            )}
+          />
+        </div>
+      )
+    }
+    return (
+      <Link key={entry.id} to={entry.to ?? '/'} aria-current={active ? 'page' : undefined} className={TAB}>
+        {content(<Icon icon={entry.icon} size="xl" className={cn(active && 'text-nav-selected-icon')} />, t(entry.labelKey), active)}
       </Link>
-    ) : (
-      <button
-        key={entry.id}
-        type="button"
-        className={className}
-        onClick={() => {
-          if (entry.id === 'theme') theme.toggle().catch((error: unknown) => toast.error(error))
-        }}
-      >
-        {content}
-      </button>
     )
   }
 

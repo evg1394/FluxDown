@@ -1,0 +1,87 @@
+[
+  {
+    "name": "rejects non-object",
+    "text": "[1, 2]",
+    "error": "notAnObject"
+  },
+  {
+    "name": "rejects invalid json",
+    "text": "{",
+    "error": "invalidJson"
+  },
+  {
+    "name": "rejects foreign format",
+    "pack": { "format": "fluxdown.gpui-theme", "schemaVersion": 2 },
+    "error": "unsupportedFormat"
+  },
+  {
+    "name": "rejects missing format",
+    "pack": { "schemaVersion": 1 },
+    "error": "unsupportedFormat"
+  },
+  {
+    "name": "lenient fields drop with diagnostics",
+    "pack": {
+      "format": "fluxdown.icon-pack",
+      "schemaVersion": 9,
+      "meta": { "id": "demo", "name": 3, "extra": "x" },
+      "extends": "lucide",
+      "bogus": true,
+      "icons": {
+        "file": { "svg": "<svg viewBox=\"0 0 16 16\"><path d=\"M0 0h16v16H0z\"/></svg>" },
+        "zip": { "mode": "mask", "svg": "<svg><path d=\"M1 1\"/></svg>", "dark": "<svg><path d=\"M2 2\"/></svg>" },
+        "evil": { "svg": "<svg onload=\"x()\"></svg>" },
+        "half": { "svg": "<svg/>", "light": "<svg><image href=\"https://x/a.png\"/></svg>", "tint": "red" },
+        "bad": 1,
+        "nosvg": { "mode": "mask" },
+        "weird": { "mode": "glow", "svg": "<svg/>" }
+      },
+      "fileNames": { "Makefile": "file", "dockerfile": "missing" },
+      "fileExtensions": { "tar.gz": "zip", "GZ": "zip", "rar": 5, "": "zip" },
+      "kinds": { "archive": "zip", "video": "missing", "unknownKind": "file" },
+      "default": "evil"
+    },
+    "diagnostics": [
+      { "path": "bogus", "kind": "unknownKey" },
+      { "path": "default", "kind": "invalidValue" },
+      { "path": "extends", "kind": "invalidValue" },
+      { "path": "fileExtensions.", "kind": "invalidValue" },
+      { "path": "fileExtensions.rar", "kind": "invalidValue" },
+      { "path": "fileNames.dockerfile", "kind": "invalidValue" },
+      { "path": "icons.bad", "kind": "invalidValue" },
+      { "path": "icons.evil.svg", "kind": "unsafeSvg" },
+      { "path": "icons.half.light", "kind": "unsafeSvg" },
+      { "path": "icons.half.tint", "kind": "unknownKey" },
+      { "path": "icons.nosvg.svg", "kind": "invalidValue" },
+      { "path": "icons.weird.mode", "kind": "invalidValue" },
+      { "path": "kinds.unknownKind", "kind": "unknownKey" },
+      { "path": "kinds.video", "kind": "invalidValue" },
+      { "path": "meta.extra", "kind": "unknownKey" },
+      { "path": "meta.name", "kind": "invalidValue" },
+      { "path": "schemaVersion", "kind": "newerVersion" }
+    ],
+    "icons": { "file": "color", "half": "color", "weird": "color", "zip": "mask" },
+    "resolve": [
+      { "file": "backup.tar.gz", "kind": "archive", "icon": "zip" },
+      { "file": "notes.gz", "kind": "archive", "icon": "zip" },
+      { "file": "dir/MAKEFILE", "kind": "other", "icon": "file" },
+      { "file": "movie.mp4", "kind": "video", "icon": null },
+      { "file": "", "kind": "archive", "icon": "zip" }
+    ]
+  },
+  {
+    "name": "default applies only without a specific match",
+    "pack": {
+      "format": "fluxdown.icon-pack",
+      "icons": { "file": { "svg": "<svg/>" }, "pdf": { "svg": "<svg/>" } },
+      "fileExtensions": { "pdf": "pdf" },
+      "default": "file"
+    },
+    "diagnostics": [],
+    "icons": { "file": "color", "pdf": "color" },
+    "resolve": [
+      { "file": "a.PDF", "kind": "document", "icon": "pdf" },
+      { "file": "a.txt", "kind": "document", "icon": "file" }
+    ]
+  }
+]

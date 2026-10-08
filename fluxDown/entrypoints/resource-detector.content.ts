@@ -28,6 +28,24 @@ export default defineContentScript({
   runAt: "document_idle",
 
   async main(ctx) {
+    // ===== 页面字符集应答（文件名解码先验） =====
+    // 本脚本只注入顶层框架（allFrames 缺省为 false）。background 在无法确定
+    // Content-Disposition 原始字节编码时发 `getPageCharset` 询问发起页的
+    // document.characterSet。不受嗅探/拦截开关门控，且先于任何 await 注册。
+    const handlePageCharsetRequest = (
+      msg: { action?: string } | undefined,
+      _sender: unknown,
+      sendResponse: (response: { charset: string }) => void,
+    ): true | undefined => {
+      if (msg?.action !== "getPageCharset") return undefined;
+      sendResponse({ charset: document.characterSet });
+      return true;
+    };
+    browser.runtime.onMessage.addListener(handlePageCharsetRequest);
+    ctx.onInvalidated(() =>
+      browser.runtime.onMessage.removeListener(handlePageCharsetRequest),
+    );
+
     // ===== 0. 资源嗅探 / 磁力接管开关 =====
     // 嗅探关闭后跳过 DOM 扫描 / MutationObserver / Main World fetch 拦截注入，
     // 消除重资源页面（如 B 站首页）的嗅探性能开销；更改后新加载的页面生效。

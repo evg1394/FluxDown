@@ -1,0 +1,186 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <!-- 打开已下载的 .apk：系统安装器要求调用方声明此权限，否则静默关闭（无任何提示） -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+    <!-- 用户把保存目录指向 Download/ 以外的共享存储时，按需引导系统“所有文件访问”授权（可选） -->
+    <uses-permission
+        android:name="android.permission.MANAGE_EXTERNAL_STORAGE"
+        tools:ignore="ScopedStorage" />
+
+    <!-- 诊断页检查 magnet / ed2k / .torrent 的默认处理者：Android 11+ 默认看不到其它应用，需声明要探测的 Intent -->
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <data android:scheme="magnet" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <data android:scheme="ed2k" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <data android:mimeType="application/x-bittorrent" />
+        </intent>
+    </queries>
+
+    <!-- usesCleartextTraffic：局域网 server 模式主机多为 http://。RPC 本身由 Rust 原生 socket 连接（不受此限）；
+         插件包上传 / 日志导出等直连同一主机 HTTP 面的请求必须与之一致，否则用户已在用的主机地址会被系统拒绝。 -->
+    <application
+        android:name=".FluxApplication"
+        android:allowBackup="true"
+        android:dataExtractionRules="@xml/data_extraction_rules"
+        android:enableOnBackInvokedCallback="true"
+        android:fullBackupContent="@xml/backup_rules"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.FluxDown"
+        android:usesCleartextTraffic="true"
+        tools:targetApi="37">
+        <!-- 对外稳定入口（类名不可改：桌面图标、固定快捷方式与按 Flutter 版保存组件名的浏览器都指向它）。
+             无界面路由：下载 intent → ExternalDownloadActivity，其余 → HomeActivity。 -->
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:launchMode="singleTask"
+            android:taskAffinity=""
+            android:theme="@android:style/Theme.NoDisplay">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!-- 主界面：仅由 MainActivity 路由与应用内通知启动 -->
+        <activity
+            android:name=".HomeActivity"
+            android:configChanges="screenSize|smallestScreenSize|screenLayout|orientation|density|keyboardHidden|uiMode"
+            android:exported="false"
+            android:launchMode="singleTask"
+            android:windowSoftInputMode="adjustResize">
+            <layout
+                android:minWidth="320dp"
+                android:minHeight="480dp" />
+        </activity>
+
+        <!-- 外部下载唤起（同 Flutter 版同名组件）：透明窗口 + 独立任务，在来源应用上方只弹「新建下载」，
+             关闭后回到来源应用。 -->
+        <activity
+            android:name=".ExternalDownloadActivity"
+            android:configChanges="screenSize|smallestScreenSize|screenLayout|orientation|density|keyboard|keyboardHidden|locale|layoutDirection|fontScale|uiMode"
+            android:excludeFromRecents="true"
+            android:exported="true"
+            android:launchMode="singleInstance"
+            android:taskAffinity=""
+            android:theme="@style/Theme.FluxDown.External"
+            android:windowSoftInputMode="adjustResize">
+            <!-- 系统分享 / 浏览器「分享」：mimeType 用 */*，避免漏检 -->
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <action android:name="android.intent.action.SEND_MULTIPLE" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="*/*" />
+            </intent-filter>
+
+            <!-- magnet: / ed2k:// 链接唤起 -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="magnet" />
+                <data android:scheme="ed2k" />
+            </intent-filter>
+
+            <!-- 浏览器扩展联动：fluxdown://download?url=<encoded>&filename=&cookies=&referrer=&headers=<JSON> -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data
+                    android:host="download"
+                    android:scheme="fluxdown" />
+            </intent-filter>
+
+            <!-- 「用 FluxDown 打开」.torrent：文件管理器 / 浏览器下载完成后的 content:// 或 file:// 种子。 -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="content" />
+                <data android:scheme="file" />
+                <data android:mimeType="application/x-bittorrent" />
+            </intent-filter>
+
+            <!-- 兜底：部分文件管理器把种子标成 octet-stream。只认 .torrent 路径，避免劫持普通二进制文件。 -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:scheme="content" />
+                <data android:scheme="file" />
+                <data android:host="*" />
+                <data android:mimeType="application/octet-stream" />
+                <data android:pathPattern=".*\\.torrent" />
+                <data android:pathPattern=".*\\..*\\.torrent" />
+            </intent-filter>
+        </activity>
+
+        <!-- http(s) 下载处理入口（X / Via / Firefox 等「外部下载器」按此匹配）：任意 MIME 的直链。
+             别名全名与 Flutter 版一致，浏览器保存的组件名升级后仍然有效。 -->
+        <activity-alias
+            android:name="com.fluxdown.app.ExternalDownloadManager"
+            android:enabled="true"
+            android:excludeFromRecents="true"
+            android:exported="true"
+            android:targetActivity=".ExternalDownloadActivity">
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="http" />
+                <data android:scheme="https" />
+                <data android:mimeType="*/*" />
+            </intent-filter>
+        </activity-alias>
+
+        <!-- 通用 http/https 直链匹配（不带 MIME 的 VIEW，View Handlers 兜底） -->
+        <activity-alias
+            android:name="com.fluxdown.app.ExternalBrowserCompatActivity"
+            android:enabled="true"
+            android:excludeFromRecents="true"
+            android:exported="true"
+            android:targetActivity=".ExternalDownloadActivity">
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="http" />
+                <data android:scheme="https" />
+            </intent-filter>
+        </activity-alias>
+
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.files"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
+
+        <!-- 本机下载前台服务：本机主机有活跃 / 排队任务时存在（见 DownloadService） -->
+        <service
+            android:name=".service.DownloadService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
+    </application>
+
+</manifest>

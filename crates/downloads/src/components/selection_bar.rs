@@ -18,7 +18,7 @@ use gpui_component::{
 };
 
 use crate::{
-    components::task_table::{SELECTION_COLUMN_WIDTH, TABLE_HEADER_HEIGHT, ToolbarCommand},
+    components::task_table::{SELECTION_COLUMN_WIDTH, ToolbarCommand, table_header_height},
     model::{RowKey, TaskState, TaskStore},
     pages::downloads::DownloadView,
 };
@@ -202,15 +202,14 @@ impl DownloadView {
             .into_any_element()
     }
 
-    /// 表头选择条（覆盖在表格容器顶部、选择列右侧）；无选中时返回 `None`。
-    /// 覆盖期间列头的排序 / 拖宽被 `occlude` 拦下，全选框仍可用。
+    /// 表头选择条（覆盖在表格容器顶部、选择列右侧）；仅显式多选模式（Cmd/Ctrl+点击、全选）
+    /// 出现，普通单击选中不出现（单项操作走右键菜单）。覆盖期间列头的排序 / 拖宽被 `occlude` 拦下，全选框仍可用。
     pub(crate) fn render_selection_bar(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let selection = self.table_state.read(cx).delegate().selection_summary();
+        let delegate = self.table_state.read(cx).delegate();
+        let selection = delegate.selection_summary();
+        let multi_select = delegate.in_multi_select();
         self.selection_summary.set(selection);
-        // 详情面板已打开且只选中一项时，面板本身就在展示该任务，不再叠加选择条。
-        let detail_shows_selection =
-            selection.count == 1 && self.table_state.read(cx).delegate().prefs().detail_open;
-        if selection.count == 0 || detail_shows_selection {
+        if selection.count == 0 || !multi_select {
             return None;
         }
 
@@ -301,7 +300,7 @@ impl DownloadView {
                 .left(px(SELECTION_COLUMN_WIDTH))
                 .right_0()
                 // 留出表头底部分隔线。
-                .h(px(TABLE_HEADER_HEIGHT) - stroke)
+                .h(table_header_height(cx) - stroke)
                 .pl(spacing.sm)
                 .gap(spacing.xxs)
                 .items_center()

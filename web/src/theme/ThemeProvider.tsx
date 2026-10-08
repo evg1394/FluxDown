@@ -4,9 +4,8 @@
 import { useEffect, useMemo, useState } from 'react'
 import type { ReactNode } from 'react'
 import { useAgentSnapshot, usePreferences } from '../lib/rpc/hooks'
-import { rpc } from '../lib/rpc/methods'
 import { applyToDocument, loadCache, resolveMode, saveCache, systemPrefersDark } from './apply'
-import { THEME_MODE_KEY, parseAppearance } from './appearance'
+import { parseAppearance } from './appearance'
 import { ThemeContext } from './context'
 import type { ThemeContextValue } from './context'
 import { themeVariables } from './tokens'
@@ -42,9 +41,6 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
       mode,
       preference: prefs.themeMode,
       prefs,
-      toggle: async () => {
-        await rpc.agent.preferences.patch({ values: { [THEME_MODE_KEY]: mode === 'dark' ? 'light' : 'dark' } })
-      },
     }),
     [mode, prefs],
   )

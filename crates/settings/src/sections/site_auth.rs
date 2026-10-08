@@ -9,9 +9,11 @@ use super::SectionContext;
 use crate::ui::{SettingsRow, SettingsSection, body_text, meta_text, row_loading_danger_button};
 
 pub(crate) fn group(ctx: &SectionContext, cx: &mut App) -> SettingsSection {
-    if ctx
-        .store
-        .update(cx, |store, _| store.begin_load("siteAuth"))
+    // 先只读判定：渲染期写 store 会让其他读它的 retained 视图白白重建。
+    if !ctx.store.read(cx).load_attempted("siteAuth")
+        && ctx
+            .store
+            .update(cx, |store, _| store.begin_load("siteAuth"))
     {
         ctx.store.update(cx, |store, cx| store.load_site_auth(cx));
     }

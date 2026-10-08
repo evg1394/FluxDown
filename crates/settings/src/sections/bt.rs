@@ -10,21 +10,44 @@ use super::{
 use crate::ui::{SettingsPage, SettingsSection, SettingsTab};
 
 pub(crate) fn page(ctx: &SectionContext, cx: &mut App) -> SettingsPage {
-    SettingsPage::new(
+    let bt_enabled = ctx.store.read(cx).daemon_bool("bt_enabled");
+    let mut page = SettingsPage::new(
         "bt",
         ctx.t("settingsCatBt"),
         ctx.t("settingsCatBtDesc"),
         FluxIcon::Magnet,
     )
-    .tab(SettingsTab::new("basic", ctx.t("settingsTabGeneral")).section(basic_section(ctx)))
-    .tab(SettingsTab::new("tracker", ctx.t("settingsTabTracker")).section(tracker_section(ctx, cx)))
-    .tab(SettingsTab::new("seeding", ctx.t("settingsTabSeeding")).section(seeding_section(ctx, cx)))
+    .tab(
+        SettingsTab::new("basic", ctx.t("settingsTabGeneral"))
+            .section(basic_section(ctx, bt_enabled)),
+    );
+    if bt_enabled {
+        page = page
+            .tab(
+                SettingsTab::new("tracker", ctx.t("settingsTabTracker"))
+                    .section(tracker_section(ctx, cx)),
+            )
+            .tab(
+                SettingsTab::new("seeding", ctx.t("settingsTabSeeding"))
+                    .section(seeding_section(ctx, cx)),
+            );
+    }
+    page
 }
 
-fn basic_section(ctx: &SectionContext) -> SettingsSection {
-    SettingsSection::new()
+fn basic_section(ctx: &SectionContext, bt_enabled: bool) -> SettingsSection {
+    let section = SettingsSection::new()
         .title(ctx.t("settingsTabGeneral"))
         .subtitle(ctx.t("btSettingsRestartHint"))
+        .row(ctx.item(
+            "btEnabled",
+            Some("btEnabledDesc"),
+            ctx.daemon_switch("bt_enabled"),
+        ));
+    if !bt_enabled {
+        return section;
+    }
+    section
         .row(ctx.item(
             "btEnableDht",
             Some("btEnableDhtDesc"),

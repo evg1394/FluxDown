@@ -35,7 +35,9 @@ pub use document::{
 };
 pub use extended::*;
 pub use flutter::FLUTTER_COLOR_MAP;
-pub use fonts::{FONT_FAMILY_KEY, available_font_families};
+pub use fonts::{
+    FONT_FAMILY_KEY, FONT_SIZE_KEY, FONT_SIZE_RANGE, FONT_SIZES, available_font_families,
+};
 pub use gpui_base::{
     ColorTokens, RadiusTokens, SemanticThemeTokens, ShadowTokens, SpacingTokens, TextStyleToken,
     TypographyTokens,

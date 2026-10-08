@@ -3,7 +3,7 @@
 use fluxdown_ui_downloads::actions as dl;
 use fluxdown_ui_i18n::Translator;
 use gpui::{App, Entity, KeyBinding, Menu, MenuItem, SharedString, Window};
-use gpui_component::{GlobalState, WindowExt as _, menu::AppMenuBar};
+use gpui_component::{GlobalState, menu::AppMenuBar};
 
 use crate::{
     actions::{
@@ -213,7 +213,7 @@ pub fn install_global_actions(cx: &mut App) {
     cx.on_action(|_: &OpenWebsite, cx| cx.open_url(WEBSITE_URL));
     cx.on_action(|_: &dl::NewDownload, cx| crate::windows::new_download::open_default(cx));
     cx.on_action(|_: &dl::OpenQueueManager, cx| crate::windows::queue_manager::open(cx));
-    cx.on_action(|_: &CheckUpdate, cx| check_update(cx));
+    cx.on_action(|_: &CheckUpdate, cx| crate::update_notices::check_now(cx));
     cx.on_action(|_: &OpenLogsFolder, cx| open_logs_folder(cx));
     cx.on_action(|_: &About, cx| {
         crate::windows::settings::reveal(
@@ -260,61 +260,6 @@ pub fn request_quit(cx: &mut App) {
             log::debug!("view or window released before lifecycle update: {error:#}");
         }
     });
-}
-
-fn check_update(cx: &mut App) {
-    let desktop = Desktop::global(cx);
-    let client = desktop.client.clone();
-    let translator = desktop.translator.clone();
-    let future = client.call::<serde_json::Value, fluxdown_protocol::UpdateCheckResultDto>(
-        fluxdown_protocol::method::AGENT_UPDATE_CHECK,
-        Some(serde_json::json!({})),
-    );
-    cx.spawn(async move |cx| {
-        let result = future.await;
-        cx.update(|cx| {
-            let translator = translator.read(cx).clone();
-            let Some(window) = cx
-                .active_window()
-                .or_else(|| WindowRegistry::handle(cx, &WindowKey::Main))
-            else {
-                return;
-            };
-            if let Err(error) = window.update(cx, |_, window, cx| match result {
-                Ok(result) if result.has_update => {
-                    let url = if result.release_page_url.is_empty() {
-                        result.download_url.clone()
-                    } else {
-                        result.release_page_url.clone()
-                    };
-                    let message = translator
-                        .text("updateAvailableToast")
-                        .replace("{v}", &result.latest_version);
-                    let action_label = t(&translator, "goToDownload");
-                    let note = gpui_component::notification::Notification::info(message).action(
-                        move |_, _, _| {
-                            let url = url.clone();
-                            gpui_component::button::Button::new("update-go-download")
-                                .label(action_label.clone())
-                                .on_click(move |_, _, cx| cx.open_url(&url))
-                        },
-                    );
-                    window.push_notification(note, cx);
-                }
-                Ok(_) => window.push_notification(t(&translator, "upToDate"), cx),
-                Err(_) => window.push_notification(
-                    gpui_component::notification::Notification::error(t(
-                        &translator,
-                        "localServiceActionFailed",
-                    )),
-                    cx,
-                ),
-            }) {
-                log::debug!("view or window released before lifecycle update: {error:#}");
-            }
-        });
-    })
-    .detach();
 }
 
 fn open_logs_folder(cx: &mut App) {

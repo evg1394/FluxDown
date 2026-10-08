@@ -1,12 +1,13 @@
-//! 引擎发起的交互选择请求：每个 `request_id` 一个独立 `Floating` 窗口，互不阻塞、
-//! 可并存；到期由 daemon 自动按默认值解析，`SelectionResolved` 事件负责关窗。
+//! 引擎发起的交互选择请求（HLS 画质 / BT 文件 / 插件变体）：每个 `request_id` 一个独立
+//! `Floating` 窗口，互不阻塞、可并存；到期由 daemon 自动按默认值解析，`SelectionResolved`
+//! 事件负责关窗。`FileExists` 不在此开窗，由聚合的 [`crate::windows::file_conflict`] 承载。
 
 use std::sync::Arc;
 
 use fluxdown_protocol::{
     AgentEvent, DaemonEvent, SelectionKind, SelectionRequestDto, ServiceEvent,
 };
-use fluxdown_ui_downloads::SelectionView;
+use fluxdown_ui_downloads::{SelectionPlan, SelectionView};
 use fluxdown_ui_shell::{AuxiliaryWindowView, auxiliary_window_options};
 use gpui::{App, AppContext as _, Bounds, WindowBounds, WindowKind, px, size};
 use gpui_component::Root;
@@ -74,6 +75,10 @@ fn pending_selections(
 
 /// 已开则跳过（去重）；否则按 `kind` 定尺寸、居中主窗口所在显示器打开。
 fn open(cx: &mut App, request: SelectionRequestDto) {
+    let Some(plan) = SelectionPlan::for_request(&request) else {
+        // 「文件已存在」走聚合窗口。
+        return;
+    };
     let key = WindowKey::Selection(request.request_id.clone());
     if WindowRegistry::is_open(cx, &key) {
         return;
@@ -87,6 +92,7 @@ fn open(cx: &mut App, request: SelectionRequestDto) {
         SelectionKind::Hls { .. } => "hlsQualityTitle",
         SelectionKind::Bt { .. } => "btFileSelectTitle",
         SelectionKind::Variant { .. } => "resolveVariantTitle",
+        SelectionKind::FileExists { .. } => return,
     };
     let is_bt = matches!(request.kind, SelectionKind::Bt { .. });
     let display_id = WindowRegistry::handle(cx, &WindowKey::Main)
@@ -122,6 +128,7 @@ fn open(cx: &mut App, request: SelectionRequestDto) {
             SelectionView::new(
                 translator.clone(),
                 request.clone(),
+                plan,
                 task_name.clone(),
                 port,
                 window,

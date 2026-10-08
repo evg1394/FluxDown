@@ -1,9 +1,10 @@
 use std::collections::HashMap;
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 use crate::downloader::DownloadError;
+use crate::logger::{log_info, log_warn};
 
 static LEASES: OnceLock<Mutex<HashMap<PathBuf, Weak<Lease>>>> = OnceLock::new();
 
@@ -47,6 +48,12 @@ impl TempFileGuard {
             if lease.task_id == task_id && lease.runtime_task == tokio::task::try_id() {
                 return Ok(Self { _lease: lease });
             }
+            log_warn!(
+                "[temp_lease] task {} rejected: {} is being written by task {}",
+                task_id,
+                path.display(),
+                lease.task_id
+            );
             return Err(io::Error::new(
                 io::ErrorKind::WouldBlock,
                 format!(
@@ -80,21 +87,90 @@ async fn normalized_path(path: &Path) -> io::Result<PathBuf> {
         .unwrap_or_else(|| Path::new("."));
     // Canonicalizing the parent also works before the temporary file exists, and resolves
     // relative paths, dot components and directory aliases without changing its key at creation.
-    let normalized = tokio::fs::canonicalize(parent).await?.join(file_name);
-    let normalized = match tokio::fs::canonicalize(&normalized).await {
-        Ok(path) => path,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => normalized,
-        Err(e) => return Err(e),
+    let normalized = match tokio::fs::canonicalize(parent).await {
+        Ok(parent) => {
+            let joined = parent.join(file_name);
+            match tokio::fs::canonicalize(&joined).await {
+                Ok(path) => path,
+                Err(e) if e.kind() == io::ErrorKind::NotFound => joined,
+                // The temporary file may not exist yet; its parent is already resolved.
+                Err(e) => key_without_final_path(&joined, e, true).await?,
+            }
+        }
+        // A missing download directory is a real failure, not a lease-key problem.
+        Err(e) => key_without_final_path(parent, e, false)
+            .await?
+            .join(file_name),
     };
     #[cfg(target_os = "windows")]
     let normalized = PathBuf::from(normalized.to_string_lossy().to_lowercase());
     Ok(normalized)
 }
 
+/// Lease key for a path the filesystem can open but cannot report a final path for.
+///
+/// Windows volumes outside the Mount Manager (ImDisk RAM disks, some Dokan/WinFsp mounts)
+/// fail `GetFinalPathNameByHandleW` with `ERROR_INVALID_FUNCTION` although ordinary I/O
+/// works (rust-lang/rust#48249). Such a path keeps a lexical absolute key: every writer
+/// through the same spelling still conflicts, only junction/symlink aliases on that volume
+/// are no longer unified. A path the filesystem cannot reach keeps the original error so
+/// callers still classify it (permission, missing directory, ...) as before.
+async fn key_without_final_path(
+    path: &Path,
+    canonicalize_error: io::Error,
+    allow_missing: bool,
+) -> io::Result<PathBuf> {
+    match tokio::fs::metadata(path).await {
+        Ok(_) => {}
+        Err(e) if allow_missing && e.kind() == io::ErrorKind::NotFound => {}
+        Err(e) => {
+            log_warn!(
+                "[temp_lease] path unreachable, cannot lease {}: canonicalize={}, metadata={}",
+                path.display(),
+                canonicalize_error,
+                e
+            );
+            return Err(canonicalize_error);
+        }
+    }
+    let key = lexical_absolute(path).inspect_err(|e| {
+        log_warn!(
+            "[temp_lease] cannot build absolute key for {}: canonicalize={}, absolute={}",
+            path.display(),
+            canonicalize_error,
+            e
+        );
+    })?;
+    log_info!(
+        "[temp_lease] canonicalize unsupported for {} ({}); using lexical key {}",
+        path.display(),
+        canonicalize_error,
+        key.display()
+    );
+    Ok(key)
+}
+
+/// Absolute path with `.` and `..` resolved by text, without consulting the filesystem.
+fn lexical_absolute(path: &Path) -> io::Result<PathBuf> {
+    let absolute = std::path::absolute(path)?;
+    let mut out = PathBuf::with_capacity(absolute.as_os_str().len());
+    for component in absolute.components() {
+        match component {
+            Component::CurDir => {}
+            // `pop` refuses to remove the root or prefix, matching `/..` == `/`.
+            Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other.as_os_str()),
+        }
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
-    use super::TempFileGuard;
+    use super::{TempFileGuard, key_without_final_path, lexical_absolute};
     use crate::downloader::DownloadError;
     use std::io::ErrorKind;
     use std::path::PathBuf;
@@ -258,5 +334,46 @@ mod tests {
         drop(retry);
         let other = TempFileGuard::acquire(&dir.file(), "other").await.unwrap();
         drop(other);
+    }
+
+    fn unsupported_final_path() -> std::io::Error {
+        // ERROR_INVALID_FUNCTION, as returned by GetFinalPathNameByHandleW on ImDisk volumes.
+        std::io::Error::from_raw_os_error(1)
+    }
+
+    #[tokio::test]
+    async fn unsupported_final_path_keeps_reachable_directory_leasable() {
+        let dir = TestDir::new();
+        std::fs::create_dir(dir.0.join("child")).unwrap();
+        let alias = dir.0.join("child").join(".").join("..");
+        let key = key_without_final_path(&alias, unsupported_final_path(), false)
+            .await
+            .unwrap();
+        assert_eq!(key, dir.0);
+        let missing_file = dir.file();
+        let key = key_without_final_path(&missing_file, unsupported_final_path(), true)
+            .await
+            .unwrap();
+        assert_eq!(key, missing_file);
+    }
+
+    #[tokio::test]
+    async fn unsupported_final_path_on_missing_directory_keeps_original_error() {
+        let dir = TestDir::new();
+        let missing = dir.0.join("missing");
+        let error = key_without_final_path(&missing, unsupported_final_path(), false)
+            .await
+            .unwrap_err();
+        assert_eq!(error.raw_os_error(), Some(1));
+    }
+
+    #[test]
+    fn lexical_absolute_resolves_dots_without_filesystem() {
+        let cwd = std::env::current_dir().unwrap();
+        let key =
+            lexical_absolute(&PathBuf::from("a").join(".").join("b").join("..").join("c")).unwrap();
+        assert_eq!(key, cwd.join("a").join("c"));
+        let root = cwd.ancestors().last().unwrap().to_path_buf();
+        assert_eq!(lexical_absolute(&root.join("..")).unwrap(), root);
     }
 }

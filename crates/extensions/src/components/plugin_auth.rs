@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use fluxdown_protocol::{PluginAuthResponse, RpcErrorData};
 use fluxdown_ui_components::{
-    ControlExt as _, FluxIcon, dialog_scroll_body, field_error, form, form_field,
+    BusyExt as _, ControlExt as _, FluxIcon, dialog_scroll_body, field_error, form, form_field,
 };
 use fluxdown_ui_i18n::Translator;
 use fluxdown_ui_theme::active_theme;
@@ -501,7 +501,7 @@ impl Render for PluginAuthDialog {
                                         .outline()
                                         .control(cx)
                                         .label(logout_label)
-                                        .loading(self.busy)
+                                        .busy(self.busy)
                                         .disabled(self.busy)
                                         .on_click(cx.listener(|this, _, window, cx| {
                                             this.call("logout", window, cx);
@@ -515,7 +515,7 @@ impl Render for PluginAuthDialog {
                                         .primary()
                                         .control(cx)
                                         .label(poll)
-                                        .loading(self.busy)
+                                        .busy(self.busy)
                                         .disabled(self.busy)
                                         .on_click(cx.listener(|this, _, window, cx| {
                                             this.call("poll", window, cx);
@@ -530,7 +530,7 @@ impl Render for PluginAuthDialog {
                                         .primary()
                                         .control(cx)
                                         .label(begin)
-                                        .loading(self.busy)
+                                        .busy(self.busy)
                                         .disabled(self.busy)
                                         .on_click(cx.listener(|this, _, window, cx| {
                                             this.call("begin", window, cx);

@@ -7,7 +7,7 @@ use fluxdown_ui_components::{
 use fluxdown_ui_theme::active_theme;
 use gpui::{
     App, AppContext as _, ClipboardItem, Entity, ParentElement, SharedString,
-    StatefulInteractiveElement as _, Styled, Window, px,
+    StatefulInteractiveElement as _, Styled, Window,
 };
 use gpui_component::{
     Icon, WindowExt as _, h_flex,
@@ -215,7 +215,7 @@ fn port_field(ctx: &SectionContext) -> Control {
         });
         Input::new(&slot.read(cx).input)
             .control(cx)
-            .w(px(NUMBER_WIDTH))
+            .w(active_theme(cx).text_extent(NUMBER_WIDTH))
             .disabled(disabled || busy)
     })
 }
@@ -323,7 +323,6 @@ fn token_field(ctx: &SectionContext) -> Control {
             .and_then(serde_json::Value::as_str)
             .map(|token| SharedString::from(token.to_owned()))
             .unwrap_or_default();
-        let needs_reveal = snapshot.gateway_token_needs_reveal();
         let busy = snapshot.is_busy("gateway") || snapshot.is_busy("gatewayToken");
         let regenerating = snapshot.is_busy_tagged("gateway", "regenerateToken");
         let clearing = snapshot.is_busy_tagged("gateway", "clearToken");
@@ -331,7 +330,7 @@ fn token_field(ctx: &SectionContext) -> Control {
             .transient("gateway_token_copied")
             .and_then(serde_json::Value::as_bool)
             .unwrap_or(false);
-        if needs_reveal && !busy {
+        if snapshot.should_reveal_gateway_token() {
             store.update(cx, |store, cx| store.reveal_gateway_token(cx));
         }
 
@@ -401,7 +400,7 @@ fn token_field(ctx: &SectionContext) -> Control {
             .child(
                 Input::new(&input)
                     .control(cx)
-                    .w(px(INPUT_WIDTH))
+                    .w(active_theme(cx).text_extent(INPUT_WIDTH))
                     .disabled(disabled || busy),
             )
             .child(

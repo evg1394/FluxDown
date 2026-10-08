@@ -1,0 +1,12 @@
+name = "fluxdown-oss-cdn"
+main = "oss-proxy.js"
+compatibility_date = "2026-10-01"
+workers_dev = false
+routes = [{ pattern = "dl-fluxdown.zerx.dev", custom_domain = true }]
+
+[vars]
+OSS_BUCKET = "zerx-lab"
+OSS_ENDPOINT = "oss-cn-beijing.aliyuncs.com"
+OSS_RELEASE_PREFIX = "FluxDownRelease"
+
+# 密钥：wrangler secret put OSS_ACCESS_KEY_ID / OSS_ACCESS_KEY_SECRET

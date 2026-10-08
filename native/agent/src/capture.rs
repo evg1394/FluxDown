@@ -643,13 +643,16 @@ fn validate_group_items(request: &CreateGroupRequest) -> Result<(), CaptureError
 
 // 与插件 manifest 的相对路径规则一致；agent 不依赖 engine，不能调用其验证器。
 fn is_safe_relative_path(path: &str) -> bool {
+    if path.is_empty() {
+        return false;
+    }
     let bytes = path.as_bytes();
-    !path.is_empty()
-        && !(bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':')
-        && !path.chars().any(char::is_control)
-        && path
-            .split(['/', '\\'])
-            .all(|part| !part.is_empty() && part != "." && part != "..")
+    let is_windows_drive = bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':';
+    if is_windows_drive || path.chars().any(char::is_control) {
+        return false;
+    }
+    path.split(['/', '\\'])
+        .all(|part| !part.is_empty() && part != "." && part != "..")
 }
 
 fn fill_if_blank(target: &mut String, fallback: String) {

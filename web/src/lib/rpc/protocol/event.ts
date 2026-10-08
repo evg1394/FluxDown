@@ -14,6 +14,7 @@ import type {
   RemoteTaskDto,
   ShellStatusDto,
   SyncStatusDto,
+  UpdateStatusDto,
 } from './agent';
 import type { ErrorReason } from './error';
 import type { DaemonConfigSnapshot, DaemonRuntimeStatsDto } from './config';
@@ -54,6 +55,7 @@ export interface AgentSnapshot {
   sync: SyncStatusDto;
   /** 旧快照缺失时视为 disconnected。 */
   cloudConnection?: CloudConnectionDto;
+  update: UpdateStatusDto;
   preferences: AgentPreferencesDto;
   gateway: GatewayStatusDto;
   cloudDevices: CloudDevice[];
@@ -111,6 +113,7 @@ export type AgentEvent =
   | { type: 'sessionChanged'; data: AgentSessionDto | null }
   | { type: 'syncChanged'; data: SyncStatusDto }
   | { type: 'cloudConnectionChanged'; data: CloudConnectionDto }
+  | { type: 'updateChanged'; data: UpdateStatusDto }
   | { type: 'preferencesChanged'; data: AgentPreferencesDto }
   | { type: 'gatewayChanged'; data: GatewayStatusDto }
   | { type: 'cloudDevicesChanged'; data: CloudDevice[] }

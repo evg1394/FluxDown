@@ -4,8 +4,8 @@
 
 use fluxdown_protocol::{CloudDevice, LinkDeviceInfo, LinkDeviceParams};
 use fluxdown_ui_components::{
-    ControlExt as _, DialogIntent, dialog_footer, dialog_scroll_body, dialog_title, field_error,
-    field_hint, form, form_field,
+    BusyExt as _, ControlExt as _, DialogIntent, dialog_footer, dialog_scroll_body, dialog_title,
+    field_error, field_hint, form, form_field,
 };
 use fluxdown_ui_theme::active_theme;
 use gpui::{
@@ -76,7 +76,7 @@ pub(crate) fn open_rename(
         let view = view.clone();
         dialog
             .title(dialog_title(title.clone(), cx))
-            .w(px(440.))
+            .w(active_theme(cx).text_extent(440.))
             .content(move |content, _, _| content.child(view.clone()))
     });
     input.update(cx, |input, cx| input.focus(window, cx));
@@ -157,7 +157,7 @@ impl Render for RenameDialog {
                             .primary()
                             .label(translated(&self.host, "confirm", cx))
                             .control(cx)
-                            .loading(self.busy)
+                            .busy(self.busy)
                             .disabled(self.busy)
                             .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                                 this.submit(window, cx);
@@ -346,7 +346,7 @@ pub(crate) fn open_detail(
         let presence = presence.clone();
         dialog
             .title(dialog_title(title.clone(), cx))
-            .w(px(480.))
+            .w(active_theme(cx).text_extent(480.))
             .content(move |content, _, cx| {
                 let tokens = active_theme(cx).tokens().clone();
                 content.min_h_0().child(dialog_scroll_body(
@@ -444,7 +444,7 @@ pub(crate) fn open_manage_all(host: &Entity<AccountHost>, window: &mut Window, c
         let view = view.clone();
         dialog
             .title(dialog_title(title.clone(), cx))
-            .w(px(600.))
+            .w(active_theme(cx).text_extent(600.))
             .content(move |content, _, _| content.min_h_0().child(view.clone()))
     });
 }

@@ -16,7 +16,9 @@ use gpui::{
 use gpui_component::{table::TableState, v_flex};
 
 use crate::{
-    components::task_table::{DownloadTableDelegate, TableFilter, render_download_table},
+    components::task_table::{
+        DownloadTableDelegate, TableFilter, render_download_table, spawn_midnight_refresh,
+    },
     controller::{DownloadsController, DownloadsPort, GroupSummary},
     pages::task_detail::detail_row,
     strings::DownloadStrings,
@@ -50,6 +52,7 @@ impl GroupDetailView {
                 .row_selectable(false)
                 .col_selectable(false)
         });
+        spawn_midnight_refresh(&table_state, cx);
 
         cx.observe(&translator, |this, translator, cx| {
             this.strings = DownloadStrings::from_translator(translator.read(cx));
@@ -57,6 +60,7 @@ impl GroupDetailView {
                 table.delegate_mut().set_strings(this.strings.clone());
                 table.delegate_mut().refresh_view();
                 table.refresh(cx);
+                cx.notify();
             });
             cx.notify();
         })
@@ -108,6 +112,8 @@ impl GroupDetailView {
             if delegate.take_columns_dirty() {
                 table.refresh(cx);
             }
+            // 行从共享的 `TaskStore` 读取：表格必须显式 notify，retained 渲染才会重画行。
+            cx.notify();
         });
         cx.notify();
     }

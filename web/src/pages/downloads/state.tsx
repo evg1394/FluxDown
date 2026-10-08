@@ -111,6 +111,8 @@ export interface DownloadsContextValue {
   selected: ReadonlySet<RowKey>
   selectedViews: readonly DownloadTaskView[]
   summary: SelectionSummary
+  /** 显式多选模式：仅 Ctrl/Cmd+点击或全选进入，普通单击 / 清空选择退出（与 GPUI `multi_select` 对齐）。 */
+  multiSelect: boolean
   /** 点击行：shift 连选，ctrl/cmd 切换，否则单选。 */
   clickSelect: (key: RowKey, modifiers: ClickModifiers) => void
   /** 只切换该行选中状态（复选框 / 移动端点选）。 */
@@ -302,6 +304,7 @@ export function DownloadsProvider({ children }: { children: ReactNode }) {
   const [sidebarSelection, setSidebarSelectionState] = useState<SidebarSelection>(SELECTION_ALL)
   const [query, setQueryState] = useState('')
   const [selected, setSelected] = useState<ReadonlySet<RowKey>>(EMPTY_SELECTED)
+  const [multiSelectMode, setMultiSelectMode] = useState(false)
   const anchor = useRef<RowKey | null>(null)
   const [detailTaskId, setDetailTaskId] = useState<string | null>(null)
   const mobile = useIsMobile()
@@ -554,6 +557,7 @@ export function DownloadsProvider({ children }: { children: ReactNode }) {
         }
         return new Set([key])
       })
+      setMultiSelectMode(modifiers.secondary)
       anchor.current = key
     },
     [visibleKeys],
@@ -569,19 +573,27 @@ export function DownloadsProvider({ children }: { children: ReactNode }) {
   }, [])
 
   const contextSelect = useCallback((key: RowKey) => {
-    setSelected((current) => (current.has(key) ? current : new Set([key])))
+    setSelected((current) => {
+      if (current.has(key)) return current
+      setMultiSelectMode(false)
+      return new Set([key])
+    })
     anchor.current = key
   }, [])
 
   const selectAll = useCallback(() => {
     setSelected(new Set(visibleKeys))
+    setMultiSelectMode(true)
     anchor.current = null
   }, [visibleKeys])
 
   const clearSelection = useCallback(() => {
     setSelected(EMPTY_SELECTED)
+    setMultiSelectMode(false)
     anchor.current = null
   }, [])
+
+  const multiSelect = multiSelectMode && selected.size > 0
 
   const toggleGroupCollapsed = useCallback(
     (groupKey: string) =>
@@ -669,6 +681,7 @@ export function DownloadsProvider({ children }: { children: ReactNode }) {
       selected,
       selectedViews,
       summary,
+      multiSelect,
       clickSelect,
       toggleSelected,
       contextSelect,
@@ -705,6 +718,7 @@ export function DownloadsProvider({ children }: { children: ReactNode }) {
       selected,
       selectedViews,
       summary,
+      multiSelect,
       clickSelect,
       toggleSelected,
       contextSelect,

@@ -120,6 +120,8 @@ export const METHOD = {
   AGENT_AUTH_VERIFY_CODE: 'agent.auth.verifyCode',
   AGENT_AUTH_LOGOUT: 'agent.auth.logout',
   AGENT_AUTH_REFRESH_PROFILE: 'agent.auth.refreshProfile',
+  AGENT_AUTH_SEND_PASSWORD_RESET_CODE: 'agent.auth.sendPasswordResetCode',
+  AGENT_AUTH_RESET_PASSWORD: 'agent.auth.resetPassword',
   AGENT_PROFILE_SEND_EMAIL_CODE: 'agent.profile.sendEmailCode',
   AGENT_PROFILE_SEND_NEW_EMAIL_CODE: 'agent.profile.sendNewEmailCode',
   AGENT_PROFILE_CHANGE_EMAIL: 'agent.profile.changeEmail',
@@ -127,6 +129,8 @@ export const METHOD = {
   AGENT_PROFILE_CHECK_ORIGIN_ID: 'agent.profile.checkOriginId',
   AGENT_PROFILE_CHANGE_ORIGIN_ID: 'agent.profile.changeOriginId',
   AGENT_PROFILE_CHANGE_NICKNAME: 'agent.profile.changeNickname',
+  AGENT_PROFILE_SEND_PASSWORD_CODE: 'agent.profile.sendPasswordCode',
+  AGENT_PROFILE_CHANGE_PASSWORD: 'agent.profile.changePassword',
 
   AGENT_GATEWAY_GET: 'agent.gateway.get',
   AGENT_GATEWAY_PATCH: 'agent.gateway.patch',
@@ -189,6 +193,9 @@ export const METHOD = {
   AGENT_DIAGNOSTICS_LOG_PATHS: 'agent.diagnostics.logPaths',
   AGENT_DIAGNOSTICS_EXPORT_LOGS: 'agent.diagnostics.exportLogs',
   AGENT_UPDATE_CHECK: 'agent.update.check',
+  AGENT_UPDATE_DOWNLOAD: 'agent.update.download',
+  AGENT_UPDATE_INSTALL: 'agent.update.install',
+  AGENT_UPDATE_CANCEL: 'agent.update.cancel',
   /** 完成后关机；无活跃任务时拒绝（invalidArgument）。 */
   AGENT_POWER_ARM: 'agent.power.arm',
   AGENT_POWER_DISARM: 'agent.power.disarm',
@@ -217,5 +224,7 @@ export const CAPABILITY_AGENT_BILLING = 'agent.billing';
 export const CAPABILITY_AGENT_REFERRALS = 'agent.referrals';
 export const CAPABILITY_AGENT_DEVICE_LINK = 'agent.deviceLink';
 export const CAPABILITY_AGENT_EXTERNAL_CAPTURE = 'agent.externalCapture';
+/** 按连接下发：本连接可在 agent 所在主机上打开 / 定位任务产物（`agent.platform.openTask` / `revealTask`）。 */
+export const CAPABILITY_AGENT_OPEN_TASK_FILES = 'agent.openTaskFiles';
 /** 客户端能力：可处理交互选择（HLS/BT/变体），放入握手 capabilities。 */
 export const CAPABILITY_CLIENT_SELECTIONS = 'client.selections';

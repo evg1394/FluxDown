@@ -26,9 +26,9 @@ use gpui_component::{
 
 use crate::{
     components::{
-        file_icon::{SystemFileIcon, system_file_icon},
+        file_icon::task_file_icon,
         segment_progress::render_segment_progress,
-        task_table::{kind_icon, progress_bar_color, progress_track_color, status_color},
+        task_table::{progress_bar_color, progress_track_color, status_color},
     },
     controller::{DownloadsCommand, DownloadsController, DownloadsPort},
     model::{DownloadTaskView, RowKey, TaskProtocol, TaskState, format_bytes},
@@ -42,10 +42,10 @@ pub const PROGRESS_WINDOW_INITIAL_HEIGHT: f32 = 340.;
 
 /// 进度条高度：比任务表更醒目。
 const BAR_HEIGHT: f32 = 8.;
-/// 文件图标位边长：回退的类型图标带底块，系统图标不加底块、在此位置内居中。
+/// 文件图标位边长：图标在此位置内居中。
 const ICON_TILE: f32 = 40.;
-/// 系统文件图标边长（图标自带留白，四周再留 4px）。
-const SYSTEM_ICON: f32 = 32.;
+/// 文件图标边长（系统图标自带留白，四周再留 4px）。
+const FILE_ICON: f32 = 32.;
 /// 完成视图的状态角标边长。
 const BADGE: f32 = 18.;
 /// 分段列表最大高度，超出后内部滚动。
@@ -301,32 +301,16 @@ impl ProgressWindowView {
 
     // ---- 渲染 ----
 
-    /// 文件图标位：系统图标直接显示；请求中留空（避免先闪一下类型图标）；取不到时回退为
-    /// 底块 + 按类型的图标。
+    /// 文件图标位（按所选图标包；系统图标请求中留空，避免先闪一下回退图标）。
     fn render_icon_tile(row: &DownloadTaskView, window: &mut Window, cx: &mut App) -> AnyElement {
-        let tile = div()
+        div()
             .flex_none()
             .size(px(ICON_TILE))
             .flex()
             .items_center()
-            .justify_center();
-        match system_file_icon(row, px(SYSTEM_ICON), window, cx) {
-            SystemFileIcon::Ready(icon) => tile.child(icon).into_any_element(),
-            SystemFileIcon::Loading => tile.into_any_element(),
-            SystemFileIcon::Unavailable => {
-                let theme = active_theme(cx);
-                let tokens = theme.tokens();
-                let extended = theme.extended();
-                tile.rounded(tokens.radius.lg)
-                    .bg(extended.colors.nav_hover)
-                    .child(
-                        Icon::new(kind_icon(row.kind))
-                            .size(extended.icon.lg)
-                            .text_color(tokens.colors.muted_foreground),
-                    )
-                    .into_any_element()
-            }
-        }
+            .justify_center()
+            .child(task_file_icon(row, px(FILE_ICON), window, cx))
+            .into_any_element()
     }
 
     fn render_title(name: SharedString, cx: &App) -> gpui::Div {
@@ -559,13 +543,13 @@ impl ProgressWindowView {
         let tokens = theme.tokens();
         h_flex()
             .gap(tokens.spacing.sm)
-            .h(px(INFO_ROW_HEIGHT))
+            .min_h(px(INFO_ROW_HEIGHT))
             .text_size(tokens.typography.xs.size)
             .line_height(tokens.typography.xs.line_height)
             .child(
                 div()
                     .flex_none()
-                    .w(px(INFO_LABEL_WIDTH))
+                    .w(theme.text_extent(INFO_LABEL_WIDTH))
                     .text_color(theme.extended().colors.text_tertiary)
                     .child(label),
             )
@@ -656,10 +640,11 @@ impl ProgressWindowView {
             .flex_none()
             .gap(tokens.spacing.xxs)
             .px(tokens.spacing.xs)
-            .h(px(24.))
+            .min_h(px(24.))
             .rounded(tokens.radius.md)
             .cursor_pointer()
             .text_size(tokens.typography.xs.size)
+            .line_height(tokens.typography.xs.line_height)
             .text_color(tokens.colors.muted_foreground)
             .hover(move |style| style.bg(extended.colors.row_hover))
             .on_click(cx.listener(|this, _, _, cx| {
@@ -701,14 +686,16 @@ impl ProgressWindowView {
             .unwrap_or_default();
         segments.sort_by_key(|segment| segment.index);
 
+        let index_width = theme.text_extent(PART_INDEX_WIDTH);
+        let total_width = theme.text_extent(72.);
         let columns =
             |index: AnyElement, status: AnyElement, done: AnyElement, total: AnyElement| {
                 h_flex()
                     .gap(tokens.spacing.sm)
-                    .child(div().flex_none().w(px(PART_INDEX_WIDTH)).child(index))
+                    .child(div().flex_none().w(index_width).child(index))
                     .child(div().flex_1().min_w_0().child(status))
                     .child(div().flex_1().min_w_0().child(done))
-                    .child(div().w(px(72.)).flex_none().text_right().child(total))
+                    .child(div().w(total_width).flex_none().text_right().child(total))
             };
         let header_text = |text: SharedString| {
             div()
@@ -741,13 +728,14 @@ impl ProgressWindowView {
                 div()
                     .truncate()
                     .text_size(tokens.typography.xs.size)
+                    .line_height(tokens.typography.xs.line_height)
                     .font_features(tabular_numbers())
                     .text_color(tokens.colors.muted_foreground)
                     .child(text)
                     .into_any_element()
             };
             div()
-                .h(px(PART_ROW_HEIGHT))
+                .min_h(px(PART_ROW_HEIGHT))
                 .flex()
                 .items_center()
                 .px(tokens.spacing.md)
@@ -756,6 +744,7 @@ impl ProgressWindowView {
                     div()
                         .truncate()
                         .text_size(tokens.typography.xs.size)
+                        .line_height(tokens.typography.xs.line_height)
                         .text_color(if active {
                             tokens.colors.primary
                         } else {
@@ -830,6 +819,7 @@ impl ProgressWindowView {
                     div()
                         .truncate()
                         .text_size(tokens.typography.xs.size)
+                        .line_height(tokens.typography.xs.line_height)
                         .text_color(tokens.colors.muted_foreground)
                         .child(self.t(cx, "progressWindowShowCompletion")),
                     move |value, _, cx| {

@@ -12,10 +12,17 @@ impl DownloadView {
         let has_sections = self.has_visible_sidebar_section();
         let prefs = self.table_state.read(cx).delegate().prefs();
         let (width, collapsed) = (px(prefs.sidebar_width), prefs.sidebar_collapsed);
-        self.sidebar.update(cx, |sidebar, cx| {
-            sidebar.set_available(has_sections, cx);
-            sidebar.set_layout(width, collapsed, cx);
-        });
+        // 值未变时不写：渲染期 `update` 在 gpui-fast 下会让读侧栏状态的 shell 顶栏跟着重建。
+        if self
+            .sidebar
+            .read(cx)
+            .needs_projection(has_sections, width, collapsed)
+        {
+            self.sidebar.update(cx, |sidebar, cx| {
+                sidebar.set_available(has_sections, cx);
+                sidebar.set_layout(width, collapsed, cx);
+            });
+        }
         let content = self.render_main(cx);
         let mut panel = SidebarPanel::new("downloads-content", &self.sidebar, content, window, cx);
         if panel.is_sidebar_visible() {

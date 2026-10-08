@@ -13,6 +13,7 @@ describe('错误 → 文案键', () => {
   test('reason 优先于 code', () => {
     expect(accountErrorKey(err('unauthorized', 'invalidCredentials'), 'login')).toBe('accountErrorInvalidCredentials')
     expect(accountErrorKey(err('conflict', 'deviceLimit'))).toBe('accountErrorDeviceLimit')
+    expect(accountErrorKey(err('invalidArgument', 'wrongPassword'))).toBe('accountErrorWrongPassword')
     expect(accountErrorKey(err('unavailable', 'cloudUnreachable', true))).toBe('accountErrorNetwork')
     // 同一 code 因 reason 不同得到不同文案
     expect(accountErrorKey(err('conflict', 'emailTaken'))).not.toBe(accountErrorKey(err('conflict', 'taskStateConflict')))

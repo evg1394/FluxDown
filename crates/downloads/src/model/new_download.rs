@@ -25,13 +25,17 @@ impl UrlEntry {
     }
 }
 
-/// 外部捕获 → 条目：捕获文件名与链接路径末段逐字相同时省略 `out=`。
+/// 外部捕获 → 条目：捕获文件名与链接路径末段（百分号解码后）逐字相同时省略 `out=`。
 ///
 /// 这种 `out=` 与自动识别结果一致，却会在链接框里多出一行缩进的选项行，看起来像链接
-/// 被错误折行；只有真正改名（如 Content-Disposition 给出的名字）才保留。
+/// 被错误折行，还会把自动名变成显式名而阻断引擎完成期定名；只有真正改名（如
+/// Content-Disposition 给出的名字）才保留。
 pub(crate) fn capture_entry(url: &str, file_name: &str) -> UrlEntry {
     let file_name = file_name.trim();
-    let redundant = url_file_segment(url).is_some_and(|segment| segment == file_name);
+    let redundant = url_file_segment(url).is_some_and(|segment| {
+        segment == file_name
+            || percent_decode_utf8(segment).is_some_and(|decoded| decoded == file_name)
+    });
     UrlEntry {
         url: url.to_owned(),
         file_name: if redundant {
@@ -41,6 +45,27 @@ pub(crate) fn capture_entry(url: &str, file_name: &str) -> UrlEntry {
         },
         checksum: String::new(),
     }
+}
+
+/// 百分号解码为 UTF-8；解码结果不是合法 UTF-8 时返回 `None`。非法 `%` 序列按字面保留。
+pub(crate) fn percent_decode_utf8(text: &str) -> Option<String> {
+    let bytes = text.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let hex = |b: u8| char::from(b).to_digit(16);
+        if bytes[i] == b'%'
+            && let (Some(&hi), Some(&lo)) = (bytes.get(i + 1), bytes.get(i + 2))
+            && let (Some(hi), Some(lo)) = (hex(hi), hex(lo))
+        {
+            out.push((hi * 16 + lo) as u8);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).ok()
 }
 
 /// `scheme://host/a/b.zip?x#y` → `b.zip`；无路径或以 `/` 结尾时为 `None`。
@@ -95,7 +120,7 @@ pub(crate) fn parse_entries(text: &str, loose: bool) -> Vec<UrlEntry> {
                     current = Some(UrlEntry::with_url(url));
                 }
             }
-        } else if let Some(url) = leading_http_url(trimmed) {
+        } else if let Some(url) = leading_manual_url(trimmed) {
             current = Some(UrlEntry::with_url(url));
         }
     }
@@ -116,6 +141,34 @@ fn leading_http_url(text: &str) -> Option<&str> {
     let rest = &text[scheme.len()..];
     let body = rest.find(char::is_whitespace).unwrap_or(rest.len());
     (body > 0).then(|| &text[..scheme.len() + body])
+}
+
+/// 手动输入：行首链接。查询串里未编码的空格属于链接本身（`a.zip?n=aaa bbb`，浏览器
+/// 照常请求，服务器据此命名，#131），所以链接已进入查询串时延伸到行尾或下一个链接
+/// 之前；没有查询串时空白之后的内容仍视为附注丢弃。
+fn leading_manual_url(text: &str) -> Option<&str> {
+    let head = leading_http_url(text)?;
+    if !head.contains('?') || head.len() == text.len() {
+        return Some(head);
+    }
+    let end = text[head.len()..]
+        .char_indices()
+        .map(|(index, _)| head.len() + index)
+        .find(|&index| {
+            text[..index].ends_with(char::is_whitespace) && starts_with_link(&text[index..])
+        })
+        .unwrap_or(text.len());
+    Some(text[..end].trim_end())
+}
+
+/// 是否以可建任务的链接开头（`http(s)://` / `ftp://` / `magnet:?` / `ed2k://`，忽略大小写）。
+fn starts_with_link(text: &str) -> bool {
+    ["https://", "http://", "ftp://", "magnet:?", "ed2k://"]
+        .into_iter()
+        .any(|scheme| {
+            text.len() >= scheme.len()
+                && text.as_bytes()[..scheme.len()].eq_ignore_ascii_case(scheme.as_bytes())
+        })
 }
 
 /// 行内首个 `(https?|ftp)://\S+` 匹配（忽略大小写）。
@@ -501,7 +554,14 @@ mod tests {
             name("https://a.example/dl/x.zip", "renamed.zip"),
             "renamed.zip"
         );
-        assert_eq!(name("https://a.example/a%20b.zip", "a b.zip"), "a b.zip");
+        assert_eq!(name("https://a.example/a%20b.zip", "a b.zip"), "");
+        assert_eq!(name("https://x.example/%E4%B8%AD.zip", "中.zip"), "");
+        assert_eq!(
+            name("https://x.example/%E4%B8%AD.zip", "other.zip"),
+            "other.zip"
+        );
+        assert_eq!(name("https://x.example/%E4%B8.zip", "%E4%B8.zip"), "");
+        assert_eq!(name("https://x.example/%B6%D4.zip", "对.zip"), "对.zip");
         assert_eq!(name("https://a.example/", "index.html"), "index.html");
         assert_eq!(name("https://a.example?f=x.zip", "x.zip"), "x.zip");
     }
@@ -530,6 +590,22 @@ mod tests {
                     url: "FTP://c.example/f.bin".to_owned(),
                     ..UrlEntry::default()
                 },
+            ]
+        );
+    }
+
+    #[test]
+    fn strict_parse_keeps_unencoded_spaces_inside_query() {
+        let entries = parse_entries(
+            "http://a.example/x.zip?n=aaa bbb ccc  \nhttps://b.example/y?q=1 2 https://c.example/z.bin",
+            false,
+        );
+        let urls: Vec<_> = entries.iter().map(|entry| entry.url.as_str()).collect();
+        assert_eq!(
+            urls,
+            [
+                "http://a.example/x.zip?n=aaa bbb ccc",
+                "https://b.example/y?q=1 2"
             ]
         );
     }

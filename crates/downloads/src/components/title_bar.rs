@@ -34,11 +34,11 @@ use crate::{
     strings::SEARCH_SHORTCUT_HINT,
 };
 
-/// 搜索框宽度（窄窗口下可收缩到 [`SEARCH_MIN_WIDTH`]）。
-const SEARCH_WIDTH: Pixels = px(280.);
-const SEARCH_MIN_WIDTH: Pixels = px(160.);
-/// 视图菜单宽度（容纳四个分段标签）。
-const VIEW_MENU_WIDTH: Pixels = px(320.);
+/// 搜索框宽度（100% 下的 px，经 `text_extent` 随文字放大；窄窗口下可收缩到 [`SEARCH_MIN_WIDTH`]）。
+const SEARCH_WIDTH: f32 = 280.;
+const SEARCH_MIN_WIDTH: f32 = 160.;
+/// 视图菜单宽度（100% 下的 px，容纳四个分段标签，经 `text_extent` 放大）。
+const VIEW_MENU_WIDTH: f32 = 320.;
 /// 视图菜单滚动区的最大高度；窗口较矮时再按可见高度收紧。
 const VIEW_MENU_MAX_BODY_HEIGHT: Pixels = px(420.);
 /// 弹层打开在顶栏下方：可见高度需扣除顶栏（40）、标签头与上下留白。
@@ -176,8 +176,8 @@ impl DownloadTitleBar {
         h_flex()
             .id("download-search-box")
             .track_focus(&self.search_focus)
-            .w(SEARCH_WIDTH)
-            .min_w(SEARCH_MIN_WIDTH)
+            .w(theme.text_extent(SEARCH_WIDTH))
+            .min_w(theme.text_extent(SEARCH_MIN_WIDTH))
             .flex_shrink(1.)
             .h(theme.density().control)
             .pl(tokens.spacing.sm)
@@ -222,6 +222,7 @@ impl DownloadTitleBar {
                         .appearance(false)
                         .with_size(Size::Small)
                         .text_size(tokens.typography.sm.size)
+                        .line_height(tokens.typography.sm.line_height)
                         .w_full()
                         .cleanable(true),
                 ),
@@ -255,7 +256,7 @@ impl DownloadTitleBar {
         Popover::new("download-view-popover")
             .anchor(Anchor::TopRight)
             .p_0()
-            .w(VIEW_MENU_WIDTH)
+            .w(active_theme(cx).text_extent(VIEW_MENU_WIDTH))
             .trigger(
                 Button::new("download-view")
                     .ghost()
@@ -331,7 +332,7 @@ impl Render for DownloadTitleBar {
             .child(
                 interactive(self.render_search(window, cx))
                     .flex_shrink(1.)
-                    .min_w(SEARCH_MIN_WIDTH),
+                    .min_w(active_theme(cx).text_extent(SEARCH_MIN_WIDTH)),
             )
             .child(interactive(self.render_view_menu(cx)))
             .child(left_edge_probe(
@@ -387,6 +388,7 @@ struct MenuStyle {
     row_height: Pixels,
     stroke: Pixels,
     body_size: Pixels,
+    body_line_height: Pixels,
     caption_size: Pixels,
     caption_line_height: Pixels,
     icon_sm: Pixels,
@@ -412,6 +414,7 @@ impl MenuStyle {
             row_height: theme.density().nav_row,
             stroke: extended.stroke.thin,
             body_size: tokens.typography.sm.size,
+            body_line_height: tokens.typography.sm.line_height,
             caption_size: extended.caption.size,
             caption_line_height: extended.caption.line_height,
             icon_sm: extended.icon.sm,
@@ -461,6 +464,7 @@ impl MenuStyle {
             .rounded(self.radius)
             .cursor_pointer()
             .text_size(self.body_size)
+            .line_height(self.body_line_height)
             .text_color(self.foreground)
             .hover(move |style| style.bg(self.hover))
             .child(div().flex_none().w(self.icon_md).when(checked, |this| {
@@ -601,6 +605,7 @@ fn columns_page(menu: &ViewMenuContext<'_>, style: MenuStyle, cx: &App) -> Vec<A
                 .rounded(style.radius)
                 .cursor_pointer()
                 .text_size(style.body_size)
+                .line_height(style.body_line_height)
                 .text_color(style.foreground)
                 .hover(move |this| this.bg(style.hover))
                 .drag_over::<DraggedColumnMenuItem>(move |this, _, _, _| this.bg(style.accent))

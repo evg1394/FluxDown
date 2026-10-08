@@ -1,4 +1,5 @@
 pub mod downloads;
+pub mod file_conflict;
 pub mod group_detail;
 pub(crate) mod manifest;
 pub mod new_download;

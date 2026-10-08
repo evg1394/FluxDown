@@ -3,6 +3,11 @@
 # 配套文件：.omp/RULES.md（粘性红线）、.omp/rules/*.md（TTSR 流中断规则）、
 #          .omp/agents/build-verifier.md（唯一自定义子代理：只读验证员）、.omp/WATCHDOG.md（advisor 审查焦点）
 
+# ---- 额外工作区根：每次会话自动加入，免手动 /add-dir（相对路径按 cwd 解析）----
+workspace:
+  additionalDirectories:
+    - ../FluxCloud
+
 tools:
   # write: 自动放行 read/write 层级工具，exec（bash/browser 等）需确认。
   # 想全自动时改回 yolo，或临时用 `omp --yolo`。

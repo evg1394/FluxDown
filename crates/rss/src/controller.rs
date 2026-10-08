@@ -102,15 +102,18 @@ impl RssController {
         self.loading = false;
     }
 
-    pub fn apply_event(&mut self, event: &ServiceEvent) {
+    /// 应用一条服务事件；返回 RSS 页可见状态是否可能变化（无关事件与原值写入返回 `false`，
+    /// 供视图跳过重绘——下载进度帧会高频到达）。
+    pub fn apply_event(&mut self, event: &ServiceEvent) -> bool {
         let ServiceEvent::Agent(event) = event else {
-            return;
+            return false;
         };
         match event {
             AgentEvent::DaemonSnapshotReplaced(snapshot)
             | AgentEvent::Daemon(DaemonEvent::SnapshotReplaced(snapshot)) => {
                 self.absorb_snapshot(snapshot);
                 self.stale = false;
+                true
             }
             AgentEvent::DaemonConnectionChanged(connected) => {
                 self.stale = !connected;
@@ -118,38 +121,45 @@ impl RssController {
                     self.reset_actions();
                     self.invalidate_items();
                 }
+                true
             }
             AgentEvent::Daemon(DaemonEvent::Engine(WsServerMsg::RssSourcesChanged { sources })) => {
-                self.absorb_sources(sources)
+                self.absorb_sources(sources);
+                true
             }
             AgentEvent::Daemon(DaemonEvent::Engine(WsServerMsg::RssItemsChanged {
                 source_id,
                 items,
                 ..
             })) => {
-                if self.selected_source.as_deref() == Some(source_id) {
+                let selected = self.selected_source.as_deref() == Some(source_id);
+                if selected {
                     self.invalidate_items();
                     self.items.clone_from(items);
                     self.retain_existing_selection();
                 }
+                selected
             }
             AgentEvent::Daemon(DaemonEvent::RssChanged { source_id, .. }) => {
-                if self.selected_source.as_deref() == Some(source_id) {
+                let selected = self.selected_source.as_deref() == Some(source_id);
+                if selected {
                     self.invalidate_items();
                 }
+                selected
             }
             AgentEvent::Daemon(DaemonEvent::TaskChanged(task)) => {
-                self.tasks
-                    .insert(task.task_id.clone(), (task.status, task.file_missing));
+                let value = (task.status, task.file_missing);
+                self.tasks.insert(task.task_id.clone(), value) != Some(value)
             }
             AgentEvent::Daemon(DaemonEvent::TaskDeleted { task_id }) => {
-                self.tasks.remove(task_id);
+                self.tasks.remove(task_id).is_some()
             }
             AgentEvent::Daemon(DaemonEvent::Engine(WsServerMsg::TasksSnapshot { tasks })) => {
                 self.tasks = tasks
                     .iter()
                     .map(|task| (task.task_id.clone(), (task.status, task.file_missing)))
                     .collect();
+                true
             }
             AgentEvent::Daemon(DaemonEvent::Engine(WsServerMsg::TaskProgress {
                 task_id,
@@ -158,21 +168,30 @@ impl RssController {
                 ..
             })) => {
                 if *status == 4 && error_message == "deleted" {
-                    self.tasks.remove(task_id);
+                    self.tasks.remove(task_id).is_some()
                 } else if let Some(task) = self.tasks.get_mut(task_id) {
+                    let changed = task.0 != *status;
                     task.0 = *status;
+                    changed
+                } else {
+                    false
                 }
             }
             AgentEvent::Daemon(DaemonEvent::Engine(WsServerMsg::FileMissingChanged {
                 updates,
             })) => {
+                let mut changed = false;
                 for update in updates {
-                    if let Some(task) = self.tasks.get_mut(&update.task_id) {
+                    if let Some(task) = self.tasks.get_mut(&update.task_id)
+                        && task.1 != update.missing
+                    {
                         task.1 = update.missing;
+                        changed = true;
                     }
                 }
+                changed
             }
-            _ => {}
+            _ => false,
         }
     }
 

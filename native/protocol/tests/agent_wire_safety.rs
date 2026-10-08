@@ -17,6 +17,7 @@ fn session() -> AgentSessionDto {
             origin_id: Some(10001),
             origin_id_changed: false,
             membership_ordinal: Some(7),
+            has_password: Some(true),
         },
         entitlements: Entitlements::default(),
         current_plan: None,

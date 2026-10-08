@@ -148,13 +148,33 @@ impl DaemonClient {
         supervisor: Arc<DaemonSupervisor>,
         cancel: CancellationToken,
     ) -> Result<(Self, mpsc::Receiver<DaemonClientEvent>), DaemonClientError> {
+        Self::spawn(config, supervisor, cancel, false)
+    }
+
+    /// 嵌入式宿主：与 [`Self::start`] 相同，但 `cancel` 触发时重连任务一并结束（进程不随
+    /// agent 退出，不能留下继续重连的后台任务）。
+    pub(crate) fn start_scoped(
+        config: DaemonClientConfig,
+        supervisor: Arc<DaemonSupervisor>,
+        cancel: CancellationToken,
+    ) -> Result<(Self, mpsc::Receiver<DaemonClientEvent>), DaemonClientError> {
+        Self::spawn(config, supervisor, cancel, true)
+    }
+
+    fn spawn(
+        config: DaemonClientConfig,
+        supervisor: Arc<DaemonSupervisor>,
+        cancel: CancellationToken,
+        stop_on_cancel: bool,
+    ) -> Result<(Self, mpsc::Receiver<DaemonClientEvent>), DaemonClientError> {
         config.validate()?;
         let (commands, command_rx) = mpsc::channel(64);
         let (events, event_rx) = mpsc::channel(1024);
         let connected = Arc::new(AtomicBool::new(false));
         let settled = Arc::new(AtomicBool::new(false));
         let ready = Arc::new(Notify::new());
-        tokio::spawn(run_client(
+        let http = config.http.clone();
+        let client = run_client(
             config,
             supervisor,
             command_rx,
@@ -164,7 +184,22 @@ impl DaemonClient {
                 settled: settled.clone(),
                 ready: ready.clone(),
             },
-        ));
+        );
+        if stop_on_cancel {
+            let stop = cancel.clone();
+            let connected = connected.clone();
+            tokio::spawn(async move {
+                tokio::select! {
+                    () = stop.cancelled() => {
+                        connected.store(false, Ordering::Release);
+                        http.clear();
+                    }
+                    () = client => {}
+                }
+            });
+        } else {
+            tokio::spawn(client);
+        }
         Ok((
             Self {
                 commands,

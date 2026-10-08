@@ -2,6 +2,7 @@ use std::borrow::Cow;
 
 use fluxdown_ui_account::AccountAssets;
 use fluxdown_ui_components::ComponentAssets;
+use fluxdown_ui_icon_pack::IconPackAssets;
 use fluxdown_ui_rss::RssAssets;
 use fluxdown_ui_shell::ShellAssets;
 use gpui::{AssetSource, Result, SharedString};
@@ -23,6 +24,9 @@ impl AssetSource for DesktopAssets {
         if let Some(asset) = AccountAssets.load(path)? {
             return Ok(Some(asset));
         }
+        if let Some(asset) = IconPackAssets.load(path)? {
+            return Ok(Some(asset));
+        }
         gpui_component_assets::Assets.load(path)
     }
 
@@ -32,6 +36,7 @@ impl AssetSource for DesktopAssets {
         assets.extend(ComponentAssets.list(path)?);
         assets.extend(RssAssets.list(path)?);
         assets.extend(AccountAssets.list(path)?);
+        assets.extend(IconPackAssets.list(path)?);
         Ok(assets)
     }
 }
@@ -55,6 +60,11 @@ mod tests {
         assert!(assets.load(CLOUD_ICON_PATH)?.is_some());
         assert!(assets.load(FluxIcon::FilePlay.asset_path())?.is_some());
         assert!(assets.load("icons/window-close.svg")?.is_some());
+        let lucide = fluxdown_ui_icon_pack::builtin_pack("lucide").expect("builtin lucide");
+        let (_, icon) = lucide
+            .matched_icon("a.mp4", fluxdown_ui_icon_pack::FileKind::Video)
+            .expect("video icon");
+        assert!(assets.load(&icon.svg.path)?.is_some());
         Ok(())
     }
 }

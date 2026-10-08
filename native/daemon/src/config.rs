@@ -1,7 +1,7 @@
 //! daemon 进程环境配置与 loopback 绑定约束。
 
 use std::collections::{BTreeMap, HashMap};
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 
 use fluxdown_protocol::{
@@ -63,6 +63,24 @@ impl DaemonConfig {
                 .filter(|value| !value.is_empty()),
             demo_url: demo_url_from_env(),
         })
+    }
+
+    /// 嵌入式（进程内）daemon 配置：不读环境，数据目录由嵌入方给出。
+    ///
+    /// 绑定 `127.0.0.1:0`（系统分配的临时 loopback 端口，真实地址经
+    /// [`crate::runtime::DaemonReady`] 报告）；无演示模式，无外部数据库。
+    #[must_use]
+    pub fn embedded(data_dir: PathBuf, save_dir_seed: Option<String>) -> Self {
+        Self {
+            bind_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+            data_dir_override: Some(data_dir),
+            database_url: None,
+            token_file_override: None,
+            save_dir_seed: save_dir_seed
+                .map(|value| value.trim().to_owned())
+                .filter(|value| !value.is_empty()),
+            demo_url: None,
+        }
     }
 }
 
@@ -180,6 +198,10 @@ pub fn bt_config_from_map(
         .map(|value| value == "true")
         .unwrap_or(true);
     fluxdown_engine::bt_downloader::BtConfig {
+        enabled: cfg
+            .get("bt_enabled")
+            .map(|value| value == "true")
+            .unwrap_or(true),
         enable_dht: cfg
             .get("bt_enable_dht")
             .map(|value| value == "true")
@@ -257,6 +279,23 @@ mod tests {
         let public = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 17801);
         assert!(loopback.ip().is_loopback());
         assert!(!public.ip().is_loopback());
+    }
+
+    #[test]
+    fn embedded_config_uses_an_ephemeral_loopback_port_and_no_environment() {
+        let dir = std::path::PathBuf::from("data");
+        let config = super::DaemonConfig::embedded(dir.clone(), Some("  /downloads ".to_owned()));
+        assert!(config.bind_addr.ip().is_loopback());
+        assert_eq!(config.bind_addr.port(), 0);
+        assert_eq!(config.data_dir_override, Some(dir));
+        assert_eq!(config.save_dir_seed.as_deref(), Some("/downloads"));
+        assert!(config.database_url.is_none());
+        assert!(config.token_file_override.is_none());
+        assert!(config.demo_url.is_none());
+
+        let blank =
+            super::DaemonConfig::embedded(std::path::PathBuf::from("data"), Some(" ".into()));
+        assert!(blank.save_dir_seed.is_none());
     }
 
     #[test]
@@ -367,6 +406,18 @@ mod tests {
         assert!(!public.contains_key("site_auth_credentials"));
         assert!(!public.contains_key("daemon_config_revision"));
         assert!(!public.contains_key("daemon_migration_link_acked"));
+    }
+
+    #[test]
+    fn bt_config_from_map_parses_bt_enabled() {
+        let mut map = std::collections::HashMap::new();
+        assert!(super::bt_config_from_map(&map).enabled, "defaults to true");
+
+        map.insert("bt_enabled".to_string(), "false".to_string());
+        assert!(!super::bt_config_from_map(&map).enabled, "explicit false");
+
+        map.insert("bt_enabled".to_string(), "true".to_string());
+        assert!(super::bt_config_from_map(&map).enabled, "explicit true");
     }
 }
 

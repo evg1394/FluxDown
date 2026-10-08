@@ -362,7 +362,7 @@ async fn run_auto(tag: &str, origin: &TestServer, proxy: &TestServer) -> RunOutc
         spec: RequestSpec::empty_get(),
         audio_url: None,
         use_server_time: false,
-        allow_overwrite: false,
+        overwrite: fluxdown_engine::file_exists::OverwritePolicy::Never,
         ffmpeg_path: None,
         cdn: fluxdown_engine::cdn::CdnTaskInput::default(),
     };

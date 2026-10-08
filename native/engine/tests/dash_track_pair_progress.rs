@@ -209,7 +209,7 @@ async fn track_pair_reports_midway_progress_with_real_total() {
         audio_url: Some(format!("{base}/audio")),
         auto_max_connections: 0,
         use_server_time: false,
-        allow_overwrite: false,
+        overwrite: fluxdown_engine::file_exists::OverwritePolicy::Never,
         ffmpeg_path: None,
         cdn: fluxdown_engine::cdn::CdnTaskInput::default(),
     };
@@ -244,6 +244,17 @@ async fn track_pair_reports_midway_progress_with_real_total() {
     assert!(
         midway.iter().all(|(_, _, total)| *total == expected_total),
         "midway total_bytes must be {expected_total}: {midway:?}"
+    );
+
+    // 3. 进入合并阶段前必须上报 status=5（准备/合并中）。
+    let preparing: Vec<(i32, i64, i64)> = summary
+        .iter()
+        .copied()
+        .filter(|(st, _, _)| *st == 5)
+        .collect();
+    assert!(
+        !preparing.is_empty(),
+        "expected status=5 (preparing/muxing) event before completion, got only: {summary:?}"
     );
 
     // 产物字节完整（mux 失败是非致命 warning：无 ffmpeg 时视频/音频各自成文件）。

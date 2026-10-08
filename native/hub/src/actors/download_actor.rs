@@ -59,6 +59,7 @@ fn bt_config_from_map(cfg: &HashMap<String, String>) -> BtConfig {
         .map(|v| v == "true")
         .unwrap_or(true);
     BtConfig {
+        enabled: cfg.get("bt_enabled").map(|v| v == "true").unwrap_or(true),
         enable_dht: cfg
             .get("bt_enable_dht")
             .map(|v| v == "true")
@@ -554,6 +555,7 @@ pub async fn run(
     // 启动时自动刷新：订阅启用且缓存超过 24 小时未更新。
     {
         let cfg = engine.db.get_all_config().await.unwrap_or_default();
+        let bt_enabled = cfg.get("bt_enabled").map(|v| v == "true").unwrap_or(true);
         let sub_enabled = cfg
             .get("bt_tracker_sub_enabled")
             .map(|v| v == "true")
@@ -563,7 +565,8 @@ pub async fn run(
             .and_then(|v| v.parse::<i64>().ok())
             .unwrap_or(0);
         let now = chrono::Utc::now().timestamp();
-        if sub_enabled
+        if bt_enabled
+            && sub_enabled
             && now.saturating_sub(updated_at)
                 > fluxdown_engine::tracker_subscription::REFRESH_INTERVAL_SECS
         {
@@ -1000,7 +1003,8 @@ async fn apply_config_key(
         }
         // BT session-level config keys — update in-memory BtConfig and invalidate
         // the current session so the next BT download picks up changes.
-        "bt_enable_dht"
+        "bt_enabled"
+        | "bt_enable_dht"
         | "bt_enable_upnp"
         | "bt_port_start"
         | "bt_port_end"

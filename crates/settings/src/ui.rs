@@ -4,8 +4,8 @@
 //! - 分组卡片 = surface + hairline 描边 + `radius.lg`，行间 hairline 分隔，不加阴影；
 //! - 组标题 caption MEDIUM + 三级文字色；行标题 `typography.sm`，说明 `typography.xs` 二级文字色；
 //! - 右侧控件一律统一档 [`fluxdown_ui_theme::CONTROL_HEIGHT`]（28）：按钮 / 输入走 `ControlExt::control`，下拉为
-//!   outline + caret，数字输入同高；横排行最小行高 [`ROW_MIN_HEIGHT`]；
-//!   宽度只用 [`INPUT_WIDTH`] / [`INPUT_WIDE_WIDTH`] / [`NUMBER_WIDTH`] / [`DROPDOWN_MIN_WIDTH`] 四档（数字旁的单位下拉用
+//!   outline + caret，数字输入同高；横排行最小行高 = `density.control` + [`ROW_MIN_PADDING`]；
+//!   宽度只用 [`INPUT_WIDTH`] / [`INPUT_WIDE_WIDTH`] / [`NUMBER_WIDTH`] / [`DROPDOWN_MIN_WIDTH`] 四档（均为 100% 基准值，经 `text_extent` 随字号缩放；数字旁的单位下拉用
 //!   [`UNIT_DROPDOWN_WIDTH`]）；开关保持 `Switch`。数字带物理量时必须显示单位（[`Control::unit`] 固定单位，
 //!   或数字 + 单位下拉）。
 //! - 列表行内操作（上移 / 下移 / 测试 / 删除…）同高：[`row_button`] / [`row_icon_button`] 只额外禁止被长文本挤压。
@@ -41,8 +41,8 @@ pub(crate) const NUMBER_WIDTH: f32 = 132.;
 pub(crate) const DROPDOWN_MIN_WIDTH: f32 = 160.;
 /// 数字输入旁单位下拉（KB/s、MB/s…）的固定宽度。
 pub(crate) const UNIT_DROPDOWN_WIDTH: f32 = 88.;
-/// 横排设置行的最小行高：28 高控件 + 上下各 10px。
-pub(crate) const ROW_MIN_HEIGHT: f32 = 48.;
+/// 横排设置行最小行高 = 控件高（`density.control`）+ 上下各 10px 的留白。
+pub(crate) const ROW_MIN_PADDING: f32 = 20.;
 
 /// 正文文字（`typography.sm`，正文色）。
 pub(crate) fn body_text(cx: &App) -> Div {
@@ -319,7 +319,7 @@ fn open_explain_dialog(explain: Explain, window: &mut Window, cx: &mut App) {
         let explain = explain.clone();
         dialog
             .title(dialog_title(explain.title.clone(), cx))
-            .w(px(560.))
+            .w(active_theme(cx).text_extent(560.))
             .content(move |content, _, cx| {
                 let tokens = active_theme(cx).tokens().clone();
                 let paragraphs = explain.body.split("\n\n").map(|paragraph| {
@@ -513,6 +513,11 @@ impl SettingsRow {
         let theme = active_theme(cx);
         let tokens = theme.tokens().clone();
         let extended = theme.extended().clone();
+        let row_min_height = theme.density().control + px(ROW_MIN_PADDING);
+        let title_min_width = theme.text_extent(160.);
+        let badge_size = theme.text_extent(14.);
+        let badge_text_size = theme.text_extent(10.);
+        let badge_line_height = theme.text_extent(12.);
         let disabled = self.disabled;
         let mut row = div()
             .id(ElementId::from(key.clone()))
@@ -568,13 +573,13 @@ impl SettingsRow {
                             .flex_none()
                             .items_center()
                             .justify_center()
-                            .size(px(14.))
+                            .size(badge_size)
                             .rounded_full()
                             .border_1()
                             .border_color(extended.colors.text_tertiary)
                             .text_color(extended.colors.text_tertiary)
-                            .text_size(px(10.))
-                            .line_height(px(12.))
+                            .text_size(badge_text_size)
+                            .line_height(badge_line_height)
                             .font_weight(FontWeight::SEMIBOLD)
                             .cursor_pointer()
                             .hover(|style| {
@@ -604,14 +609,14 @@ impl SettingsRow {
                     .children(control.map(|control| div().w_full().child(control))),
             );
         } else {
-            row = row.flex().items_center().min_h(px(ROW_MIN_HEIGHT)).child(
+            row = row.flex().items_center().min_h(row_min_height).child(
                 div()
                     .w_full()
                     .flex()
                     .items_center()
                     .gap(tokens.spacing.lg)
                     // 标题列保底 160px；控件列可收缩，避免宽控件把描述挤成一列。
-                    .child(div().flex_1().min_w(px(160.)).child(label))
+                    .child(div().flex_1().min_w(title_min_width).child(label))
                     .children(control.map(|control| div().min_w_0().child(control))),
             );
         }
@@ -714,7 +719,7 @@ pub(crate) fn dropdown_button(
             if full_width {
                 this.w_full()
             } else {
-                this.min_w(px(DROPDOWN_MIN_WIDTH))
+                this.min_w(active_theme(cx).text_extent(DROPDOWN_MIN_WIDTH))
             }
         })
         .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, _, _| {
@@ -794,7 +799,7 @@ fn render_input(
             if vertical {
                 this.w_full()
             } else {
-                this.w(px(INPUT_WIDTH))
+                this.w(active_theme(cx).text_extent(INPUT_WIDTH))
             }
         })
         .into_any_element()
@@ -957,7 +962,7 @@ pub(crate) fn render_number(
             if vertical {
                 this.w_full()
             } else {
-                this.w(px(NUMBER_WIDTH))
+                this.w(active_theme(cx).text_extent(NUMBER_WIDTH))
             }
         })
         .into_any_element()
@@ -1202,7 +1207,9 @@ impl SettingsTab {
         let gap = spacing.lg;
         // 列数由宿主测得的内容宽度决定：不能用 container_query（它把高度钉死成
         // 父级高度，内容无法撑开，滚动容器就永远没有可滚区）。
-        if sections.len() < 2 || width < TWO_COLUMN_MIN_WIDTH {
+        if sections.len() < 2
+            || width < f32::from(active_theme(cx).text_extent(TWO_COLUMN_MIN_WIDTH))
+        {
             let mut column = v_flex().w_full().gap(gap);
             for (index, section) in sections.iter().enumerate() {
                 column = column.child(section.render(key, index, window, cx));

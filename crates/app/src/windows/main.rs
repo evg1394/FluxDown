@@ -2,12 +2,12 @@
 
 use std::{rc::Rc, sync::Arc};
 
+use fluxdown_ui_account::AccountRailButton;
 use fluxdown_ui_components::FluxIcon;
 use fluxdown_ui_downloads::{DownloadHostActions, DownloadView};
 use fluxdown_ui_rss::RssView;
 use fluxdown_ui_settings::WebhookView;
 use fluxdown_ui_shell::{ShellAction, ShellRoute, ShellView, main_window_options};
-use fluxdown_ui_theme::active_theme;
 use gpui::{App, AppContext as _, Window, WindowHandle, px, size};
 use gpui_component::{Icon, Root};
 
@@ -94,22 +94,18 @@ pub fn open(cx: &mut App) -> Option<WindowHandle<Root>> {
                     )
                     .optional(optional),
                 ),
-                ActivityEntry::Theme => actions.push(
-                    ShellAction::with_dynamic_icon(
-                        button_id,
-                        "activity-theme-tooltip",
-                        entry.label_key(),
-                        |cx| {
-                            if active_theme(cx).mode().is_dark() {
-                                Icon::new(FluxIcon::Sun)
-                            } else {
-                                Icon::new(FluxIcon::Moon)
-                            }
-                        },
-                        activity::toggle_theme,
-                    )
-                    .optional(optional),
-                ),
+                ActivityEntry::Account => {
+                    let host = Desktop::global(cx).account_host.clone();
+                    let button = cx.new(|cx| {
+                        AccountRailButton::new(
+                            host,
+                            ShellView::ACTION_BUTTON_SIZE,
+                            |_, cx| activity::open_account(cx),
+                            cx,
+                        )
+                    });
+                    actions.push(ShellAction::view(button_id, button.into()).optional(optional));
+                }
                 ActivityEntry::Settings => actions.push(
                     ShellAction::new(
                         button_id,
@@ -148,6 +144,9 @@ pub fn open(cx: &mut App) -> Option<WindowHandle<Root>> {
                     crate::windows::queue_manager::open(cx);
                 })),
                 open_add_device: Some(Rc::new(crate::account_host::open_add_device_dialog)),
+                open_file_conflicts: Some(Rc::new(|window, cx| {
+                    crate::windows::file_conflict::open_from_window(window, cx);
+                })),
                 open_category_editor: Some(Rc::new(move |id, window, cx| {
                     let translator = translator_for_categories.read(cx).clone();
                     fluxdown_ui_settings::open_category_editor(
@@ -181,6 +180,7 @@ pub fn open(cx: &mut App) -> Option<WindowHandle<Root>> {
         // 启动前就已存在的入站配对请求、窗口尚未就绪时跳过的插件熔断提示：窗口就绪后补弹。
         cx.defer(crate::account_host::replay_pending);
         cx.defer(crate::plugin_notices::replay_pending);
+        cx.defer(crate::update_notices::replay_pending);
     }
     handle
 }

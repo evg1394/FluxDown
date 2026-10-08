@@ -4,6 +4,7 @@
 //! 状态机归 agent：关闭全部 UI（托盘驻留）后仍需按时关机。UI 只经 `agent.power.*`
 //! 发请求、经 `AgentEvent::PowerChanged` 渲染。
 
+#[cfg(any(windows, target_os = "macos", target_os = "linux"))]
 use std::process::Command;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
@@ -154,6 +155,7 @@ fn work_counts(stats: &DaemonRuntimeStatsDto) -> (u32, u32) {
 }
 
 /// 平台关机命令；`FLUXDOWN_SHUTDOWN_DRY_RUN` 设置时只记日志，便于 QA 验证不真的关机。
+#[cfg(any(windows, target_os = "macos", target_os = "linux"))]
 fn execute_shutdown() {
     if std::env::var_os("FLUXDOWN_SHUTDOWN_DRY_RUN").is_some() {
         tracing::warn!("shutdown dry-run: would power off now");
@@ -173,7 +175,7 @@ fn execute_shutdown() {
     let result = Command::new("osascript")
         .args(["-e", "tell app \"System Events\" to shut down"])
         .status();
-    #[cfg(all(unix, not(target_os = "macos")))]
+    #[cfg(target_os = "linux")]
     let result = {
         match Command::new("systemctl").arg("poweroff").status() {
             Ok(status) if status.success() => return,
@@ -189,6 +191,12 @@ fn execute_shutdown() {
         Ok(status) => tracing::error!(%status, "power-off request failed"),
         Err(error) => tracing::error!(%error, "could not run power-off command"),
     }
+}
+
+/// Android / iOS 的应用不能关机：宿主不应暴露「完成后关机」，误调用时只记录。
+#[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
+fn execute_shutdown() {
+    tracing::warn!("powering off after downloads is not supported on this platform");
 }
 
 #[cfg(test)]

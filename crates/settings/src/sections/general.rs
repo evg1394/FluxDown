@@ -14,8 +14,17 @@ pub(crate) fn page(
     activity_bar: &[ActivityBarToggle],
     cx: &mut App,
 ) -> SettingsPage {
-    // 首次进入拉取系统集成状态（自启 / 文件关联 / URL scheme）。
-    if ctx.store.read(cx).integration().is_none() && !ctx.store.read(cx).is_busy("integration") {
+    // 首次进入拉取系统集成状态（自启 / 文件关联 / URL scheme）。断线只读时不发；失败后
+    // 本轮不再重发，重连 / 新快照后重新放行。
+    let store = ctx.store.read(cx);
+    if store.integration().is_none()
+        && !store.is_read_only()
+        && !store.is_busy("integration")
+        && !store.load_attempted("integration")
+        && ctx
+            .store
+            .update(cx, |store, _| store.begin_load("integration"))
+    {
         ctx.store.update(cx, |store, cx| store.load_integration(cx));
     }
 

@@ -9,6 +9,7 @@ import { ActivityRail } from './ActivityRail'
 import { BottomTabBar } from './BottomTabBar'
 import { ConnectionBanner, ConnectionDot } from './ConnectionStatus'
 import { TitleBar, TitleBarSlotProvider } from './TitleBar'
+import { UpdateBanner, UpdateRestartOverlay } from './UpdateStatus'
 
 function useDefaultTitle(): string {
   const t = useT()
@@ -26,6 +27,7 @@ export function AppShell() {
       <div className="flex h-dvh w-full flex-col overflow-hidden bg-background text-foreground">
         <TitleBar defaultTitle={defaultTitle} trailing={<ConnectionDot />} />
         <ConnectionBanner />
+        <UpdateBanner />
         <div className="flex min-h-0 flex-1">
           <ActivityRail />
           <main className="relative flex min-w-0 flex-1 flex-col overflow-hidden bg-surface">
@@ -34,6 +36,7 @@ export function AppShell() {
         </div>
         <BottomTabBar />
         <AccountGuards />
+        <UpdateRestartOverlay />
       </div>
     </TitleBarSlotProvider>
   )

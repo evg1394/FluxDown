@@ -13,6 +13,14 @@
 4. 提交 PR 前确保相关 crate 的测试通过（例如 `cargo test -p fluxdown_engine`）。
    Make sure the tests for the affected crates pass before opening a PR (e.g. `cargo test -p fluxdown_engine`).
 
+## 自动审查与合并 / Automated Review & Merge
+
+PR 由维护机器人 [@ZerxLabBot](https://github.com/ZerxLabBot) 自动审查：新开或从草稿转为可审查时审查一次；之后推送新提交**不会**自动重审，修改完成后在 PR 下评论 `@ZerxLabBot review` 即可请求复审（同一 PR 15 分钟内一次、每天最多 5 次）。
+PRs are reviewed automatically by [@ZerxLabBot](https://github.com/ZerxLabBot): once when opened or marked ready for review. New pushes do **not** trigger another review — comment `@ZerxLabBot review` on the PR when you are ready (at most once per 15 minutes and 5 times per day per PR).
+
+不涉及 UI、改动规模适中且 CI 全绿的 PR，在审查与独立复核都通过后会进入短暂的等待期，然后自动合并；涉及界面、构建 / 发布流程、依赖或 CI 覆盖不到的平台代码时，交由维护者人工审查。勾选 PR 侧栏的 “Allow edits by maintainers” 后，与 `main` 的合并冲突可由机器人代为解决。
+Non-UI PRs of moderate size with green CI are merged automatically after the review and an independent second check pass, following a short waiting period. Changes touching the UI, build/release tooling, dependencies, or platform code that CI cannot build go to a maintainer. Enabling “Allow edits by maintainers” lets the bot resolve merge conflicts with `main` for you.
+
 ## GPUI 桌面开发 / GPUI Desktop Development
 
 ```bash

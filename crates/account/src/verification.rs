@@ -3,7 +3,8 @@
 //! 登录（设备验证 / 邮箱验证码）与注册验证共用；UI 每秒 `tick` 一次并在
 //! [`CodeChallenge::is_idle`] 时停止计时器。
 
-use std::time::Duration;
+use std::collections::HashMap;
+use std::time::{Duration, Instant};
 
 use gpui::{Context, Window};
 
@@ -54,6 +55,46 @@ impl CodeChallenge {
     #[must_use]
     pub(crate) fn is_idle(&self) -> bool {
         self.ttl_remaining == 0 && self.resend_remaining == 0
+    }
+
+    /// 发码 `elapsed_secs` 秒后的状态：用于对话框关掉重开时恢复倒计时。
+    #[must_use]
+    pub(crate) fn after(ttl_seconds: u64, elapsed_secs: u64) -> Self {
+        let fresh = Self::new(ttl_seconds, false);
+        Self {
+            ttl_remaining: fresh.ttl_remaining.saturating_sub(elapsed_secs),
+            resend_remaining: fresh.resend_remaining.saturating_sub(elapsed_secs),
+            will_replace_devices: false,
+        }
+    }
+}
+
+/// 跨对话框实例记住已发出的验证码（按流程 + 账号区分）：关掉再打开同一流程时恢复
+/// 倒计时而不是重新发码，避免撞上云端 60s 限频、让用户误以为没发出去。
+#[derive(Default)]
+pub(crate) struct SentCodes {
+    entries: HashMap<String, (Instant, u64)>,
+}
+
+impl SentCodes {
+    pub(crate) fn record(&mut self, key: String, ttl_seconds: u64) {
+        let now = Instant::now();
+        self.entries.retain(|_, (at, ttl)| {
+            !CodeChallenge::after(*ttl, now.duration_since(*at).as_secs()).is_idle()
+        });
+        self.entries.insert(key, (now, ttl_seconds));
+    }
+
+    /// 仍在有效期或冷却期内的验证码；两者都走完返回 `None`。
+    #[must_use]
+    pub(crate) fn restore(&self, key: &str) -> Option<CodeChallenge> {
+        let (at, ttl) = self.entries.get(key)?;
+        Some(CodeChallenge::after(*ttl, at.elapsed().as_secs())).filter(|c| !c.is_idle())
+    }
+
+    /// 验证码已被消费（流程成功）：重开对话框应重新发码而不是恢复旧倒计时。
+    pub(crate) fn forget(&mut self, key: &str) {
+        self.entries.remove(key);
     }
 }
 
@@ -130,5 +171,27 @@ mod tests {
         assert_eq!(challenge.ttl_remaining, 300);
         assert_eq!(challenge.resend_remaining, RESEND_COOLDOWN_SECS);
         assert!(challenge.will_replace_devices);
+    }
+
+    #[test]
+    fn restored_challenge_subtracts_elapsed_time_from_both_timers() {
+        let challenge = CodeChallenge::after(600, 45);
+        assert_eq!(challenge.ttl_remaining, 555);
+        assert_eq!(challenge.resend_remaining, RESEND_COOLDOWN_SECS - 45);
+        let cooled = CodeChallenge::after(600, 90);
+        assert!(cooled.can_resend());
+        assert!(!cooled.is_expired());
+        assert!(CodeChallenge::after(600, 600).is_idle());
+    }
+
+    #[test]
+    fn sent_codes_restore_only_the_recorded_flow() {
+        let mut codes = SentCodes::default();
+        codes.record("email-old:u1".to_owned(), 600);
+        let restored = codes.restore("email-old:u1").expect("recorded code");
+        assert!(!restored.can_resend());
+        assert!(codes.restore("email-old:u2").is_none());
+        codes.record("expired".to_owned(), 0);
+        assert!(codes.restore("expired").is_none());
     }
 }

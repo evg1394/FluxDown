@@ -1,0 +1,10 @@
+{
+  "application": ["exe", "msi", "appimage"],
+  "mobile": ["apk", "ipa"],
+  "diskImage": ["iso", "dmg"],
+  "archive": ["zip", "rar", "7z", "tar", "gz"],
+  "video": ["mp4", "mkv", "webm", "avi"],
+  "audio": ["mp3", "flac", "wav", "m4a"],
+  "document": ["pdf", "doc", "docx", "txt"],
+  "image": ["png", "jpg", "jpeg", "gif", "webp"]
+}

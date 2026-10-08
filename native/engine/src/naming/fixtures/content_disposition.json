@@ -1,0 +1,159 @@
+{
+  "$comment": "Content-Disposition 文件名解析的跨实现用例：Rust naming::disposition 与扩展 fluxDown/utils/filename.ts 共用。headerHex = 响应头原始字节（十六进制），header = 纯文本头；host = 下载 URL 主机（TLD 先验）；pageCharset = 发起页 document.characterSet；expected = 解码后的文件名（未经 sanitize），null = 无文件名。",
+  "cases": [
+    {
+      "name": "raw UTF-8 bytes in quoted filename",
+      "headerHex": "6174746163686d656e743b2066696c656e616d653d22e4bda0e5a5bd2e7a697022",
+      "expected": "你好.zip"
+    },
+    {
+      "name": "filename* wrapped in quotes (Tencent COS)",
+      "header": "attachment; filename*=\"UTF-8''wechat_devtools_2.02_x64.exe\"",
+      "expected": "wechat_devtools_2.02_x64.exe"
+    },
+    {
+      "name": "filename* wins over filename",
+      "header": "attachment; filename=\"fallback.zip\"; filename*=UTF-8''%E4%B8%AD%E6%96%87.zip",
+      "expected": "中文.zip"
+    },
+    {
+      "name": "filename* declared GBK",
+      "header": "attachment; filename*=GBK''%D2%DA%CD%BC.rar",
+      "expected": "亿图.rar"
+    },
+    {
+      "name": "filename* declared ISO-8859-1 (WHATWG windows-1252)",
+      "header": "attachment; filename*=iso-8859-1''caf%E9.txt",
+      "expected": "café.txt"
+    },
+    {
+      "name": "filename* unknown charset falls back to filename",
+      "header": "attachment; filename*=x-unknown''abc.zip; filename=\"fallback.zip\"",
+      "expected": "fallback.zip"
+    },
+    {
+      "name": "raw GBK bytes (Discuz/vBulletin, cnprint.org #625)",
+      "headerHex": "6174746163686d656e743b2066696c656e616d653d22d2dacdbcc4a3c7d0bbfab2e5bcfe56312e332e342e72617222",
+      "expected": "亿图模切机插件V1.3.4.rar"
+    },
+    {
+      "name": "raw Big5 bytes without hints (#660)",
+      "headerHex": "6174746163686d656e743b2066696c656e616d653d22b971b8a3b943c0b8a7f0b2a42e70646622",
+      "expected": "電腦遊戲攻略.pdf"
+    },
+    {
+      "name": "raw Big5 bytes on .tw host",
+      "headerHex": "6174746163686d656e743b2066696c656e616d653d22b77cc4b3b04fbffd323032342e646f637822",
+      "host": "apk.tw",
+      "expected": "會議記錄2024.docx"
+    },
+    {
+      "name": "raw Big5 bytes containing 0x5C trail bytes",
+      "headerHex": "6174746163686d656e743b2066696c656e616d653d22b35ca55cbb5c2e74787422",
+      "expected": "許功蓋.txt"
+    },
+    {
+      "name": "raw Shift_JIS bytes",
+      "headerHex": "6174746163686d656e743b2066696c656e616d653d2289ef8b6382cc8b638e96985e2e786c737822",
+      "expected": "会議の議事録.xlsx"
+    },
+    {
+      "name": "raw Shift_JIS bytes containing 0x5C trail bytes",
+      "headerHex": "6174746163686d656e743b2066696c656e616d653d22955c8c768e5a2e786c737822",
+      "expected": "表計算.xlsx"
+    },
+    {
+      "name": "raw EUC-KR bytes on .kr host",
+      "headerHex": "6174746163686d656e743b2066696c656e616d653d22bab8b0edbcad2e68777022",
+      "host": "www.example.co.kr",
+      "expected": "보고서.hwp"
+    },
+    {
+      "name": "raw EUC-KR bytes with page charset hint",
+      "headerHex": "6174746163686d656e743b2066696c656e616d653d22bab8b0edbcad2e68777022",
+      "pageCharset": "EUC-KR",
+      "expected": "보고서.hwp"
+    },
+    {
+      "name": "raw GBK bytes with Big5 page charset that cannot decode them",
+      "headerHex": "6174746163686d656e743b2066696c656e616d653d22c8edbcfeb0b2d7b0bdccb3cc2e7a697022",
+      "pageCharset": "Big5",
+      "expected": "软件安装教程.zip"
+    },
+    {
+      "name": "raw Latin-1 bytes (no CJK candidate decodes)",
+      "headerHex": "6174746163686d656e743b2066696c656e616d653d22636166e92e74787422",
+      "expected": "café.txt"
+    },
+    {
+      "name": "raw Latin-1 bytes that also decode as GBK",
+      "headerHex": "6174746163686d656e743b2066696c656e616d653d224772f6df652e70646622",
+      "expected": "Größe.pdf"
+    },
+    {
+      "name": "percent-encoded UTF-8 in filename= (OBS/S3)",
+      "header": "attachment; filename=\"%E6%B0%B8%E7%94%9F.mp4\"",
+      "expected": "永生.mp4"
+    },
+    {
+      "name": "percent-encoded GBK in unquoted filename=",
+      "header": "attachment; filename=%CE%C4%BC%FE.txt",
+      "expected": "文件.txt"
+    },
+    {
+      "name": "literal percent that is not an escape",
+      "header": "attachment; filename=\"50%off.pdf\"",
+      "expected": "50%off.pdf"
+    },
+    {
+      "name": "unquoted filename keeps spaces",
+      "header": "attachment; filename=aaa bbb.zip",
+      "expected": "aaa bbb.zip"
+    },
+    {
+      "name": "semicolon inside quoted filename",
+      "header": "attachment; filename=\"a;b.zip\"",
+      "expected": "a;b.zip"
+    },
+    {
+      "name": "quoted-pair escapes",
+      "header": "attachment; filename=\"report \\\"final\\\".pdf\"",
+      "expected": "report \"final\".pdf"
+    },
+    {
+      "name": "case-insensitive parameter name",
+      "header": "attachment; FileName=\"Report.PDF\"",
+      "expected": "Report.PDF"
+    },
+    {
+      "name": "RFC 2047 base64 encoded-word",
+      "header": "attachment; filename=\"=?UTF-8?B?5L2g5aW9LnppcA==?=\"",
+      "expected": "你好.zip"
+    },
+    {
+      "name": "RFC 2047 Q encoded-word in GBK",
+      "header": "attachment; filename=\"=?GBK?Q?=CE=C4=BC=FE.txt?=\"",
+      "expected": "文件.txt"
+    },
+    {
+      "name": "RFC 2047 adjacent encoded-words are joined",
+      "header": "attachment; filename=\"=?UTF-8?B?5a2j5bqm?= =?UTF-8?B?5oql5ZGKLnBkZg==?=\"",
+      "expected": "季度报告.pdf"
+    },
+    {
+      "name": "RFC 2231 continuations",
+      "header": "attachment; filename*0*=UTF-8''%E4%B8%AD; filename*1*=%E6%96%87; filename*2=\".zip\"",
+      "expected": "中文.zip"
+    },
+    {
+      "name": "empty filename yields nothing",
+      "header": "attachment; filename=\"\"",
+      "expected": null
+    },
+    {
+      "name": "inline without filename",
+      "header": "inline",
+      "expected": null
+    }
+  ]
+}

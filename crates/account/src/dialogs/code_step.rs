@@ -1,6 +1,6 @@
 //! 验证码步骤的共用展示：设备替换提示、有效期倒计时与「重新发送」按钮。
 
-use fluxdown_ui_components::{ControlExt as _, field_hint};
+use fluxdown_ui_components::{BusyExt as _, ControlExt as _, field_hint};
 use fluxdown_ui_i18n::Translator;
 use fluxdown_ui_theme::active_theme;
 use gpui::{
@@ -85,7 +85,7 @@ pub(crate) fn render<V: 'static>(
                         .ghost()
                         .label(resend_label(translator, challenge))
                         .control(cx)
-                        .loading(resending)
+                        .busy(resending)
                         .disabled(!can_resend)
                         .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                             on_resend(this, window, cx);

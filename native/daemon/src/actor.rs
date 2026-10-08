@@ -6,7 +6,7 @@ use std::time::Duration;
 use base64::Engine as _;
 use fluxdown_engine::Engine;
 use fluxdown_engine::download_manager::{
-    CreateGroupSpec, FileExistsBehavior, NewTaskSpec, TaskDone,
+    BT_DISABLED_MESSAGE, CreateGroupSpec, FileExistsBehavior, NewTaskSpec, TaskDone,
 };
 #[cfg(feature = "plugins")]
 use fluxdown_engine::download_manager::{ResolveOutcome, ResolvePreviewOutcome};
@@ -716,6 +716,14 @@ async fn execute_operation(
             if torrent_file_bytes.is_empty() {
                 torrent_file_bytes = decode_torrent_b64(request.torrent_b64.as_deref())?;
             }
+            // BT 被禁用：在落库前回报明确原因，而不是让 create_task 的无原因 `None`
+            // 变成误导性的「failed to persist task」。
+            if engine
+                .manager
+                .rejects_new_bt_task(&request.url, &torrent_file_bytes)
+            {
+                return Err(ActorError::InvalidArgument(BT_DISABLED_MESSAGE.to_owned()));
+            }
             let mut save_dir = request.save_dir;
             if save_dir.trim().is_empty() {
                 save_dir = engine
@@ -764,7 +772,19 @@ async fn execute_operation(
             return Ok(ActorResult::Created(task_id));
         }
         ActorOperation::PauseTask { task_id } => engine.manager.pause_task(&task_id).await,
-        ActorOperation::ResumeTask { task_id } => engine.manager.resume_task(&task_id).await,
+        ActorOperation::ResumeTask { task_id } => {
+            // BT 被禁用时恢复 BT 任务会被引擎静默拒绝（任务保持原状）；
+            // 在此显式回报原因，客户端才不会收到无信息的 `ok`。
+            let rejected = engine
+                .manager
+                .bt_disabled_resume_rejections(std::slice::from_ref(&task_id))
+                .await
+                .map_err(|error| ActorError::Operation(format!("{error:#}")))?;
+            if !rejected.is_empty() {
+                return Err(ActorError::InvalidArgument(BT_DISABLED_MESSAGE.to_owned()));
+            }
+            engine.manager.resume_task(&task_id).await;
+        }
         ActorOperation::RenameTask { task_id, file_name } => engine
             .manager
             .rename_task(&task_id, &file_name)
@@ -792,6 +812,16 @@ async fn execute_operation(
         }
         ActorOperation::ResumeTasks { task_ids } => {
             let ids = existing_task_ids(&engine.db, task_ids).await?;
+            // 批量语义：BT 禁用时 BT 任务被跳过、其余照常恢复；但整批都被拒
+            // 时必须回报原因，否则用户只看到「成功」而什么都没发生。
+            let rejected = engine
+                .manager
+                .bt_disabled_resume_rejections(&ids)
+                .await
+                .map_err(|error| ActorError::Operation(format!("{error:#}")))?;
+            if !ids.is_empty() && rejected.len() == ids.len() {
+                return Err(ActorError::InvalidArgument(BT_DISABLED_MESSAGE.to_owned()));
+            }
             engine.manager.batch_resume(&ids).await;
         }
         ActorOperation::DeleteTasks {
@@ -1704,7 +1734,8 @@ async fn apply_live_config<'a>(
         if keys.iter().any(|key| {
             matches!(
                 *key,
-                "bt_enable_dht"
+                "bt_enabled"
+                    | "bt_enable_dht"
                     | "bt_enable_upnp"
                     | "bt_port_start"
                     | "bt_port_end"
@@ -1817,7 +1848,10 @@ mod tests {
 
     use fluxdown_engine::site_auth::{SITE_AUTH_CONFIG_KEY, SiteCredential, serialize_store};
 
-    use super::{ActorError, delete_site_auth, resolve_queue_id, save_site_auth};
+    use super::{
+        ActorError, ActorOperation, BT_DISABLED_MESSAGE, delete_site_auth, execute_operation,
+        resolve_queue_id, save_site_auth,
+    };
 
     async fn open_db() -> (fluxdown_engine::db::Db, std::path::PathBuf) {
         let dir = std::env::temp_dir().join(format!(
@@ -2033,6 +2067,127 @@ mod tests {
         drop(db);
         if let Err(error) = tokio::fs::remove_dir_all(dir).await {
             eprintln!("actor batch ids test directory removal failed: {error}");
+        }
+    }
+
+    /// BT 被禁用时：新建 BT 任务与（整批）恢复 BT 任务必须带着明确原因失败，
+    /// 而不是「failed to persist task」或无信息的成功。
+    #[tokio::test]
+    async fn bt_disabled_create_and_resume_report_the_reason() {
+        let dir = std::env::temp_dir().join(format!(
+            "fluxdown_daemon_bt_disabled_{}_{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        tokio::fs::create_dir_all(&dir)
+            .await
+            .expect("create bt disabled test dir");
+        let dir_text = dir.to_string_lossy().into_owned();
+        let mut engine = fluxdown_engine::Engine::new(
+            fluxdown_engine::EngineConfig {
+                max_concurrent: 1,
+                speed_limit_bps: 0,
+                upload_limit_bps: 0,
+                default_save_dir: dir_text.clone(),
+                app_data_dir: dir_text.clone(),
+                bt_config: fluxdown_engine::bt_downloader::BtConfig {
+                    enabled: false,
+                    ..Default::default()
+                },
+                proxy_config: fluxdown_engine::proxy_config::ProxyConfig::default(),
+                user_agent: String::new(),
+                data_dir_override: Some(dir.clone()),
+                database_url: None,
+            },
+            std::sync::Arc::new(fluxdown_engine::NoopSink),
+            std::sync::Arc::new(fluxdown_engine::NoopSelection),
+        )
+        .await
+        .expect("construct engine");
+        let events =
+            crate::event_hub::DaemonEventHub::new(fluxdown_protocol::DaemonSnapshot::default(), 32);
+        let magnet = "magnet:?xt=urn:btih:da39a3ee5e6b4b0d3255bfef95601890afd80709&dn=t";
+        let create = |url: &str, torrent: Vec<u8>| ActorOperation::CreateTask {
+            request: Box::new(
+                serde_json::from_value(serde_json::json!({ "url": url })).expect("create request"),
+            ),
+            torrent_file_bytes: torrent,
+            hint_file_size: 0,
+            unattended: false,
+        };
+        let reason = |result: Result<super::ActorResult, ActorError>| match result {
+            Err(ActorError::InvalidArgument(message)) => message,
+            Err(other) => panic!("unexpected error: {other}"),
+            Ok(_) => panic!("operation must be rejected"),
+        };
+
+        // 新建：magnet 与种子字节都带明确原因，且不落库。
+        assert_eq!(
+            reason(execute_operation(create(magnet, Vec::new()), &mut engine, &events).await),
+            BT_DISABLED_MESSAGE
+        );
+        assert_eq!(
+            reason(execute_operation(create("", vec![1, 2, 3]), &mut engine, &events).await),
+            BT_DISABLED_MESSAGE
+        );
+        assert!(
+            engine
+                .db
+                .load_all_tasks()
+                .await
+                .expect("load tasks")
+                .is_empty(),
+            "rejected BT creation must not persist a task"
+        );
+
+        // 恢复：单任务与「整批都是 BT」的批量均带原因失败，任务保持暂停。
+        engine
+            .db
+            .insert_task("bt-1", magnet, "t", &dir_text, 1, 0, "", "", "", 0)
+            .await
+            .expect("insert BT task");
+        engine
+            .db
+            .update_task_status("bt-1", 2, "")
+            .await
+            .expect("pause BT task");
+        assert_eq!(
+            reason(
+                execute_operation(
+                    ActorOperation::ResumeTask {
+                        task_id: "bt-1".to_owned()
+                    },
+                    &mut engine,
+                    &events
+                )
+                .await
+            ),
+            BT_DISABLED_MESSAGE
+        );
+        assert_eq!(
+            reason(
+                execute_operation(
+                    ActorOperation::ResumeTasks {
+                        task_ids: vec!["bt-1".to_owned()]
+                    },
+                    &mut engine,
+                    &events
+                )
+                .await
+            ),
+            BT_DISABLED_MESSAGE
+        );
+        let task = engine
+            .db
+            .load_task_by_id("bt-1")
+            .await
+            .expect("load task")
+            .expect("task exists");
+        assert_eq!(task.status, 2, "rejected resume leaves the task paused");
+
+        drop(engine);
+        if let Err(error) = tokio::fs::remove_dir_all(dir).await {
+            eprintln!("actor bt disabled test directory removal failed: {error}");
         }
     }
 

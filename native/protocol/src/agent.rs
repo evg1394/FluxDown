@@ -63,6 +63,9 @@ pub struct CloudUser {
     #[serde(default)]
     pub origin_id_changed: bool,
     pub membership_ordinal: Option<i64>,
+    /// 账号是否设置了登录密码；旧版云端不下发时为 `None`（视为未知）。
+    #[serde(default)]
+    pub has_password: Option<bool>,
 }
 
 /// 前向兼容的套餐权益集合。未知字段必须原样保留。
@@ -1093,21 +1096,149 @@ pub struct ReleaseNoteDto {
     pub body: String,
 }
 
-/// `agent.update.check` 结果。
+/// 更新流程阶段（`AgentSnapshot.update.phase`）。
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub enum UpdatePhase {
+    /// 本次运行尚未检查。
+    #[default]
+    Idle,
+    Checking,
+    /// 已是渠道最新版本。
+    UpToDate,
+    /// 有新版本；`manualReason` 为空时可一键更新，否则只能按说明手动升级。
+    Available,
+    /// 后台下载更新包，进度见 `downloadedBytes` / `assetSize`。
+    Downloading,
+    /// 更新包已下载并校验，等待安装（重启）。
+    Ready,
+    /// 正在替换程序文件；成功后服务随即重启。
+    Installing,
+    /// 最近一次检查 / 下载 / 安装失败，原因见 `failure`。
+    Failed,
+}
+
+/// 本机安装形态：决定更新资产与安装方式。
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub enum UpdateInstallKind {
+    /// Windows 安装版（Inno Setup，每用户）。
+    WindowsSetup,
+    /// Windows 便携版（目录内 `portable` 标记）。
+    WindowsPortable,
+    /// macOS `FluxDown.app`。
+    MacosApp,
+    LinuxAppImage,
+    LinuxDeb,
+    LinuxArch,
+    /// Linux 便携 tar.gz。
+    LinuxPortable,
+    /// headless 服务器的二进制包（tar.gz / zip，`fluxdown-agent` + `fluxdownd`）。
+    ServerBinary,
+    /// Docker 镜像：容器内替换文件会随重建丢失，只能拉取新镜像。
+    Docker,
+    Synology,
+    Qnap,
+    Openwrt,
+    #[default]
+    #[serde(other)]
+    Unknown,
+}
+
+/// 不能应用内一键更新的原因；客户端据此给出手动升级说明。
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub enum UpdateManualReason {
+    /// 由包管理器 / 容器镜像管理（Docker、群晖、威联通、OpenWrt），具体见 `installKind`。
+    ManagedPackage,
+    /// 程序所在目录对当前用户不可写（如放在受保护目录、只读卷）。
+    NotWritable,
+    /// 发布中缺少本平台 / 架构 / 安装形态的资产或其校验和。
+    NoAsset,
+    /// 需要管理员授权安装（deb / Arch），但没有可用的图形授权（缺 `pkexec`、无桌面会话）。
+    ElevationUnavailable,
+    /// macOS 应用在只读位置运行（App Translocation、直接从 DMG 运行），需先拖入「应用程序」。
+    ReadOnlyLocation,
+    /// 当前构建不是正式签名发行版（开发构建、ad-hoc 签名），不自动替换。
+    UnofficialBuild,
+    /// 平台不支持应用内安装。
+    Unsupported,
+    #[serde(other)]
+    Unknown,
+}
+
+/// 更新失败分类。
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub enum UpdateFailure {
+    /// 无法访问更新服务或下载源。
+    Network,
+    /// 下载内容的大小或 SHA-256 与发布校验和不符。
+    Verify,
+    /// 写入更新包失败（磁盘空间 / 权限）。
+    Storage,
+    /// 替换程序文件失败；原程序保持不变。
+    Install,
+    /// 用户取消了管理员授权。
+    ElevationCancelled,
+    /// 上次安装没有完成：重启后的版本仍是旧版本。
+    InstallIncomplete,
+    #[serde(other)]
+    Unknown,
+}
+
+/// agent 自有的更新状态（`AgentSnapshot.update`，变化经 `AgentEvent::UpdateChanged` 推送），
+/// 也是 `agent.update.*` 方法的返回值。
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(rename_all = "camelCase")]
-pub struct UpdateCheckResultDto {
-    pub channel: String,
+pub struct UpdateStatusDto {
+    pub phase: UpdatePhase,
     pub current_version: String,
+    /// 最近一次检查使用的渠道（`stable` | `frontier`）。
+    #[serde(default)]
+    pub channel: String,
+    /// 渠道最新版本；未检查时为空串。
+    #[serde(default)]
     pub latest_version: String,
+    /// `latestVersion` 严格高于 `currentVersion`。
+    #[serde(default)]
     pub has_update: bool,
+    #[serde(default)]
+    pub install_kind: UpdateInstallKind,
+    /// 为空表示可一键「更新并重启」。
+    #[serde(default)]
+    pub manual_reason: Option<UpdateManualReason>,
+    /// 选中的发布资产文件名与大小（字节）。
+    #[serde(default)]
+    pub asset_name: String,
+    #[serde(default)]
+    pub asset_size: u64,
+    #[serde(default)]
+    pub downloaded_bytes: u64,
+    /// 下载完成后立即安装（用户已点「更新并重启」，包仍在下载）。
+    #[serde(default)]
+    pub install_pending: bool,
+    /// 手动升级用的资产直链（官方分发域）；无可用资产时为空串。
     #[serde(default)]
     pub download_url: String,
     #[serde(default)]
     pub release_page_url: String,
+    /// 比当前版本新的更新说明（最新在前）。
     #[serde(default)]
     pub notes: Vec<ReleaseNoteDto>,
+    #[serde(default)]
+    pub failure: Option<UpdateFailure>,
+    /// 失败的技术细节（英文，供诊断展示），无失败时为空串。
+    #[serde(default)]
+    pub error_detail: String,
+    /// 最近一次成功检查的 Unix 毫秒时间戳；0 = 本次运行尚未检查成功。
+    #[serde(default)]
+    pub checked_at_ms: u64,
 }
 
 /// 偏好键：自定义分类列表（JSON 字符串或数组，与 Flutter `custom_categories` 同形）。

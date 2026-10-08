@@ -2,12 +2,13 @@
 
 use fluxdown_protocol::{RpcErrorData, method};
 use fluxdown_ui_components::{
-    ControlExt as _, check_row, dialog_title, field_error, field_hint, form, form_field,
+    BusyExt as _, ControlExt as _, check_row, dialog_title, field_error, field_hint, form,
+    form_field,
 };
 use fluxdown_ui_theme::active_theme;
 use gpui::{
     App, AppContext as _, Context, Entity, IntoElement, ParentElement, Render, SharedString,
-    Styled, Window, div, prelude::FluentBuilder as _, px,
+    Styled, Window, div, prelude::FluentBuilder as _,
 };
 use gpui_component::{
     Disableable as _, WindowExt as _,
@@ -115,7 +116,7 @@ pub(crate) fn open(
         let closing = view.clone();
         dialog
             .title(dialog_title(title, cx))
-            .w(px(460.))
+            .w(active_theme(cx).text_extent(460.))
             .close_button(!busy)
             .overlay_closable(!busy)
             .keyboard(!busy)
@@ -343,7 +344,7 @@ impl ProfileDialog {
                     .label(self.text("accountOriginIdEditRoll", cx))
                     .control(cx)
                     .disabled(disabled)
-                    .loading(self.operation == Operation::Suggest)
+                    .busy(self.operation == Operation::Suggest)
                     .on_click(cx.listener(|this, _, window, cx| this.suggest(window, cx))),
             )
             .child(
@@ -392,7 +393,7 @@ impl ProfileDialog {
                     .primary()
                     .label(self.text(save_label, cx))
                     .control(cx)
-                    .loading(matches!(
+                    .busy(matches!(
                         self.operation,
                         Operation::Check(_) | Operation::Save(_)
                     ))

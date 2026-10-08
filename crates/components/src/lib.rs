@@ -5,23 +5,24 @@
 
 mod icons;
 mod kit;
+mod motion;
 mod sidebar;
 
 pub use icons::{ComponentAssets, FluxIcon, category_icon};
 pub use kit::{
-    ControlExt, DIALOG_PRIMARY_KEY_CONTEXT, DialogIntent, IconControlExt, caption_number,
+    BusyExt, ControlExt, DIALOG_PRIMARY_KEY_CONTEXT, DialogIntent, IconControlExt, caption_number,
     check_row, dialog_footer, dialog_scroll_body, dialog_title, field_error, field_hint,
     field_label, form, form_field, form_gap, form_row, input_with_action, option_group, option_row,
     segmented_tabs,
 };
+pub use motion::{SlidingHighlight, StateLayer, color_transition};
 pub use sidebar::{SidebarChange, SidebarPanel, SidebarState};
 
 use fluxdown_ui_theme::active_theme;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     App, Div, ElementId, FontFeatures, FontWeight, Hsla, InteractiveElement, IntoElement,
-    ParentElement, Pixels, SharedString, StatefulInteractiveElement as _, Styled, div, px,
-    relative,
+    ParentElement, Pixels, SharedString, Styled, div, px,
 };
 pub use gpui_base::Button;
 use gpui_component::Sizable as _;
@@ -83,26 +84,26 @@ fn text_button_frame(id: impl Into<ElementId>, variant: ButtonVariant, cx: &App)
     let theme = active_theme(cx);
     let tokens = theme.tokens();
     let palette = ButtonPalette::for_variant(variant, tokens.colors, theme.extended().colors);
+    let stroke = theme.extended().stroke.thin;
 
     Button::new(id)
         .h(theme.density().control)
         .px(tokens.spacing.sm + tokens.spacing.xxs)
-        .line_height(relative(1.))
+        .line_height(tokens.typography.sm.line_height)
         .flex()
         .items_center()
         .justify_center()
         .cursor_pointer()
         .rounded(theme.components().button_radius)
-        .border(theme.extended().stroke.thin)
+        .border(stroke)
         .border_color(palette.border)
         .bg(palette.background)
         .text_color(palette.foreground)
         .text_size(tokens.typography.sm.size)
         .font_weight(tokens.typography.sm.weight)
-        .hover(move |style| style.bg(palette.hover))
-        .active(move |style| style.bg(palette.active))
         .focus_visible(move |style| style.border_color(tokens.colors.ring))
         .styles(|styles| styles.disabled(|style| style.opacity(0.5)))
+        .child(palette.state_layer(theme.components().button_radius, stroke))
 }
 
 /// 进行中：不可点击，但只淡出到 0.8，与普通禁用区分。
@@ -122,10 +123,9 @@ fn spinner(size: Pixels) -> gpui_component::spinner::Spinner {
 }
 
 /// 单选「选项片」：一组互斥预设中的一项（如 Webhook 模板预设）。未选中为次要按钮外观，
-/// 选中为浅强调底 + 强调色描边与文字；悬停色随选中态区分。
+/// 选中为浅强调底 + 强调色描边与文字；选中底随切换交叉淡入，悬停只作用于未选中项。
 ///
-/// gpui 的 `hover` 每个元素只能设置一次（debug 断言），因此选中态的悬停样式必须在
-/// 这里一次性决定，调用方不得再对返回值调用 `.hover()`。
+/// 底色状态由 [`StateLayer`] 绘制，调用方不得再对返回值调用 `.hover()` / `.active()` 改底色。
 pub fn choice_chip(
     id: impl Into<ElementId>,
     label: impl Into<SharedString>,
@@ -136,34 +136,38 @@ pub fn choice_chip(
     let tokens = theme.tokens();
     let colors = tokens.colors;
     let label = label.into();
-    let (background, foreground, border, hover) = if selected {
-        (
-            colors.accent,
-            colors.accent_foreground,
-            colors.primary,
-            colors.accent,
-        )
+    let (foreground, border) = if selected {
+        (colors.accent_foreground, colors.primary)
     } else {
-        (
-            colors.surface,
-            colors.foreground,
-            colors.border,
-            colors.muted,
-        )
+        (colors.foreground, colors.border)
     };
+
+    let radius = theme.components().button_radius;
+    let stroke = theme.extended().stroke.thin;
+    // 选中底由状态层交叉淡入。选中项的悬停 / 按下层改用选中色而不是撤掉：点选瞬间按下层
+    // 还盖在上面，撤掉会露出淡入刚开始的空底，看起来就是一下闪烁。
+    let (hover, press) = if selected {
+        (colors.accent, colors.accent)
+    } else {
+        (colors.muted, shift_toward_contrast(colors.muted, 0.04))
+    };
+    let layer = StateLayer::new(inner_radius(radius, stroke))
+        .selected(colors.accent, selected)
+        .hover(hover)
+        .press(press);
 
     Button::new(id)
         .h(theme.density().control)
         .px(tokens.spacing.sm + tokens.spacing.xxs)
-        .line_height(relative(1.))
+        .line_height(tokens.typography.sm.line_height)
         .flex()
         .items_center()
         .justify_center()
         .cursor_pointer()
-        .rounded(theme.components().button_radius)
-        .border(theme.extended().stroke.thin)
+        .rounded(radius)
+        .border(stroke)
         .border_color(border)
-        .bg(background)
+        .bg(colors.surface)
         .text_color(foreground)
         .text_size(tokens.typography.sm.size)
         .font_weight(if selected {
@@ -171,10 +175,10 @@ pub fn choice_chip(
         } else {
             tokens.typography.sm.weight
         })
-        .hover(move |style| style.bg(hover))
         .focus_visible(move |style| style.border_color(colors.ring))
         .selected(selected)
         .accessibility_label(label.clone())
+        .child(layer)
         .child(label)
 }
 
@@ -219,6 +223,8 @@ fn icon_button_frame(
     let theme = active_theme(cx);
     let tokens = theme.tokens();
     let palette = ButtonPalette::for_variant(variant, tokens.colors, theme.extended().colors);
+    let radius = theme.components().button_radius;
+    let stroke = theme.extended().stroke.thin;
 
     Button::new(id)
         .size(theme.density().control)
@@ -226,17 +232,17 @@ fn icon_button_frame(
         .items_center()
         .justify_center()
         .cursor_pointer()
-        .rounded(theme.components().button_radius)
-        .border(theme.extended().stroke.thin)
+        .rounded(radius)
+        .border(stroke)
         .border_color(palette.border)
         .bg(palette.background)
         .text_color(palette.foreground)
-        .hover(move |style| style.bg(palette.hover))
-        .active(move |style| style.bg(palette.active))
         .focus_visible(move |style| style.border_color(tokens.colors.ring))
         .styles(|styles| styles.disabled(|style| style.opacity(0.5)))
         .accessibility_label(label)
+        .child(palette.state_layer(radius, stroke))
 }
+
 /// 创建带前置图标的主要操作按钮。
 pub fn primary_icon_button(
     id: impl Into<ElementId>,
@@ -252,26 +258,27 @@ pub fn primary_icon_button(
         tokens.colors,
         theme.extended().colors,
     );
+    let radius = theme.components().button_radius;
+    let stroke = theme.extended().stroke.thin;
 
     Button::new(id)
         .h(theme.density().control)
         .px(tokens.spacing.sm + tokens.spacing.xxs)
-        .line_height(relative(1.))
+        .line_height(tokens.typography.sm.line_height)
         .flex()
         .items_center()
         .justify_center()
         .cursor_pointer()
-        .rounded(theme.components().button_radius)
-        .border(theme.extended().stroke.thin)
+        .rounded(radius)
+        .border(stroke)
         .border_color(palette.border)
         .bg(palette.background)
         .text_color(palette.foreground)
         .text_size(tokens.typography.sm.size)
         .font_weight(tokens.typography.sm.weight)
-        .hover(move |style| style.bg(palette.hover))
-        .active(move |style| style.bg(palette.active))
         .focus_visible(move |style| style.border_color(tokens.colors.ring))
         .accessibility_label(label.clone())
+        .child(palette.state_layer(radius, stroke))
         .child(
             div()
                 .flex()
@@ -284,7 +291,7 @@ pub fn primary_icon_button(
 
 /// 创建顶栏 / 状态栏等 chrome 区域的紧凑图标按钮；`disabled` 时不响应点击且无悬停反馈。
 ///
-/// 默认图标为二级文字色，悬停时底色取 `nav_hover`、图标变为正文色；
+/// 默认图标为二级文字色，悬停时淡入 `nav_hover` 底、图标变为正文色，按下淡入 `nav_selected`；
 /// `destructive` 只改变图标颜色，不做大面积红色填充。
 pub fn toolbar_action_button(
     id: impl Into<ElementId>,
@@ -308,26 +315,30 @@ pub fn toolbar_action_button(
         tokens.colors.foreground
     };
 
+    let radius = theme.components().button_radius;
     let button = Button::new(id)
         .size(theme.density().toolbar_button)
         .flex()
         .flex_none()
         .items_center()
         .justify_center()
-        .rounded(theme.components().button_radius)
-        .bg(transparent(extended.nav_hover))
+        .rounded(radius)
         .text_color(foreground)
         .disabled(disabled)
-        .accessibility_label(label)
-        .child(icon);
+        .accessibility_label(label);
     if disabled {
-        return button.opacity(0.35).cursor_default();
+        return button.child(icon).opacity(0.35).cursor_default();
     }
     button
         .cursor_pointer()
-        .hover(move |style| style.bg(extended.nav_hover).text_color(hover_foreground))
-        .active(move |style| style.bg(extended.nav_selected))
+        .hover(move |style| style.text_color(hover_foreground))
         .focus_visible(move |style| style.bg(extended.nav_hover))
+        .child(
+            StateLayer::new(radius)
+                .hover(extended.nav_hover)
+                .press(extended.nav_selected),
+        )
+        .child(icon)
 }
 
 /// 创建侧栏导航按钮；选中态由调用方控制。
@@ -355,6 +366,7 @@ pub fn navigation_button(
 ///
 /// 选中态是中性底色 + `navSelectedForeground` 文字 + 中等字重，未选中为二级文字色；
 /// 图标颜色由调用方决定，常规导航项用 [`nav_icon_color`]（选中时强调色落在图标上）。
+/// 选中底随切换在新旧两项间交叉淡入淡出，悬停 / 按下底色只作用于未选中项。
 pub fn sidebar_navigation_button(
     id: impl Into<ElementId>,
     label: impl Into<SharedString>,
@@ -367,45 +379,39 @@ pub fn sidebar_navigation_button(
     let tokens = theme.tokens();
     let extended = theme.extended().colors;
     let label = label.into();
-    let (background, foreground, weight) = if selected {
-        (
-            extended.nav_selected,
-            extended.nav_selected_foreground,
-            FontWeight::MEDIUM,
-        )
+    let (foreground, weight) = if selected {
+        (extended.nav_selected_foreground, FontWeight::MEDIUM)
     } else {
-        (
-            transparent(extended.nav_hover),
-            tokens.colors.muted_foreground,
-            FontWeight::NORMAL,
-        )
+        (tokens.colors.muted_foreground, FontWeight::NORMAL)
     };
     let (hover_background, hover_foreground) = if selected {
         (extended.nav_selected, extended.nav_selected_foreground)
     } else {
         (extended.nav_hover, tokens.colors.foreground)
     };
+    let radius = theme.components().nav_item_radius;
 
     Button::new(id)
         .h(theme.density().nav_row)
         .w_full()
         .px(tokens.spacing.sm)
-        .line_height(relative(1.))
+        // 行高须容纳回退字体的 ascent+descent：Linux 下 Noto Sans CJK 约 1.45em，
+        // 行高=字号时基线下移，配合标签 `truncate` 会裁掉「序」等字的下伸笔画。
+        .line_height(tokens.typography.sm.line_height)
         .flex()
         .items_center()
         .justify_between()
         .gap(tokens.spacing.xs)
         .cursor_pointer()
-        .rounded(theme.components().nav_item_radius)
-        .bg(background)
+        .rounded(radius)
         .text_color(foreground)
         .text_size(tokens.typography.sm.size)
         .font_weight(weight)
-        .hover(move |style| style.bg(hover_background).text_color(hover_foreground))
-        .active(move |style| style.bg(extended.nav_selected))
+        .hover(move |style| style.text_color(hover_foreground))
         .focus_visible(move |style| style.bg(hover_background))
         .selected(selected)
         .accessibility_label(label.clone())
+        .child(nav_state_layer(radius, selected, extended))
         .child(
             div()
                 .min_w_0()
@@ -431,8 +437,9 @@ pub fn nav_icon_color(selected: bool, cx: &App) -> Hsla {
 
 /// 创建活动栏按钮。
 ///
-/// 选中态为中性底色 + 强调色图标（图标色由调用方经 [`nav_icon_color`] 决定）；未选中为
-/// 二级文字色图标，悬停时出现浅底。活动栏与侧栏同为 `chrome` 底色，不铺强调色块。
+/// 选中态的中性底色由调用方绘制（活动栏以一块随选中项滑动的底块表达，见 shell），
+/// 本按钮只给强调色图标（图标色由调用方经 [`nav_icon_color`] 决定）；未选中为二级文字色
+/// 图标，悬停淡入浅底、按下淡入选中底。活动栏与侧栏同为 `chrome` 底色，不铺强调色块。
 pub fn activity_button(
     id: impl Into<ElementId>,
     label: impl Into<SharedString>,
@@ -442,18 +449,23 @@ pub fn activity_button(
     cx: &App,
 ) -> Button {
     let theme = active_theme(cx);
-    let tokens = theme.tokens();
-    let colors = tokens.colors;
+    let colors = theme.tokens().colors;
     let extended = theme.extended().colors;
-    let (background, foreground) = if selected {
-        (extended.nav_selected, extended.nav_selected_icon)
+    let (foreground, hover_foreground) = if selected {
+        (extended.nav_selected_icon, extended.nav_selected_icon)
     } else {
-        (transparent(extended.nav_hover), colors.muted_foreground)
+        (colors.muted_foreground, colors.foreground)
     };
-    let (hover_background, hover_foreground) = if selected {
-        (extended.nav_selected, extended.nav_selected_icon)
+    let radius = theme.components().nav_item_radius;
+    // 选中底是调用方的滑块，滑到之前这里不能露空：选中项的悬停 / 按下层改用选中色。
+    let layer = if selected {
+        StateLayer::new(radius)
+            .hover(extended.nav_selected)
+            .press(extended.nav_selected)
     } else {
-        (extended.nav_hover, colors.foreground)
+        StateLayer::new(radius)
+            .hover(extended.nav_hover)
+            .press(extended.nav_selected)
     };
 
     // 颜色直接落在基础样式上：`styles.selected` 的 text_color 不会传给 svg 图标。
@@ -463,14 +475,31 @@ pub fn activity_button(
         .items_center()
         .justify_center()
         .cursor_pointer()
-        .rounded(theme.components().nav_item_radius)
-        .bg(background)
+        .rounded(radius)
         .text_color(foreground)
-        .hover(move |style| style.bg(hover_background).text_color(hover_foreground))
-        .active(move |style| style.bg(extended.nav_selected))
-        .focus_visible(move |style| style.bg(hover_background))
+        .hover(move |style| style.text_color(hover_foreground))
+        .focus_visible(move |style| style.bg(extended.nav_hover))
         .accessibility_label(label)
+        .child(layer)
         .child(icon)
+}
+
+/// 侧栏导航项的状态层：选中底交叉淡入。选中项的悬停 / 按下层改用选中色（悬停不变色），
+/// 而不是撤掉：点选瞬间按下层还盖在上面，撤掉会露出淡入刚开始的空底，形成一下闪烁。
+fn nav_state_layer(
+    radius: Pixels,
+    selected: bool,
+    extended: fluxdown_ui_theme::ExtendedColors,
+) -> StateLayer {
+    let hover = if selected {
+        extended.nav_selected
+    } else {
+        extended.nav_hover
+    };
+    StateLayer::new(radius)
+        .selected(extended.nav_selected, selected)
+        .hover(hover)
+        .press(extended.nav_selected)
 }
 
 /// 复选框的三态。
@@ -577,10 +606,30 @@ impl ButtonPalette {
             active: shift_toward_contrast(background, 0.13),
         }
     }
+
+    /// 本配色的悬停 / 按下状态层。描边透明（ghost / link）时外扩盖住描边，与整块底色同几何；
+    /// 有色描边时落在描边以内，悬停只改底色、不吞掉描边。
+    fn state_layer(self, radius: Pixels, stroke: Pixels) -> StateLayer {
+        let layer = if self.border.a == 0. {
+            StateLayer::new(radius).inset(-stroke)
+        } else {
+            StateLayer::new(inner_radius(radius, stroke))
+        };
+        layer.hover(self.hover).press(self.active)
+    }
 }
 
 fn transparent(color: Hsla) -> Hsla {
     Hsla { a: 0., ..color }
+}
+
+/// 描边以内的圆角：外圆角减去描边宽，最小为 0。
+fn inner_radius(radius: Pixels, stroke: Pixels) -> Pixels {
+    if radius > stroke {
+        radius - stroke
+    } else {
+        px(0.)
+    }
 }
 
 fn shift_toward_contrast(color: Hsla, amount: f32) -> Hsla {

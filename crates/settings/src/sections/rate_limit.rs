@@ -7,7 +7,7 @@
 use std::rc::Rc;
 
 use fluxdown_ui_theme::active_theme;
-use gpui::{App, IntoElement as _, ParentElement as _, SharedString, Styled as _, Window, div, px};
+use gpui::{App, IntoElement as _, ParentElement as _, SharedString, Styled as _, Window, div};
 use gpui_component::h_flex;
 
 use super::SectionContext;
@@ -188,7 +188,11 @@ pub(crate) fn control(ctx: &SectionContext, key: &'static str, unit_key: &'stati
                 .gap(gap)
                 .items_center()
                 .child(number)
-                .child(div().w(px(UNIT_DROPDOWN_WIDTH)).child(dropdown))
+                .child(
+                    div()
+                        .w(active_theme(cx).text_extent(UNIT_DROPDOWN_WIDTH))
+                        .child(dropdown),
+                )
                 .into_any_element()
         },
     )

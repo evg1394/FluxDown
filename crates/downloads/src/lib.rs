@@ -25,6 +25,7 @@ pub use model::progress_window::{
 };
 pub use model::shutdown::*;
 pub use pages::downloads::*;
+pub use pages::file_conflict::*;
 pub use pages::group_detail::*;
 pub use pages::new_download::*;
 pub use pages::progress_window::*;

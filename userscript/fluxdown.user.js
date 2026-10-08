@@ -295,7 +295,13 @@
   function filenameOf(url) {
     try {
       const pathname = new URL(url, location.href).pathname;
-      const last = decodeURIComponent(pathname.split('/').pop() || '');
+      const seg = pathname.split('/').pop() || '';
+      let last;
+      try {
+        last = decodeURIComponent(seg);
+      } catch (_) {
+        last = seg; // GBK 等非 UTF-8 百分号序列：保留原段
+      }
       if (last && /\.[a-zA-Z0-9]{1,10}$/.test(last)) return last;
     } catch (_) { /* */ }
     return '';
@@ -482,6 +488,19 @@
     return { sent, status: 200 };
   }
 
+  // `<a download>` 的文件名：浏览器对跨源链接忽略 download 属性（文件名由服务器
+  // Content-Disposition 决定），所以只有与页面同源时才作为 filename 发送；
+  // 跨源返回空串，交给 FluxDown 引擎探测。
+  function downloadAttrName(a, href) {
+    const name = a.getAttribute('download') || '';
+    if (!name) return '';
+    try {
+      return new URL(href, location.href).origin === location.origin ? name : '';
+    } catch (_) {
+      return '';
+    }
+  }
+
   // 构造一次下载的标准 payload。
   function buildPayload(url, opts) {
     opts = opts || {};
@@ -592,7 +611,7 @@
     ev.preventDefault();
     ev.stopPropagation();
     takeover(href, {
-      filename: a.getAttribute('download') || '',
+      filename: downloadAttrName(a, href),
       referrer: location.href,
       allowFallback: true,
     });
@@ -608,7 +627,7 @@
           // blob:/data: 等协议必须在此同步放行：页面常在 click() 后立即 revoke。
           if (href && isTakeoverScheme(href) && !isBypassed(href) &&
               (this.hasAttribute('download') || looksDownloadable(href))) {
-            takeover(href, { filename: this.getAttribute('download') || '', allowFallback: true });
+            takeover(href, { filename: downloadAttrName(this, href), allowFallback: true });
             return; // 拦截，不执行原生 click；失败时由 browserFallback 重放
           }
         }
@@ -639,11 +658,11 @@
   // 媒体嗅探（hook fetch / XHR / MediaSource，document-start 注入）
   // ==========================================================================
 
-  // 嗅探到的资源（去重后）。{ url, kind, contentType, size, ts }
+  // 嗅探到的资源（去重后）。{ url, kind, contentType, size, filename（仅同源 a[download]）, ts }
   const sniffed = [];
   const notified = new Set();
 
-  function recordResource(kind, url, contentType, size) {
+  function recordResource(kind, url, contentType, size, filename) {
     if (!url) return;
     try {
       const abs = new URL(url, location.href).href;
@@ -654,7 +673,7 @@
       notified.add(key);
       if (notified.size > 800) notified.clear();
 
-      sniffed.unshift({ url: abs, kind, contentType: contentType || '', size: size || 0, ts: Date.now() });
+      sniffed.unshift({ url: abs, kind, contentType: contentType || '', size: size || 0, filename: filename || '', ts: Date.now() });
       if (sniffed.length > 60) sniffed.length = 60;
       updateFab();
     } catch (_) { /* */ }
@@ -774,7 +793,7 @@
         const abs = new URL(src, location.href).href;
         if (n.tagName === 'A') {
           if (looksDownloadable(abs) || n.hasAttribute('download')) {
-            recordResource('file', abs, '', 0);
+            recordResource('file', abs, '', 0, downloadAttrName(n, abs));
           }
         } else {
           recordResource(n.tagName.toLowerCase(), abs, '', 0);
@@ -949,7 +968,7 @@
       item.querySelector('.nm').textContent = name;
       item.querySelector('.sub').textContent = sub;
       item.querySelector('.dl').addEventListener('click', () => {
-        takeover(r.url, { fileSize: r.size || undefined, mimeType: r.contentType || undefined, allowFallback: false });
+        takeover(r.url, { filename: r.filename || '', fileSize: r.size || undefined, mimeType: r.contentType || undefined, allowFallback: false });
       });
       listEl.appendChild(item);
     }

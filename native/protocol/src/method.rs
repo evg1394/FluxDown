@@ -125,6 +125,8 @@ pub const AGENT_AUTH_SEND_CODE: &str = "agent.auth.sendCode";
 pub const AGENT_AUTH_VERIFY_CODE: &str = "agent.auth.verifyCode";
 pub const AGENT_AUTH_LOGOUT: &str = "agent.auth.logout";
 pub const AGENT_AUTH_REFRESH_PROFILE: &str = "agent.auth.refreshProfile";
+pub const AGENT_AUTH_SEND_PASSWORD_RESET_CODE: &str = "agent.auth.sendPasswordResetCode";
+pub const AGENT_AUTH_RESET_PASSWORD: &str = "agent.auth.resetPassword";
 pub const AGENT_PROFILE_SEND_EMAIL_CODE: &str = "agent.profile.sendEmailCode";
 pub const AGENT_PROFILE_SEND_NEW_EMAIL_CODE: &str = "agent.profile.sendNewEmailCode";
 pub const AGENT_PROFILE_CHANGE_EMAIL: &str = "agent.profile.changeEmail";
@@ -132,6 +134,8 @@ pub const AGENT_PROFILE_RANDOM_ORIGIN_ID: &str = "agent.profile.randomOriginId";
 pub const AGENT_PROFILE_CHECK_ORIGIN_ID: &str = "agent.profile.checkOriginId";
 pub const AGENT_PROFILE_CHANGE_ORIGIN_ID: &str = "agent.profile.changeOriginId";
 pub const AGENT_PROFILE_CHANGE_NICKNAME: &str = "agent.profile.changeNickname";
+pub const AGENT_PROFILE_SEND_PASSWORD_CODE: &str = "agent.profile.sendPasswordCode";
+pub const AGENT_PROFILE_CHANGE_PASSWORD: &str = "agent.profile.changePassword";
 
 pub const AGENT_GATEWAY_GET: &str = "agent.gateway.get";
 pub const AGENT_GATEWAY_PATCH: &str = "agent.gateway.patch";
@@ -212,7 +216,14 @@ pub const AGENT_DIAGNOSTICS_RUN: &str = "agent.diagnostics.run";
 pub const AGENT_DIAGNOSTICS_REPAIR: &str = "agent.diagnostics.repair";
 pub const AGENT_DIAGNOSTICS_LOG_PATHS: &str = "agent.diagnostics.logPaths";
 pub const AGENT_DIAGNOSTICS_EXPORT_LOGS: &str = "agent.diagnostics.exportLogs";
+/// 检查渠道最新版本：`{channel?}` → `UpdateStatusDto`（同时经 `UpdateChanged` 推送）。
 pub const AGENT_UPDATE_CHECK: &str = "agent.update.check";
+/// 后台下载并校验更新包（幂等）；不可一键更新时拒绝（`Unsupported`）。
+pub const AGENT_UPDATE_DOWNLOAD: &str = "agent.update.download";
+/// 一键「更新并重启」：包未就绪时先下载，就绪后替换程序并重启服务；返回 `UpdateStatusDto`。
+pub const AGENT_UPDATE_INSTALL: &str = "agent.update.install";
+/// 取消进行中的下载与待安装请求，返回 `UpdateStatusDto`。
+pub const AGENT_UPDATE_CANCEL: &str = "agent.update.cancel";
 /// 完成后关机：`{delaySecs}`；无活跃任务时拒绝（`InvalidArgument`）。
 pub const AGENT_POWER_ARM: &str = "agent.power.arm";
 pub const AGENT_POWER_DISARM: &str = "agent.power.disarm";
@@ -237,6 +248,10 @@ pub const CAPABILITY_AGENT_BILLING: &str = "agent.billing";
 pub const CAPABILITY_AGENT_REFERRALS: &str = "agent.referrals";
 pub const CAPABILITY_AGENT_DEVICE_LINK: &str = "agent.deviceLink";
 pub const CAPABILITY_AGENT_EXTERNAL_CAPTURE: &str = "agent.externalCapture";
+/// 本连接可调用 `agent.platform.openTask` / `revealTask`，在 agent 所在主机上打开 / 定位任务
+/// 产物。按连接下发：Windows / macOS / Linux 桌面宿主恒有，嵌入式移动宿主没有；headless
+/// server 只给本机来源（见 agent `server_mode::ServerHandle::local_platform_permitted`）。
+pub const CAPABILITY_AGENT_OPEN_TASK_FILES: &str = "agent.openTaskFiles";
 pub const CAPABILITY_CLIENT_SELECTIONS: &str = "client.selections";
 
 /// 规范ALL_METHODS。
@@ -343,6 +358,8 @@ pub const ALL_METHODS: &[&str] = &[
     AGENT_AUTH_VERIFY_CODE,
     AGENT_AUTH_LOGOUT,
     AGENT_AUTH_REFRESH_PROFILE,
+    AGENT_AUTH_SEND_PASSWORD_RESET_CODE,
+    AGENT_AUTH_RESET_PASSWORD,
     AGENT_PROFILE_SEND_EMAIL_CODE,
     AGENT_PROFILE_SEND_NEW_EMAIL_CODE,
     AGENT_PROFILE_CHANGE_EMAIL,
@@ -350,6 +367,8 @@ pub const ALL_METHODS: &[&str] = &[
     AGENT_PROFILE_CHECK_ORIGIN_ID,
     AGENT_PROFILE_CHANGE_ORIGIN_ID,
     AGENT_PROFILE_CHANGE_NICKNAME,
+    AGENT_PROFILE_SEND_PASSWORD_CODE,
+    AGENT_PROFILE_CHANGE_PASSWORD,
     AGENT_GATEWAY_GET,
     AGENT_GATEWAY_PATCH,
     AGENT_GATEWAY_REVEAL_TOKEN,
@@ -408,6 +427,9 @@ pub const ALL_METHODS: &[&str] = &[
     AGENT_DIAGNOSTICS_LOG_PATHS,
     AGENT_DIAGNOSTICS_EXPORT_LOGS,
     AGENT_UPDATE_CHECK,
+    AGENT_UPDATE_DOWNLOAD,
+    AGENT_UPDATE_INSTALL,
+    AGENT_UPDATE_CANCEL,
     AGENT_POWER_ARM,
     AGENT_POWER_DISARM,
     SERVICE_EVENT,
@@ -454,7 +476,11 @@ pub const DAEMON_CAPABILITIES: &[&str] = &[
     CAPABILITY_DAEMON_FILES,
 ];
 
-/// 规范AGENT_CAPABILITIES。
+/// 规范 `AGENT_CAPABILITIES`。
+///
+/// 声明 agent 可能下发能力的规范全集（用于字面量断言与能力全景索引）。
+/// 注意：[`CAPABILITY_AGENT_OPEN_TASK_FILES`] 属于连接级条件能力，仅向本机来源或显式授权连接下发，
+/// 服务级基线 hello 并不无条件包含它。
 pub const AGENT_CAPABILITIES: &[&str] = &[
     CAPABILITY_AGENT_GATEWAY,
     CAPABILITY_AGENT_AUTH,
@@ -464,6 +490,7 @@ pub const AGENT_CAPABILITIES: &[&str] = &[
     CAPABILITY_AGENT_REFERRALS,
     CAPABILITY_AGENT_DEVICE_LINK,
     CAPABILITY_AGENT_EXTERNAL_CAPTURE,
+    CAPABILITY_AGENT_OPEN_TASK_FILES,
 ];
 
 /// 规范CLIENT_CAPABILITIES。

@@ -40,7 +40,7 @@ const fn field(
 }
 
 pub const BT_SEED_TIME_UNITS: &[&str] = &["minutes", "hours", "days"];
-pub const FILE_EXISTS_BEHAVIORS: &[&str] = &["rename", "overwrite", "skip"];
+pub const FILE_EXISTS_BEHAVIORS: &[&str] = &["rename", "overwrite", "skip", "ask"];
 pub const FILE_MISSING_ACTIONS: &[&str] = &["keep", "delete"];
 pub const BT_SEED_LIMIT_OPERATORS: &[&str] = &["or", "and"];
 pub const BT_SEED_THEN_ACTIONS: &[&str] = &["stop", "delete", "delete_files"];
@@ -122,6 +122,7 @@ pub const DAEMON_CONFIG_FIELDS: &[DaemonConfigField] = &[
     field("default_queue_id", DaemonConfigKind::Text, ""),
     field("domain_conn_caps", DaemonConfigKind::ReadOnly, ""),
     // ── BT ──
+    field("bt_enabled", DaemonConfigKind::Bool, "true"),
     field("bt_enable_dht", DaemonConfigKind::Bool, "true"),
     field("bt_enable_upnp", DaemonConfigKind::Bool, "true"),
     field(

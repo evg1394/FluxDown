@@ -13,11 +13,12 @@ edition = "2024"
 [workspace.dependencies]
 # GPUI 走 gpui-kit 发布时精确锁定的 `gpui-pre` 快照；升级 gpui-kit 时必须同步到它
 # `Cargo.toml` 里的同一 `=` 版本，否则 gpui-component 可能与 GPUI API 不匹配。
-gpui = { package = "gpui-pre", version = "=0.3.7" }
-gpui_platform = { package = "gpui-pre-platform", version = "=0.3.7", features = ["font-kit", "x11", "wayland", "runtime_shaders"] }
-gpui-base = "0.7.0"
-gpui-component = "0.7.0"
-gpui-component-assets = { package = "gpui-kit-assets", version = "0.7.0" }
+# 实际实现由下方 `[patch.crates-io]` 换成 gpui-fast（同名同版本的兼容壳）。
+gpui = { package = "gpui-pre", version = "=0.3.8" }
+gpui_platform = { package = "gpui-pre-platform", version = "=0.3.8", features = ["font-kit", "x11", "wayland", "runtime_shaders"] }
+gpui-base = "0.7.1"
+gpui-component = "0.7.1"
+gpui-component-assets = { package = "gpui-kit-assets", version = "0.7.1" }
 serde = { version = "1.0.219", features = ["derive"] }
 serde_json = "1"
 thiserror = "2.0"
@@ -42,16 +43,29 @@ wildcard_imports = "deny"
 # zerx-lab/rqbit = lingdiansr/rqbit (MSE) + Android HTTPS 修复（bundled webpki 根替代需 JNI 初始化的
 # rustls-platform-verifier，否则 Android 上任何 https tracker 都会 panic 掉磁力解析）+ tracker panic 隔离。
 librqbit = { git = "https://github.com/zerx-lab/rqbit", rev = "d9e79c939f223679612cd0b06bd00ed49bd2eff8" }
+# 上游 0.7.0 在 iOS 上编译失败（Apple 平台只放行 macOS 的按索引绑定），补丁见源码内 `FluxDown 补丁` 注释；
+# 上游修复发布后删除本条与 third_party/ 副本。
+librqbit-dualstack-sockets = { path = "third_party/librqbit-dualstack-sockets" }
+# GPUI 核心换成 gpui-fast（Retained Mode + 滚动图层）：其 `compat/` 以 gpui-pre 同名同版本
+# 再导出自身 crate，整张依赖图（含 gpui-component）共用同一 GPUI 核心。升级 gpui-kit 时
+# 必须等 gpui-fast 的 compat 跟到同一快照版本，否则补丁不生效（cargo 警告 patch 未使用）。
+# 渲染读取的状态须在 entity / global / ListState / ScrollHandle 内，改了要 notify 读者；
+# 排查界面陈旧时用 `GPUI_VIEW_RETENTION=0`（关复用）/ `GPUI_SCROLL_LAYERS=0`（关滚动图层）对照。
+gpui-pre = { git = "https://github.com/longbridge/gpui-fast", rev = "8e1e1987fdb512bb8b0ab27261906a598aff2ab8" }
+gpui-pre-platform = { git = "https://github.com/longbridge/gpui-fast", rev = "8e1e1987fdb512bb8b0ab27261906a598aff2ab8" }
+gpui-pre-macros = { git = "https://github.com/longbridge/gpui-fast", rev = "8e1e1987fdb512bb8b0ab27261906a598aff2ab8" }
+gpui-pre-sum-tree = { git = "https://github.com/longbridge/gpui-fast", rev = "8e1e1987fdb512bb8b0ab27261906a598aff2ab8" }
 
 [profile.dev]
 codegen-units = 16
 debug = "limited"
 split-debuginfo = "unpacked"
 
-[profile.dev.package.gpui-pre]
+# gpui-fast 的 compat 壳只做再导出，实际代码在同仓的 `gpui` / `gpui_platform` 包里。
+[profile.dev.package.gpui]
 opt-level = 3
 
-[profile.dev.package.gpui-pre-platform]
+[profile.dev.package.gpui_platform]
 opt-level = 3
 
 # BT 数据面（逐字节 RC4、逐消息解析、MSE DH 大数运算）在 opt-level 0 下慢一个数量级：

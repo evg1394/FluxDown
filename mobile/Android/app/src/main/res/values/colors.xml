@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 仅供窗口首帧 / 启动画面：与 FluxColors.canvas（纸面 n1）一致 -->
+    <color name="flux_canvas">#FFF4F4F1</color>
+</resources>

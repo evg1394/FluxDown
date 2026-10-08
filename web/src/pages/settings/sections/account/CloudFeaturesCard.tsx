@@ -8,7 +8,8 @@ import type { CloudConnectionDto, CloudDevice, SyncStatusDto } from '../../../..
 import { cloudPresenceKnown } from '../../../../lib/cloud-presence'
 import { Badge, Button, Card, Icon, Switch, Tooltip, toast } from '../../../../ui'
 import { otherDevices } from '../../../downloads/model/devices'
-import { accountErrorKey, REASON_KEYS } from './errorText'
+import { accountErrorKey } from './errorText'
+import { useSyncSubtitle } from './syncSubtitle'
 import { SYNC_GROUPS, syncGroupState, syncPhase, toggleGroupParams } from './syncGroups'
 import type { SyncGroup, SyncGroupState } from './syncGroups'
 
@@ -18,18 +19,6 @@ function RowIcon({ icon }: { icon: LucideIcon }) {
       <Icon icon={icon} />
     </div>
   )
-}
-
-function formatTime(unixMs: number): string {
-  const date = new Date(unixMs)
-  return Number.isNaN(date.getTime()) ? '' : date.toLocaleString()
-}
-
-/** 同步失败 / 暂停原因：按 reason 本地化；未映射时回退通用文案，不显示服务端诊断原文。 */
-function useSyncReasonText(sync: SyncStatusDto): string {
-  const t = useT()
-  const key = sync.lastErrorReason ? REASON_KEYS[sync.lastErrorReason] : undefined
-  return t(key ?? 'cloudSyncErrorGeneric')
 }
 
 function ScopeRow({ group, state, disabled, onToggle }: { group: SyncGroup; state: SyncGroupState; disabled: boolean; onToggle: () => void }) {
@@ -59,20 +48,7 @@ export function CloudFeaturesCard({
   const t = useT()
   const active = loggedIn && sync.enabled
   const phase = syncPhase(sync)
-  const reasonText = useSyncReasonText(sync)
-  const subtitle = !active
-    ? t('cloudSyncDesc')
-    : phase === 'halted'
-      ? t('cloudSyncStatusHalted', { reason: reasonText })
-      : phase === 'error'
-        ? t('cloudSyncStatusError', { reason: reasonText })
-        : phase === 'connecting'
-          ? t('cloudSyncStatusConnecting')
-          : phase === 'syncing'
-            ? t('cloudSyncStatusSyncing')
-            : sync.lastSyncedAtUnixMs
-              ? t('cloudSyncStatusSyncedAt', { time: formatTime(sync.lastSyncedAtUnixMs) })
-              : t('cloudSyncStatusSynced')
+  const subtitle = useSyncSubtitle(loggedIn, sync)
   const online = otherDevices(devices).filter((device) => device.isOnline).length
   const localOnlyKeys = sync.localOnlyKeys ?? []
 

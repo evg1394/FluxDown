@@ -1,0 +1,611 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 110;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		F1D0A0012F00000000000001 /* FluxDomain in Frameworks */ = {isa = PBXBuildFile; productRef = F1D0A0022F00000000000001 /* FluxDomain */; };
+		F1D0A0012F00000000000002 /* FluxBridge in Frameworks */ = {isa = PBXBuildFile; productRef = F1D0A0022F00000000000002 /* FluxBridge */; };
+		F1D0A0012F00000000000003 /* FluxUI in Frameworks */ = {isa = PBXBuildFile; productRef = F1D0A0022F00000000000003 /* FluxUI */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		DA2504D23073AA0100100A45 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = DA2504BC3073AA0000100A45 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = DA2504C33073AA0000100A45;
+			remoteInfo = FluxDown;
+		};
+		DA2504DC3073AA0100100A45 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = DA2504BC3073AA0000100A45 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = DA2504C33073AA0000100A45;
+			remoteInfo = FluxDown;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXFileReference section */
+		DA2504C43073AA0000100A45 /* FluxDown.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = FluxDown.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		DA2504D13073AA0100100A45 /* FluxDownTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = FluxDownTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		DA2504DB3073AA0100100A45 /* FluxDownUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = FluxDownUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+/* End PBXFileReference section */
+
+/* Begin PBXFileSystemSynchronizedRootGroup section */
+		DA2504C63073AA0000100A45 /* FluxDown */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = FluxDown;
+			sourceTree = "<group>";
+		};
+		DA2504D43073AA0100100A45 /* FluxDownTests */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = FluxDownTests;
+			sourceTree = "<group>";
+		};
+		DA2504DE3073AA0100100A45 /* FluxDownUITests */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = FluxDownUITests;
+			sourceTree = "<group>";
+		};
+/* End PBXFileSystemSynchronizedRootGroup section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		DA2504C13073AA0000100A45 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			files = (
+				F1D0A0012F00000000000001 /* FluxDomain in Frameworks */,
+				F1D0A0012F00000000000002 /* FluxBridge in Frameworks */,
+				F1D0A0012F00000000000003 /* FluxUI in Frameworks */,
+			);
+		};
+		DA2504CE3073AA0100100A45 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			files = (
+			);
+		};
+		DA2504D83073AA0100100A45 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			files = (
+			);
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		DA2504BB3073AA0000100A45 = {
+			isa = PBXGroup;
+			children = (
+				DA2504C63073AA0000100A45 /* FluxDown */,
+				DA2504D43073AA0100100A45 /* FluxDownTests */,
+				DA2504DE3073AA0100100A45 /* FluxDownUITests */,
+				DA2504C53073AA0000100A45 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		DA2504C53073AA0000100A45 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				DA2504C43073AA0000100A45 /* FluxDown.app */,
+				DA2504D13073AA0100100A45 /* FluxDownTests.xctest */,
+				DA2504DB3073AA0100100A45 /* FluxDownUITests.xctest */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		DA2504C33073AA0000100A45 /* FluxDown */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = DA2504E33073AA0100100A45 /* Build configuration list for PBXNativeTarget "FluxDown" */;
+			buildPhases = (
+				DA2504C03073AA0000100A45 /* Sources */,
+				DA2504C13073AA0000100A45 /* Frameworks */,
+				DA2504C23073AA0000100A45 /* Resources */,
+			);
+			buildRules = (
+			);
+			fileSystemSynchronizedGroups = (
+				DA2504C63073AA0000100A45 /* FluxDown */,
+			);
+			name = FluxDown;
+			packageProductDependencies = (
+				F1D0A0022F00000000000001 /* FluxDomain */,
+				F1D0A0022F00000000000002 /* FluxBridge */,
+				F1D0A0022F00000000000003 /* FluxUI */,
+			);
+			productName = FluxDown;
+			productReference = DA2504C43073AA0000100A45 /* FluxDown.app */;
+			productType = "com.apple.product-type.application";
+		};
+		DA2504D03073AA0100100A45 /* FluxDownTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = DA2504E63073AA0100100A45 /* Build configuration list for PBXNativeTarget "FluxDownTests" */;
+			buildPhases = (
+				DA2504CD3073AA0100100A45 /* Sources */,
+				DA2504CE3073AA0100100A45 /* Frameworks */,
+				DA2504CF3073AA0100100A45 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				DA2504D33073AA0100100A45 /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				DA2504D43073AA0100100A45 /* FluxDownTests */,
+			);
+			name = FluxDownTests;
+			productName = FluxDownTests;
+			productReference = DA2504D13073AA0100100A45 /* FluxDownTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
+		DA2504DA3073AA0100100A45 /* FluxDownUITests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = DA2504E93073AA0100100A45 /* Build configuration list for PBXNativeTarget "FluxDownUITests" */;
+			buildPhases = (
+				DA2504D73073AA0100100A45 /* Sources */,
+				DA2504D83073AA0100100A45 /* Frameworks */,
+				DA2504D93073AA0100100A45 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				DA2504DD3073AA0100100A45 /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				DA2504DE3073AA0100100A45 /* FluxDownUITests */,
+			);
+			name = FluxDownUITests;
+			productName = FluxDownUITests;
+			productReference = DA2504DB3073AA0100100A45 /* FluxDownUITests.xctest */;
+			productType = "com.apple.product-type.bundle.ui-testing";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		DA2504BC3073AA0000100A45 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastSwiftUpdateCheck = 2700;
+				LastUpgradeCheck = 2700;
+				TargetAttributes = {
+					DA2504C33073AA0000100A45 = {
+						CreatedOnToolsVersion = 27.0;
+					};
+					DA2504D03073AA0100100A45 = {
+						CreatedOnToolsVersion = 27.0;
+						TestTargetID = DA2504C33073AA0000100A45;
+					};
+					DA2504DA3073AA0100100A45 = {
+						CreatedOnToolsVersion = 27.0;
+						TestTargetID = DA2504C33073AA0000100A45;
+					};
+				};
+			};
+			buildConfigurationList = DA2504BF3073AA0000100A45 /* Build configuration list for PBXProject "FluxDown" */;
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				Base,
+				"zh-Hans",
+			);
+			mainGroup = DA2504BB3073AA0000100A45;
+			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				F1D0A0032F00000000000001 /* XCLocalSwiftPackageReference "FluxKit" */,
+			);
+			preferredProjectObjectVersion = 77;
+			productRefGroup = DA2504C53073AA0000100A45 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				DA2504C33073AA0000100A45 /* FluxDown */,
+				DA2504D03073AA0100100A45 /* FluxDownTests */,
+				DA2504DA3073AA0100100A45 /* FluxDownUITests */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		DA2504C23073AA0000100A45 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			files = (
+			);
+		};
+		DA2504CF3073AA0100100A45 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			files = (
+			);
+		};
+		DA2504D93073AA0100100A45 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			files = (
+			);
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		DA2504C03073AA0000100A45 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			files = (
+			);
+		};
+		DA2504CD3073AA0100100A45 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			files = (
+			);
+		};
+		DA2504D73073AA0100100A45 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			files = (
+			);
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		DA2504D33073AA0100100A45 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = DA2504C33073AA0000100A45 /* FluxDown */;
+			targetProxy = DA2504D23073AA0100100A45 /* PBXContainerItemProxy */;
+		};
+		DA2504DD3073AA0100100A45 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = DA2504C33073AA0000100A45 /* FluxDown */;
+			targetProxy = DA2504DC3073AA0100100A45 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin XCBuildConfiguration section */
+		DA2504E13073AA0100100A45 /* Debug configuration for PBXProject "FluxDown" */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				DEVELOPMENT_TEAM = KD4N89AAF5;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				"EXCLUDED_ARCHS[sdk=iphonesimulator*]" = x86_64;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"DEBUG=1",
+					"$(inherited)",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.1;
+				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				SDKROOT = iphoneos;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+			};
+			name = Debug;
+		};
+		DA2504E23073AA0100100A45 /* Release configuration for PBXProject "FluxDown" */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				DEVELOPMENT_TEAM = KD4N89AAF5;
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				"EXCLUDED_ARCHS[sdk=iphonesimulator*]" = x86_64;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.1;
+				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				SDKROOT = iphoneos;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				VALIDATE_PRODUCT = YES;
+			};
+			name = Release;
+		};
+		DA2504E43073AA0100100A45 /* Debug configuration for PBXNativeTarget "FluxDown" */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = KD4N89AAF5;
+				ENABLE_PREVIEWS = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = Config/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = FluxDown;
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
+				INFOPLIST_KEY_LSSupportsOpeningDocumentsInPlace = YES;
+				INFOPLIST_KEY_NSFaceIDUsageDescription = "Verify your identity to reveal the API access token.";
+				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "FluxDown connects to download hosts (NAS or servers) and paired devices on your local network.";
+				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
+				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
+				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.fluxdown.FluxDown;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 6.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		DA2504E53073AA0100100A45 /* Release configuration for PBXNativeTarget "FluxDown" */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = KD4N89AAF5;
+				ENABLE_PREVIEWS = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = Config/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = FluxDown;
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
+				INFOPLIST_KEY_LSSupportsOpeningDocumentsInPlace = YES;
+				INFOPLIST_KEY_NSFaceIDUsageDescription = "Verify your identity to reveal the API access token.";
+				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "FluxDown connects to download hosts (NAS or servers) and paired devices on your local network.";
+				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
+				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
+				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.fluxdown.FluxDown;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 6.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+		DA2504E73073AA0100100A45 /* Debug configuration for PBXNativeTarget "FluxDownTests" */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = KD4N89AAF5;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.1;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.fluxdown.FluxDownTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				STRING_CATALOG_GENERATE_SYMBOLS = NO;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/FluxDown.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/FluxDown";
+			};
+			name = Debug;
+		};
+		DA2504E83073AA0100100A45 /* Release configuration for PBXNativeTarget "FluxDownTests" */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = KD4N89AAF5;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.1;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.fluxdown.FluxDownTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				STRING_CATALOG_GENERATE_SYMBOLS = NO;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/FluxDown.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/FluxDown";
+			};
+			name = Release;
+		};
+		DA2504EA3073AA0100100A45 /* Debug configuration for PBXNativeTarget "FluxDownUITests" */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = KD4N89AAF5;
+				GENERATE_INFOPLIST_FILE = YES;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.fluxdown.FluxDownUITests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				STRING_CATALOG_GENERATE_SYMBOLS = NO;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_TARGET_NAME = FluxDown;
+			};
+			name = Debug;
+		};
+		DA2504EB3073AA0100100A45 /* Release configuration for PBXNativeTarget "FluxDownUITests" */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = KD4N89AAF5;
+				GENERATE_INFOPLIST_FILE = YES;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.fluxdown.FluxDownUITests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				STRING_CATALOG_GENERATE_SYMBOLS = NO;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_TARGET_NAME = FluxDown;
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		DA2504BF3073AA0000100A45 /* Build configuration list for PBXProject "FluxDown" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				DA2504E13073AA0100100A45 /* Debug configuration for PBXProject "FluxDown" */,
+				DA2504E23073AA0100100A45 /* Release configuration for PBXProject "FluxDown" */,
+			);
+			defaultConfigurationName = Release;
+		};
+		DA2504E33073AA0100100A45 /* Build configuration list for PBXNativeTarget "FluxDown" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				DA2504E43073AA0100100A45 /* Debug configuration for PBXNativeTarget "FluxDown" */,
+				DA2504E53073AA0100100A45 /* Release configuration for PBXNativeTarget "FluxDown" */,
+			);
+			defaultConfigurationName = Release;
+		};
+		DA2504E63073AA0100100A45 /* Build configuration list for PBXNativeTarget "FluxDownTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				DA2504E73073AA0100100A45 /* Debug configuration for PBXNativeTarget "FluxDownTests" */,
+				DA2504E83073AA0100100A45 /* Release configuration for PBXNativeTarget "FluxDownTests" */,
+			);
+			defaultConfigurationName = Release;
+		};
+		DA2504E93073AA0100100A45 /* Build configuration list for PBXNativeTarget "FluxDownUITests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				DA2504EA3073AA0100100A45 /* Debug configuration for PBXNativeTarget "FluxDownUITests" */,
+				DA2504EB3073AA0100100A45 /* Release configuration for PBXNativeTarget "FluxDownUITests" */,
+			);
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+
+/* Begin XCLocalSwiftPackageReference section */
+		F1D0A0032F00000000000001 /* XCLocalSwiftPackageReference "FluxKit" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = FluxKit;
+		};
+/* End XCLocalSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		F1D0A0022F00000000000001 /* FluxDomain */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = F1D0A0032F00000000000001 /* XCLocalSwiftPackageReference "FluxKit" */;
+			productName = FluxDomain;
+		};
+		F1D0A0022F00000000000002 /* FluxBridge */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = F1D0A0032F00000000000001 /* XCLocalSwiftPackageReference "FluxKit" */;
+			productName = FluxBridge;
+		};
+		F1D0A0022F00000000000003 /* FluxUI */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = F1D0A0032F00000000000001 /* XCLocalSwiftPackageReference "FluxKit" */;
+			productName = FluxUI;
+		};
+/* End XCSwiftPackageProductDependency section */
+	};
+	rootObject = DA2504BC3073AA0000100A45 /* Project object */;
+	validationLevel = 1;
+}

@@ -19,7 +19,7 @@ use fluxdown_ui_theme::active_theme;
 use gpui::{
     Anchor, App, AppContext as _, ClickEvent, Context, Div, Hsla, InteractiveElement as _,
     IntoElement, ParentElement, SharedString, StatefulInteractiveElement as _, Styled, WeakEntity,
-    Window, div, prelude::FluentBuilder as _, px,
+    Window, div, prelude::FluentBuilder as _,
 };
 use gpui_component::{
     Icon, Sizable as _, Size, WindowExt as _,
@@ -109,32 +109,6 @@ fn minutes_to_duration(minutes: i64) -> Duration {
     Duration::from_secs(60 * minutes.max(0) as u64)
 }
 
-/// 每秒刷新一次倒计时显示；关机被取消（`armed_delay` 变回 `None`）后循环自然退出。
-fn spawn_shutdown_ticker(view: WeakEntity<DownloadView>, cx: &mut App) {
-    cx.spawn(async move |cx| {
-        loop {
-            cx.background_executor().timer(Duration::from_secs(1)).await;
-            let Ok(still_armed) = view.update(cx, |this, cx| {
-                let armed = this
-                    .host
-                    .shutdown_status
-                    .as_ref()
-                    .is_some_and(|status| status.get().armed_delay.is_some());
-                if armed {
-                    cx.notify();
-                }
-                armed
-            }) else {
-                break;
-            };
-            if !still_armed {
-                break;
-            }
-        }
-    })
-    .detach();
-}
-
 fn apply_speed_limit(view: WeakEntity<DownloadView>, key: &'static str, value: i64, cx: &mut App) {
     let Ok(()) = view.update(cx, |this, cx| this.execute_config_patch(key, value, cx)) else {
         // 视图已释放，结束这次回调而不再更新状态。
@@ -179,7 +153,7 @@ fn open_number_prompt(
         let prompt = prompt.clone();
         dialog
             .title(dialog_title(prompt.title.clone(), cx))
-            .w(px(520.))
+            .w(active_theme(cx).text_extent(520.))
             .content({
                 let prompt = prompt.clone();
                 move |content, _, cx| {
@@ -381,7 +355,6 @@ impl DownloadView {
             .map(|status| status.get())
             .unwrap_or_default();
         let can_arm = self.controller.runtime_stats().active_tasks > 0;
-        let view = cx.weak_entity();
         let cancel_label = SharedString::from(translator.text("shutdownCancelButton").to_owned());
         let warning = active_theme(cx).extended().colors.warning;
 
@@ -450,21 +423,17 @@ impl DownloadView {
                     PopupMenuItem::new(immediate_label.clone())
                         .disabled(!can_arm)
                         .on_click({
-                            let view = view.clone();
                             let shutdown = shutdown.clone();
                             move |_, _, cx| {
                                 shutdown(ShutdownRequest::ArmAfter(Duration::ZERO), cx);
-                                spawn_shutdown_ticker(view.clone(), cx);
                             }
                         }),
                 );
                 for (minutes, label) in minute_presets.clone() {
                     menu = menu.item(PopupMenuItem::new(label).disabled(!can_arm).on_click({
-                        let view = view.clone();
                         let shutdown = shutdown.clone();
                         move |_, _, cx| {
                             shutdown(ShutdownRequest::ArmAfter(minutes_to_duration(minutes)), cx);
-                            spawn_shutdown_ticker(view.clone(), cx);
                         }
                     }));
                 }
@@ -472,11 +441,9 @@ impl DownloadView {
                     PopupMenuItem::new(custom_label.clone())
                         .disabled(!can_arm)
                         .on_click({
-                            let view = view.clone();
                             let shutdown = shutdown.clone();
                             let prompt = prompt.clone();
                             move |_, window, cx| {
-                                let view = view.clone();
                                 let shutdown = shutdown.clone();
                                 open_number_prompt(
                                     window,
@@ -489,7 +456,6 @@ impl DownloadView {
                                             ShutdownRequest::ArmAfter(minutes_to_duration(minutes)),
                                             cx,
                                         );
-                                        spawn_shutdown_ticker(view.clone(), cx);
                                     }),
                                 );
                             }

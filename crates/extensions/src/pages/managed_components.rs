@@ -6,7 +6,8 @@ use fluxdown_protocol::{
     DaemonConfigSnapshot, RpcErrorData,
 };
 use fluxdown_ui_components::{
-    ControlExt as _, FluxIcon, IconControlExt as _, card, input_with_action, tabular_numbers,
+    BusyExt as _, ControlExt as _, FluxIcon, IconControlExt as _, card, input_with_action,
+    tabular_numbers,
 };
 use fluxdown_ui_theme::active_theme;
 use gpui::{
@@ -380,7 +381,7 @@ impl ExtensionsView {
                             .outline()
                             .control(cx)
                             .label(translator.text("componentsManualPathSave").to_owned())
-                            .loading(ui.saving_path)
+                            .busy(ui.saving_path)
                             .disabled(busy)
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 this.save_manual_path_from_input(kind, window, cx);
@@ -460,7 +461,7 @@ impl ExtensionsView {
                             .ghost()
                             .control(cx)
                             .label(translator.text("componentsFetchVersionsButton").to_owned())
-                            .loading(ui.versions_loading)
+                            .busy(ui.versions_loading)
                             .disabled(ui.versions_loading || stale)
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 this.fetch_versions(kind, window, cx);
@@ -500,7 +501,7 @@ impl ExtensionsView {
                                 .outline()
                                 .control(cx)
                                 .label(translator.text("componentsRetryVersions").to_owned())
-                                .loading(ui.versions_loading)
+                                .busy(ui.versions_loading)
                                 .disabled(ui.versions_loading || stale)
                                 .on_click(cx.listener(move |this, _, window, cx| {
                                     this.fetch_versions(kind, window, cx);
@@ -557,7 +558,7 @@ impl ExtensionsView {
                                     })
                                     .to_owned(),
                             )
-                            .loading(ui.installing)
+                            .busy(ui.installing)
                             .disabled(busy)
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 this.install_component(kind, window, cx);
@@ -569,7 +570,7 @@ impl ExtensionsView {
                                 .outline()
                                 .control(cx)
                                 .label(translator.text("componentsUninstallButton").to_owned())
-                                .loading(ui.uninstalling)
+                                .busy(ui.uninstalling)
                                 .disabled(busy)
                                 .on_click(cx.listener(move |this, _, window, cx| {
                                     this.confirm_uninstall_component(kind, window, cx);

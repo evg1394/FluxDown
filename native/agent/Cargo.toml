@@ -17,6 +17,7 @@ async-trait = "0.1.89"
 axum = { version = "0.8.9", features = ["ws"] }
 base64 = "0.22"
 directories = "6"
+flate2 = "1"
 fluxdown_api = { version = "0.1.0", path = "../api" }
 fluxdown_link = { version = "0.1.0", path = "../link" }
 fluxdown_logfile = { version = "0.1.0", path = "../logfile" }
@@ -24,13 +25,15 @@ fluxdown_protocol = { path = "../protocol" }
 fluxdown_ui_i18n = { version = "0.1.0", path = "../../crates/i18n", optional = true }
 fs2 = "0.4.3"
 futures-util = "0.3.32"
+hex = "0.4"
 image = { version = "0.25.10", default-features = false, features = ["png"], optional = true }
-keepawake = "0.6"
 mimalloc = "0.1.52"
 regex = "1"
 serde = { version = "1.0.219", features = ["derive"] }
 serde_json = "1"
+sha2 = "0.10"
 tao = { version = "0.37", default-features = false, optional = true }
+tar = "0.4"
 thiserror = "2"
 tokio = { version = "1.52.3", features = ["rt-multi-thread", "macros", "sync", "signal", "net", "io-util", "fs", "time", "process"] }
 tokio-tungstenite = "0.29"
@@ -39,10 +42,11 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3.23", features = ["fmt", "env-filter"] }
 tray-icon = { version = "0.24.2", default-features = false, features = ["gtk"], optional = true }
 uuid = { version = "1.23.4", features = ["v4", "serde"] }
+zip = { version = "2", default-features = false, features = ["deflate"] }
 
-# macOS / Windows 使用原生可交互通知；notify-rust 仅用于 Linux D-Bus。
-[target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
-notify-rust = "4.11"
+# 阻止系统休眠仅在桌面三平台存在（keepawake 不支持 Android / iOS）。
+[target.'cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))'.dependencies]
+keepawake = "0.6"
 
 # TLS 后端按平台区分（对齐 engine）：Windows 用系统 Schannel（reqwest 默认 native-tls）；
 # 其余平台用 rustls，native roots 保留本地 CA，bundled WebPKI roots 作公共 CA 兜底——
@@ -61,8 +65,10 @@ winreg = "0.55"
 windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_Storage_FileSystem", "Win32_System_Com", "Win32_UI_Controls", "Win32_UI_Shell", "Win32_UI_Shell_Common", "Win32_UI_WindowsAndMessaging"] }
 windows = { version = "0.61.3", features = ["Data_Xml_Dom", "Foundation", "UI_Notifications", "Win32_Graphics_Gdi", "Win32_System_WinRT", "Win32_UI_Controls", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
 
+# notify-rust 仅用于 Linux D-Bus 通知（macOS / Windows 用原生通知；Android / iOS 不编译）。
 [target.'cfg(target_os = "linux")'.dependencies]
 gtk = { version = "0.18", optional = true }
+notify-rust = "4.11"
 
 # 系统文件图标（NSWorkspace → NSBitmapImageRep → PNG，见 platform/file_icon.rs），随 `desktop` 启用。
 [target.'cfg(target_os = "macos")'.dependencies]

@@ -6,7 +6,7 @@ use fluxdown_ui_components::ControlExt as _;
 use fluxdown_ui_theme::active_theme;
 use gpui::{
     App, AppContext as _, Entity, IntoElement as _, ParentElement, SharedString, Styled,
-    Subscription, Window, div, px,
+    Subscription, Window, div,
 };
 use gpui_component::{
     input::{Input, InputEvent, InputState},
@@ -133,7 +133,7 @@ pub(crate) fn row(ctx: &SectionContext) -> SettingsRow {
             .child(
                 v_flex()
                     .flex_grow(1.)
-                    .flex_basis(px(INPUT_WIDTH))
+                    .flex_basis(active_theme(cx).text_extent(INPUT_WIDTH))
                     .min_w_0()
                     .gap(tokens.spacing.xxs)
                     .child(body_text(cx).child(render_title.clone()))
@@ -141,7 +141,7 @@ pub(crate) fn row(ctx: &SectionContext) -> SettingsRow {
             )
             .child(
                 div()
-                    .w(px(DROPDOWN_MIN_WIDTH))
+                    .w(active_theme(cx).text_extent(DROPDOWN_MIN_WIDTH))
                     .max_w_full()
                     .min_w_0()
                     .flex_shrink_0()

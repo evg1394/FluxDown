@@ -1,4 +1,4 @@
-//! 外观：语言、明暗模式、主题（内置 + 已导入，含导入 / 导出 / 删除）、强调色、界面缩放。
+//! 外观：语言、明暗模式、主题（内置 + 已导入，含导入 / 导出 / 删除）、强调色、界面缩放、字体与字体大小。
 //!
 //! 控件只写偏好（走 `agent.preferences.patch`），不直接改主题 / 语言：app 观察设置存储的偏好
 //! 视图（含未回执的本地编辑），经 `fluxdown_ui_theme::apply_appearance_preferences` 与语言切换
@@ -7,9 +7,10 @@
 use fluxdown_ui_i18n::Translator;
 use fluxdown_ui_theme::{
     AccentScheme, AppearancePreferences, BuiltinThemeId, COLOR_SCHEME_KEY, CUSTOM_COLOR_KEY,
-    ColorTokens, DARK_THEME_KEY, ExportMode, ExtendedTokens, LIGHT_THEME_KEY, THEME_MODE_KEY,
-    ThemeMode, ThemePreference, ThemeSelection, UI_SCALE_KEY, UI_SCALE_PERCENTS, active_theme,
-    argb_color, color_argb, foreground_for, normalize_ui_scale_percent,
+    ColorTokens, DARK_THEME_KEY, ExportMode, ExtendedTokens, FONT_SIZE_KEY, FONT_SIZE_RANGE,
+    FONT_SIZES, LIGHT_THEME_KEY, THEME_MODE_KEY, ThemeMode, ThemePreference, ThemeSelection,
+    UI_SCALE_KEY, UI_SCALE_PERCENTS, active_theme, argb_color, color_argb, foreground_for,
+    normalize_ui_scale_percent,
 };
 use gpui::{
     Anchor, App, AppContext as _, Entity, Hsla, InteractiveElement as _, IntoElement as _,
@@ -30,8 +31,8 @@ use gpui_component::{
 use super::SectionContext;
 use crate::store::SettingsStore;
 use crate::theme_library::{
-    self, ImportError, ImportOutcome, delete_theme, diagnostic_counts, export_document,
-    export_file_name, import_text, register_imported,
+    self, ImportError, ParsedImport, delete_theme, diagnostic_counts, export_document,
+    export_file_name, parse_import, store_import,
 };
 use crate::ui::{Control, SettingsPage, SettingsSection, meta_text, row_button};
 use fluxdown_ui_components::{ButtonVariant, ControlExt as _, FluxIcon};
@@ -74,7 +75,8 @@ pub(crate) fn page(ctx: &SectionContext, _cx: &mut App) -> SettingsPage {
                     color_scheme_field(ctx),
                 )
                 .vertical(),
-            ),
+            )
+            .row(super::icon_pack::item(ctx)),
         SettingsSection::new()
             .title(ctx.t("settingsGroupInterface"))
             .row(ctx.item("uiScale", Some("uiScaleDesc"), ui_scale_field(ctx)))
@@ -82,7 +84,8 @@ pub(crate) fn page(ctx: &SectionContext, _cx: &mut App) -> SettingsPage {
                 "fontFamily",
                 Some("fontFamilyDesktopHint"),
                 super::font_family::field(ctx),
-            )),
+            ))
+            .row(ctx.item("fontSize", Some("fontSizeDesc"), font_size_field(ctx))),
     ])
 }
 
@@ -158,6 +161,7 @@ fn theme_cards_field(ctx: &SectionContext) -> Control {
             let selected = state.appearance().theme(mode).clone();
             let tokens = state.tokens().clone();
             let extended = state.extended().clone();
+            let card_width = state.text_extent(THEME_CARD_WIDTH);
             let group_label = if mode.is_dark() {
                 dark_label.clone()
             } else {
@@ -183,6 +187,7 @@ fn theme_cards_field(ctx: &SectionContext) -> Control {
                     disabled,
                     &tokens,
                     &extended,
+                    card_width,
                     move |cx| select_theme(ThemeSelection::Builtin(id), &store, cx),
                     None,
                 )
@@ -210,6 +215,7 @@ fn theme_cards_field(ctx: &SectionContext) -> Control {
                         disabled,
                         &tokens,
                         &extended,
+                        card_width,
                         move |cx| select_theme(selection.clone(), &select_store, cx),
                         Some(CardDelete {
                             label: delete_label.clone(),
@@ -238,7 +244,7 @@ fn theme_cards_field(ctx: &SectionContext) -> Control {
                         .children(builtin_cards)
                         .children(custom_cards),
                 )
-                .child(theme_actions(&translator, disabled, cx))
+                .child(theme_actions(&store, &translator, disabled, cx))
                 .into_any_element()
         },
     )
@@ -263,7 +269,7 @@ fn select_theme(selection: ThemeSelection, store: &Entity<SettingsStore>, cx: &m
     });
 }
 
-/// 删除已导入主题；任一槽位正选中它时回退到该槽位的内置默认主题并写偏好。
+/// 删除已导入主题（写墓碑，随同步传到其他设备）；任一槽位正选中它时回退到该槽位的内置默认主题。
 fn delete_custom_theme(
     id: &SharedString,
     store: &Entity<SettingsStore>,
@@ -271,9 +277,9 @@ fn delete_custom_theme(
     window: &mut Window,
     cx: &mut App,
 ) {
-    if let Err(error) = delete_theme(id, cx) {
+    if !store.update(cx, |store, cx| delete_theme(id, store, cx)) {
         window.push_notification(
-            Notification::error(format!("{}: {error}", translator.text("themeDeleteError"))),
+            Notification::error(translator.text("themeDeleteError").to_owned()),
             cx,
         );
         return;
@@ -312,6 +318,7 @@ fn theme_card(
     disabled: bool,
     tokens: &fluxdown_ui_theme::SemanticThemeTokens,
     extended: &ExtendedTokens,
+    width: gpui::Pixels,
     on_select: impl Fn(&mut App) + 'static,
     delete: Option<CardDelete>,
 ) -> impl gpui::IntoElement {
@@ -387,7 +394,7 @@ fn theme_card(
 
     div()
         .id(element_id)
-        .w(px(THEME_CARD_WIDTH))
+        .w(width)
         .p(tokens.spacing.sm)
         .rounded(tokens.radius.lg)
         .border_1()
@@ -435,9 +442,14 @@ fn theme_card(
 // ───────────────────────── 导入 / 导出 ─────────────────────────
 
 /// 「导入」「导出 ▾（仅差异 / 完整主题）」「更多主题」。
-fn theme_actions(translator: &Translator, disabled: bool, cx: &App) -> impl gpui::IntoElement {
+fn theme_actions(
+    store: &Entity<SettingsStore>,
+    translator: &Translator,
+    disabled: bool,
+    cx: &App,
+) -> impl gpui::IntoElement {
     let tokens = active_theme(cx).tokens();
-    let has_library = theme_library::library(cx).is_some();
+    let import_store = store.clone();
     let import_translator = translator.clone();
     let export_items = [
         (ExportMode::Diff, "themeExportDiff"),
@@ -461,8 +473,10 @@ fn theme_actions(translator: &Translator, disabled: bool, cx: &App) -> impl gpui
                 ButtonVariant::Secondary,
                 cx,
             )
-            .disabled(disabled || !has_library)
-            .on_click(move |_, window, cx| import_themes(import_translator.clone(), window, cx)),
+            .disabled(disabled)
+            .on_click(move |_, window, cx| {
+                import_themes(import_store.clone(), import_translator.clone(), window, cx)
+            }),
         )
         .child(
             Button::new("appearance-theme-export")
@@ -496,13 +510,15 @@ fn theme_actions(translator: &Translator, disabled: bool, cx: &App) -> impl gpui
         )
 }
 
-/// 选择一个或多个主题文件（本格式 / v1 / Flutter FluxThemeJson），逐个解析并原样存入主题库，
-/// 成功的立即注册；结束后以通知汇总成功数、诊断（迁移 / 未知键 / 非法值 / 越界 / 新版本等）
-/// 与失败原因。
-fn import_themes(translator: Translator, window: &mut Window, cx: &mut App) {
-    let Some(library) = theme_library::library(cx) else {
-        return;
-    };
+/// 选择一个或多个主题文件（本格式 / v1 / Flutter FluxThemeJson），逐个解析后把原文原样写入
+/// 主题偏好（随配置同步到其他设备），由偏好投影注册；结束后以通知汇总成功数、诊断（迁移 /
+/// 未知键 / 非法值 / 越界 / 新版本等）与失败原因。
+fn import_themes(
+    store: Entity<SettingsStore>,
+    translator: Translator,
+    window: &mut Window,
+    cx: &mut App,
+) {
     let receiver = cx.prompt_for_paths(PathPromptOptions {
         files: true,
         directories: false,
@@ -527,13 +543,13 @@ fn import_themes(translator: Translator, window: &mut Window, cx: &mut App) {
                         );
                         let result = std::fs::read_to_string(&path)
                             .map_err(ImportError::Read)
-                            .and_then(|text| import_text(library.as_ref(), &text));
+                            .and_then(parse_import);
                         (name, result)
                     })
                     .collect::<Vec<_>>()
             })
             .await;
-        let report = cx.update(|cx| import_report(results, &translator, cx));
+        let report = cx.update(|cx| import_report(results, &store, &translator, cx));
 
         let Ok(()) = window_handle.update(cx, move |_, window, cx| {
             for notification in report {
@@ -547,9 +563,10 @@ fn import_themes(translator: Translator, window: &mut Window, cx: &mut App) {
     .detach();
 }
 
-/// 注册成功项并生成汇总通知：成功数 / 各文件诊断计数 / 失败原因。
+/// 写入成功项并生成汇总通知：成功数 / 各文件诊断计数 / 失败原因。
 fn import_report(
-    results: Vec<(String, Result<ImportOutcome, ImportError>)>,
+    results: Vec<(String, Result<ParsedImport, ImportError>)>,
+    store: &Entity<SettingsStore>,
     translator: &Translator,
     cx: &mut App,
 ) -> Vec<Notification> {
@@ -557,10 +574,15 @@ fn import_report(
     let mut adjusted = Vec::new();
     let mut failed = Vec::new();
     for (name, result) in results {
+        let result = result.and_then(|parsed| {
+            let counts = diagnostic_counts(&parsed.diagnostics);
+            store
+                .update(cx, |store, cx| store_import(parsed, store, cx))
+                .map(|_| counts)
+        });
         match result {
-            Ok(outcome) => {
+            Ok(counts) => {
                 imported += 1;
-                let counts = diagnostic_counts(&outcome.diagnostics);
                 if !counts.is_empty() {
                     let summary = counts
                         .into_iter()
@@ -569,7 +591,6 @@ fn import_report(
                         .join(" · ");
                     adjusted.push(format!("{name}: {summary}"));
                 }
-                register_imported(outcome.theme, cx);
             }
             Err(error) => {
                 let reason = translator.text(error.i18n_key());
@@ -808,7 +829,7 @@ fn custom_color_picker(
     )
 }
 
-// ───────────────────────── 界面缩放 ─────────────────────────
+// ───────────────────────── 界面缩放 / 字体大小 ─────────────────────────
 
 fn ui_scale_field(ctx: &SectionContext) -> Control {
     let options: Vec<(SharedString, SharedString)> = UI_SCALE_PERCENTS
@@ -834,6 +855,43 @@ fn ui_scale_field(ctx: &SectionContext) -> Control {
             store.update(cx, |store, cx| {
                 store.set_pref(UI_SCALE_KEY, serde_json::Value::from(scale), cx);
             });
+        },
+    )
+}
+
+/// 下拉中「跟随主题」项的值；写入偏好时为 `null`（清除本机字号）。
+const FONT_SIZE_THEME: &str = "theme";
+
+/// 本机正文字号（px）：其余文字与承载文字的行 / 控件高度同比适配，再与界面缩放相乘。
+fn font_size_field(ctx: &SectionContext) -> Control {
+    let mut options = vec![(
+        SharedString::from(FONT_SIZE_THEME),
+        ctx.t("fontSizeFollowTheme"),
+    )];
+    options.extend(FONT_SIZES.iter().map(|size| {
+        (
+            SharedString::from(size.to_string()),
+            SharedString::from(format!("{size} px")),
+        )
+    }));
+    let store = ctx.store();
+    Control::dropdown(
+        options,
+        move |cx: &App| {
+            active_theme(cx)
+                .appearance()
+                .font_size
+                .map_or(SharedString::from(FONT_SIZE_THEME), |size| {
+                    SharedString::from(size.to_string())
+                })
+        },
+        move |value: SharedString, cx: &mut App| {
+            let pref = match value.parse::<u16>() {
+                Ok(size) if FONT_SIZE_RANGE.contains(&size) => serde_json::Value::from(size),
+                Ok(_) => return,
+                Err(_) => serde_json::Value::Null,
+            };
+            store.update(cx, |store, cx| store.set_pref(FONT_SIZE_KEY, pref, cx));
         },
     )
 }

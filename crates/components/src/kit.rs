@@ -10,14 +10,15 @@
 //! - 标签页（对话框内、页面内）一律 [`segmented_tabs`]，不自造按钮组。
 //! - 复选框一律 [`check_mark`] / [`check_row`]，不用 gpui-component `Checkbox`。
 //! - gpui 的 `hover` 每个元素只能设置一次：本 crate 返回的按钮 / 行已设置悬停，调用方不得再 `.hover()`。
+//!   本 crate 按钮的底色悬停 / 按下 / 选中由 [`crate::StateLayer`] 过渡绘制，调用方也不得再 `.active()` 改底色。
 
-use std::rc::Rc;
+use std::{cell::RefCell, rc::Rc};
 
 use fluxdown_ui_theme::active_theme;
 use gpui::{
-    AnyElement, App, Div, ElementId, FontWeight, InteractiveElement as _, IntoElement,
-    ParentElement, Pixels, RenderOnce, SharedString, StatefulInteractiveElement as _, Styled,
-    Window, div, prelude::FluentBuilder as _, px,
+    AnyElement, App, Bounds, BoxShadow, Div, ElementId, FontWeight, Hsla, InteractiveElement as _,
+    IntoElement, ParentElement, Pixels, RenderOnce, SharedString, StatefulInteractiveElement as _,
+    Styled, Window, div, point, prelude::FluentBuilder as _, px, size,
 };
 use gpui_component::{
     ActiveTheme as _, Sizable as _, Size,
@@ -27,7 +28,7 @@ use gpui_component::{
     scroll::ScrollableElement as _,
 };
 
-use crate::{CheckState, check_mark, tabular_numbers};
+use crate::{CheckState, SlidingHighlight, check_mark, color_transition, tabular_numbers};
 
 /// 统一控件尺寸（带文字按钮与输入框）。
 pub trait ControlExt: Sized {
@@ -52,6 +53,7 @@ impl ControlExt for Button {
             .h(theme.density().control)
             .px(tokens.spacing.sm + tokens.spacing.xxs)
             .text_size(tokens.typography.sm.size)
+            .line_height(tokens.typography.sm.line_height)
     }
 }
 
@@ -62,6 +64,21 @@ impl IconControlExt for Button {
             self.with_size(Size::Medium),
             active_theme(cx).density().control,
         )
+    }
+}
+
+/// 按钮进行中状态。gpui-component 的 `Button::loading` 只把**前置图标**换成转圈；
+/// 纯文字按钮没有图标，`loading(true)` 只会变得不可点击而看不到任何动画。
+/// 一律用 [`BusyExt::busy`]：进行中时补一个前置 spinner。
+pub trait BusyExt: Sized {
+    fn busy(self, busy: bool) -> Self;
+}
+
+impl BusyExt for Button {
+    fn busy(self, busy: bool) -> Self {
+        self.loading(busy).when(busy, |button| {
+            button.icon(gpui_component::spinner::Spinner::new())
+        })
     }
 }
 
@@ -95,6 +112,9 @@ type TabSelect = Rc<dyn Fn(usize, &mut Window, &mut App)>;
 
 /// 分段标签（macOS segmented control 风格）：浅灰轨道内，选中项白底 + 细阴影 +
 /// 正文色中等字重，未选中为二级文字色。轨道高 `density.control`，项高再减 4。
+///
+/// 选中白底是一块随选中项滑动的底块（弹簧驱动，宽度同步过渡），标签文字色同步淡变。
+/// 底块按上一帧量得的标签位置定位；首帧尚无测量时由选中项自己画底，下一帧交给底块。
 pub fn segmented_tabs(
     id: impl Into<ElementId>,
     labels: impl IntoIterator<Item = SharedString>,
@@ -105,12 +125,8 @@ pub fn segmented_tabs(
     let theme = active_theme(cx);
     let tokens = theme.tokens();
     let colors = tokens.colors;
-    let extended = theme.extended().colors;
-    let on_select: TabSelect = Rc::new(on_select);
-    let id: ElementId = id.into();
     let control = theme.density().control;
     let tab_radius = theme.components().tab_radius;
-    let inner = control - px(4.);
 
     div()
         .flex()
@@ -118,43 +134,169 @@ pub fn segmented_tabs(
         .items_center()
         .h(control)
         .p(px(2.))
-        .gap(px(2.))
         .rounded(tab_radius + px(1.))
-        .bg(extended.nav_hover)
-        .children(labels.into_iter().enumerate().map(|(index, label)| {
-            let active = index == selected;
-            let on_select = Rc::clone(&on_select);
-            div()
-                .id(ElementId::NamedInteger(
-                    SharedString::from(format!("{id}-tab")),
-                    index as u64,
-                ))
-                .h(inner)
-                .px(tokens.spacing.md)
-                .flex()
-                .items_center()
-                .rounded(tab_radius)
-                .text_size(tokens.typography.sm.size)
-                .cursor_pointer()
-                .map(|this| {
-                    if active {
-                        this.bg(colors.surface)
-                            .text_color(colors.foreground)
-                            .font_weight(FontWeight::MEDIUM)
-                            .shadow(tokens.shadow.sm.clone())
+        .bg(theme.extended().colors.nav_hover)
+        .child(SegmentedTabs {
+            id: id.into(),
+            labels: labels.into_iter().collect(),
+            selected,
+            on_select: Rc::new(on_select),
+            style: SegmentedStyle {
+                height: control - px(4.),
+                radius: tab_radius,
+                padding_x: tokens.spacing.md,
+                text_size: tokens.typography.sm.size,
+                line_height: tokens.typography.sm.line_height,
+                surface: colors.surface,
+                foreground: colors.foreground,
+                muted_foreground: colors.muted_foreground,
+                ring: colors.ring,
+                shadow: tokens.shadow.sm.clone(),
+            },
+        })
+}
+
+struct SegmentedStyle {
+    height: Pixels,
+    radius: Pixels,
+    padding_x: Pixels,
+    text_size: Pixels,
+    line_height: Pixels,
+    surface: Hsla,
+    foreground: Hsla,
+    muted_foreground: Hsla,
+    ring: Hsla,
+    shadow: Vec<BoxShadow>,
+}
+
+/// 上一帧量得的各标签相对首个标签的 `(左缘, 宽度)`，由标签行的 `on_children_prepainted`
+/// 写入。放在元素状态而非实体里（不被依赖追踪），所以测量值变化时由写入方自己请求一帧，
+/// 让所在视图按新几何重建（首帧、标签增减、改字号 / 语言）；只存相对值，窗口缩放与滚动
+/// 不会触发重建。
+#[derive(Clone, Default)]
+struct SegmentGeometry(Rc<RefCell<Vec<(Pixels, Pixels)>>>);
+
+#[derive(IntoElement)]
+struct SegmentedTabs {
+    id: ElementId,
+    labels: Vec<SharedString>,
+    selected: usize,
+    on_select: TabSelect,
+    style: SegmentedStyle,
+}
+
+impl RenderOnce for SegmentedTabs {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let Self {
+            id,
+            labels,
+            selected,
+            on_select,
+            style,
+        } = self;
+        let count = labels.len();
+
+        let (geometry, highlight, text_colors) = window.with_id(id.clone(), |window| {
+            let geometry =
+                window.with_global_id(ElementId::from("geometry"), |global_id, window| {
+                    window.with_element_state(global_id, |state: Option<SegmentGeometry>, _| {
+                        let state = state.unwrap_or_default();
+                        (state.clone(), state)
+                    })
+                });
+            // 选中项的底块外框；尚无测量（首帧）或与标签数不符时本帧由选中项自己画底，
+            // 测量写入后会请求下一帧交给底块。
+            let highlight = {
+                let tabs = geometry.0.borrow();
+                tabs.get(selected)
+                    .filter(|_| tabs.len() == count)
+                    .map(|&(left, width)| {
+                        Bounds::new(point(left, px(0.)), size(width, style.height))
+                    })
+            };
+            let text_colors: Vec<Hsla> = (0..count)
+                .map(|index| {
+                    let color = if index == selected {
+                        style.foreground
                     } else {
-                        this.text_color(colors.muted_foreground)
-                            .hover(move |style| style.text_color(colors.foreground))
-                    }
+                        style.muted_foreground
+                    };
+                    color_transition(index, color, window, cx)
                 })
-                .border_1()
-                .border_color(gpui::transparent_black())
-                .focusable()
-                .tab_stop(true)
-                .focus_visible(move |style| style.border_color(colors.ring))
-                .on_click(move |_, window, cx| on_select(index, window, cx))
-                .child(label)
-        }))
+                .collect();
+            (geometry, highlight, text_colors)
+        });
+
+        let has_highlight = highlight.is_some();
+        div()
+            .relative()
+            .h_full()
+            .when_some(highlight, |this, bounds| {
+                this.child(
+                    SlidingHighlight::new(id.clone(), bounds, style.surface)
+                        .radius(style.radius)
+                        .shadow(style.shadow.clone()),
+                )
+            })
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .h_full()
+                    .gap(px(2.))
+                    .on_children_prepainted(move |bounds, window, _| {
+                        let origin = bounds.first().map_or(px(0.), |first| first.origin.x);
+                        let measured: Vec<(Pixels, Pixels)> = bounds
+                            .iter()
+                            .map(|tab| (tab.origin.x - origin, tab.size.width))
+                            .collect();
+                        let mut tabs = geometry.0.borrow_mut();
+                        if *tabs != measured {
+                            *tabs = measured;
+                            window.request_animation_frame();
+                        }
+                    })
+                    .children(labels.into_iter().zip(text_colors).enumerate().map(
+                        |(index, (label, text_color))| {
+                            let active = index == selected;
+                            let on_select = Rc::clone(&on_select);
+                            let (foreground, ring) = (style.foreground, style.ring);
+                            div()
+                                .id(ElementId::NamedInteger(
+                                    SharedString::from(format!("{id}-tab")),
+                                    index as u64,
+                                ))
+                                .h(style.height)
+                                .px(style.padding_x)
+                                .flex()
+                                .items_center()
+                                .rounded(style.radius)
+                                .text_size(style.text_size)
+                                .line_height(style.line_height)
+                                .cursor_pointer()
+                                .text_color(text_color)
+                                .map(|this| {
+                                    if !active {
+                                        this.hover(move |hover| hover.text_color(foreground))
+                                    } else if has_highlight {
+                                        this.font_weight(FontWeight::MEDIUM)
+                                    } else {
+                                        this.font_weight(FontWeight::MEDIUM)
+                                            .bg(style.surface)
+                                            .shadow(style.shadow.clone())
+                                    }
+                                })
+                                .border_1()
+                                .border_color(gpui::transparent_black())
+                                .focusable()
+                                .tab_stop(true)
+                                .focus_visible(move |focus| focus.border_color(ring))
+                                .on_click(move |_, window, cx| on_select(index, window, cx))
+                                .child(label)
+                        },
+                    )),
+            )
+    }
 }
 
 /// 可点击的复选行：[`check_mark`] + 文字（可选尾部计数/说明）。整行可点。
@@ -179,6 +321,7 @@ pub fn check_row(
         .rounded(tokens.radius.md)
         .cursor_pointer()
         .text_size(tokens.typography.sm.size)
+        .line_height(tokens.typography.sm.line_height)
         .text_color(tokens.colors.foreground)
         .border_1()
         .border_color(gpui::transparent_black())

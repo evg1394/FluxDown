@@ -192,11 +192,12 @@ pub fn open(window: &mut Window, cx: &mut App, translator: &Translator, config: 
     });
 
     let dialog_list = list.clone();
+    let width = active_theme(cx).text_extent(PALETTE_WIDTH);
     window.open_dialog(cx, move |dialog, _, _| {
         let list = dialog_list.clone();
         let placeholder = placeholder.clone();
         dialog
-            .w(px(PALETTE_WIDTH))
+            .w(width)
             .margin_top(px(PALETTE_MARGIN_TOP))
             .p_0()
             .close_button(false)
@@ -381,15 +382,17 @@ impl ListDelegate for PaletteDelegate {
                     .min_w_0()
                     .truncate()
                     .text_size(tokens.typography.sm.size)
+                    .line_height(tokens.typography.sm.line_height)
                     .text_color(tokens.colors.foreground)
                     .child(item.title.clone()),
             )
             .children(item.detail.clone().map(|detail| {
                 div()
                     .flex_none()
-                    .max_w(px(PALETTE_WIDTH * 0.45))
+                    .max_w(theme.text_extent(PALETTE_WIDTH * 0.45))
                     .truncate()
                     .text_size(tokens.typography.xs.size)
+                    .line_height(tokens.typography.xs.line_height)
                     .text_color(extended.colors.text_tertiary)
                     .child(detail)
             }))
@@ -397,6 +400,7 @@ impl ListDelegate for PaletteDelegate {
                 div()
                     .flex_none()
                     .text_size(tokens.typography.xs.size)
+                    .line_height(tokens.typography.xs.line_height)
                     .text_color(tokens.colors.muted_foreground)
                     .child(shortcut)
             }));

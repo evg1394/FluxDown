@@ -40,11 +40,12 @@ use crate::dash_downloader::{
 };
 use crate::downloader::{
     DB_SAVE_INTERVAL_SECS, DownloadError, DownloadParams, ProgressUpdate, TEMP_EXT,
-    claim_final_name, dedup_filename, extract_from_url, sanitize_filename,
+    claim_final_name, dedup_filename,
 };
 use crate::events::EventSink;
 use crate::logger::log_info;
 use crate::model::HlsQualityOption;
+use crate::naming::{extract_from_url, sanitize_filename};
 use crate::output;
 use crate::selection::SelectionOutcome;
 use crate::transfer_activity::{TaskRuntime, TransferTracker};
@@ -540,6 +541,19 @@ fn parse_m3u8_bytes(base_url: &str, bytes: &[u8]) -> Result<M3u8Content, Downloa
                     };
                 }
 
+                // `m3u8-rs` 解析 `#EXT-X-KEY:METHOD=NONE` 失败时,整条标签会被降级进
+                // `unknown_tags`(`tag == "X-KEY"`),段上不再有 `key`。而本状态机里
+                // `None` 表示"沿用上一段密钥",于是声明为明文的段会被上一段的 AES-128
+                // 密钥解密,以 PKCS7 unpad 失败告终。这里把那条被丢掉的标签识别回来,
+                // 显式结束加密状态。
+                if seg.key.is_none() && has_dropped_ext_x_key_method_none(seg) {
+                    current_key = Some(HlsKey {
+                        method: HlsKeyMethod::None,
+                        uri: String::new(),
+                        iv: None,
+                    });
+                }
+
                 let seg_key = current_key.as_ref().and_then(|k| {
                     if k.method == HlsKeyMethod::Aes128 {
                         Some(HlsKey {
@@ -606,6 +620,25 @@ fn parse_m3u8_bytes(base_url: &str, bytes: &[u8]) -> Result<M3u8Content, Downloa
             })
         }
     }
+}
+
+/// `true` 若 `seg` 携带一条被降级进 `unknown_tags` 的 `#EXT-X-KEY:METHOD=NONE`。
+///
+/// `m3u8-rs` 解析 `METHOD=NONE` 失败后,`alt` 回溯把整条标签降级成
+/// `ExtTag { tag: "X-KEY", rest }`,段上不再有 `key`;而 `None` 在本模块的粘性状态机里
+/// 表示"沿用上一段密钥",明文段因此会被上一段的密钥解密。RFC 8216 §4.3.2.4 规定
+/// `METHOD=NONE` 时其他属性 MUST NOT 出现,故该形态必不带 `IV` —— 正是解析失败的那一类。
+///
+/// 只按 RFC 8216 §4.2 的严格拼写比对属性项(属性名 `METHOD`、值 `NONE`、`=` 两侧无空白),
+/// 不为任何非法拼写放宽。
+fn has_dropped_ext_x_key_method_none(seg: &m3u8_rs::MediaSegment) -> bool {
+    seg.unknown_tags.iter().any(|tag| {
+        tag.tag == "X-KEY"
+            && tag
+                .rest
+                .as_deref()
+                .is_some_and(|rest| rest.split(',').any(|attr| attr == "METHOD=NONE"))
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -2259,22 +2292,16 @@ async fn run_hls_download_inner(p: &DownloadParams) -> Result<i64, DownloadError
     // 完成期占名:与 HTTP/ED2K 相同的 create_new 不覆盖语义。原名被占用时
     // dedup 换名(overwrite 策略只对原名删除旧文件),并把最终文件名写回 DB。
     let avoid = sibling_avoid(p).await;
-    let chosen = claim_final_name(
-        &temp_path,
-        &save_dir,
-        &actual_name,
-        p.allow_overwrite,
-        &avoid,
-    )
-    .await
-    .map_err(|e| {
-        DownloadError::Other(format!(
-            "failed to rename {} -> {}: {}",
-            temp_path.display(),
-            dest_path.display(),
-            e
-        ))
-    })?;
+    let chosen = claim_final_name(&temp_path, &save_dir, &actual_name, &p.overwrite, &avoid)
+        .await
+        .map_err(|e| {
+            DownloadError::Other(format!(
+                "failed to rename {} -> {}: {}",
+                temp_path.display(),
+                dest_path.display(),
+                e
+            ))
+        })?;
     let dest_path = if chosen == actual_name {
         dest_path
     } else {
@@ -2324,7 +2351,7 @@ async fn run_hls_download_inner(p: &DownloadParams) -> Result<i64, DownloadError
     if let Some(mp4_path) = remux_ts_to_mp4(
         &dest_path,
         &p.task_id,
-        p.allow_overwrite,
+        &p.overwrite,
         is_fmp4,
         ffmpeg.as_deref(),
         &p.cancel_token,
@@ -2414,10 +2441,9 @@ fn remux_space_ok(avail: Option<u64>, file_len: u64) -> bool {
     }
 }
 
-/// `allow_overwrite`（config `file_exists_behavior` == "overwrite"）：为
-/// true 时,同名 `.mp4` 已作为普通最终文件存在不触发编号改名——保留原名,
-/// 占名遇 AlreadyExists 时删除旧文件后重试一次;目录/删除失败仍走既有
-/// 失败路径(保留 .ts)。
+/// `overwrite` 允许替换 `<stem>.mp4` 时:同名 `.mp4` 已作为普通最终文件存在
+/// 不触发编号改名——保留原名,占名遇 AlreadyExists 时删除旧文件后重试一次;
+/// 目录/删除失败仍走既有失败路径(保留 .ts)。
 ///
 /// `is_fmp4`(#682):播放列表带 EXT-X-MAP,`.ts` 里装的已经是分片 MP4
 /// (ftyp+moov+[moof+mdat]*),不做 TS→MP4 转换,跳过体积/空间预检,只按同一
@@ -2428,7 +2454,7 @@ fn remux_space_ok(avail: Option<u64>, file_len: u64) -> bool {
 async fn remux_ts_to_mp4(
     ts_path: &std::path::Path,
     task_id: &str,
-    allow_overwrite: bool,
+    overwrite: &crate::file_exists::OverwritePolicy,
     is_fmp4: bool,
     ffmpeg: Option<&std::path::Path>,
     cancel: &tokio_util::sync::CancellationToken,
@@ -2463,12 +2489,13 @@ async fn remux_ts_to_mp4(
     }
     let stem = ts_path.file_stem().and_then(|s| s.to_str())?;
     let desired_name = format!("{}.mp4", stem);
+    let allow_overwrite = overwrite.permits(&desired_name);
     let unique_name = dedup_filename(
         parent,
         &desired_name,
         &std::collections::HashSet::new(),
         &std::collections::HashSet::new(),
-        allow_overwrite,
+        overwrite,
     )
     .await;
     let mp4_path = parent.join(&unique_name);
@@ -3120,18 +3147,17 @@ async fn mux_video_audio(
     .await?;
 
     let avoid = sibling_avoid(p).await;
-    let chosen =
-        match claim_final_name(&mux_tmp, save_dir, &desired, p.allow_overwrite, &avoid).await {
-            Ok(name) => name,
-            Err(e) => {
-                if let Err(error) = tokio::fs::remove_file(&mux_tmp).await
-                    && error.kind() != std::io::ErrorKind::NotFound
-                {
-                    crate::logger::report_warning("hls-download", "remove_temporary_file", &error);
-                }
-                return Err(e);
+    let chosen = match claim_final_name(&mux_tmp, save_dir, &desired, &p.overwrite, &avoid).await {
+        Ok(name) => name,
+        Err(e) => {
+            if let Err(error) = tokio::fs::remove_file(&mux_tmp).await
+                && error.kind() != std::io::ErrorKind::NotFound
+            {
+                crate::logger::report_warning("hls-download", "remove_temporary_file", &error);
             }
-        };
+            return Err(e);
+        }
+    };
     let mp4_path = save_dir.join(&chosen);
     let mp4_size = tokio::fs::metadata(&mp4_path)
         .await
@@ -3582,7 +3608,7 @@ async fn download_segment_once(
 #[cfg(test)]
 mod tests {
     use super::{
-        DEFAULT_HLS_CONCURRENCY, DownloadError, M3u8Content, MAX_HLS_CONCURRENCY,
+        DEFAULT_HLS_CONCURRENCY, DownloadError, HlsKeyMethod, M3u8Content, MAX_HLS_CONCURRENCY,
         compute_default_iv, decrypt_segment, hls_concurrency, is_hls_url, parse_iv_hex,
         parse_m3u8_bytes, parse_resume_checkpoint, remux_space_ok, resolve_uri, should_write_init,
     };
@@ -4700,8 +4726,15 @@ v360.m3u8\n\
         };
         let cancel = tokio_util::sync::CancellationToken::new();
 
-        let mp4 =
-            super::remux_ts_to_mp4(&ts, "t", false, false, Some(ffmpeg.as_path()), &cancel).await;
+        let mp4 = super::remux_ts_to_mp4(
+            &ts,
+            "t",
+            &crate::file_exists::OverwritePolicy::Never,
+            false,
+            Some(ffmpeg.as_path()),
+            &cancel,
+        )
+        .await;
 
         let Some(mp4) = mp4 else {
             panic!("ffmpeg remux must produce an mp4");
@@ -4755,5 +4788,72 @@ v360.m3u8\n\
             "{probe}"
         );
         std::fs::remove_dir_all(&dir).expect("remove HLS fixture directory");
+    }
+
+    // ---------------------------------------------------------------------
+    // EXT-X-KEY:METHOD=NONE — 结束加密,而非沿用上一段密钥
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn test_parse_m3u8_bytes_ext_x_key_method_none_ends_encryption() {
+        // METHOD=NONE 声明其后的段为明文。该标签若被忽略,明文段会沿用上一段的
+        // AES-128 密钥,下载阶段以 PKCS7 unpad 失败告终。
+        let base_url = "https://cdn.example.com/live/media.m3u8";
+        let playlist = "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:6\n\
+#EXT-X-MEDIA-SEQUENCE:0\n\
+#EXT-X-KEY:METHOD=AES-128,URI=\"key.bin\",IV=0x00000000000000000000000000000001\n\
+#EXTINF:6.000,\nseg0.ts\n#EXT-X-KEY:METHOD=NONE\n#EXTINF:6.000,\nseg1.ts\n#EXT-X-ENDLIST\n";
+        let content = match parse_m3u8_bytes(base_url, playlist.as_bytes()) {
+            Ok(c) => c,
+            Err(e) => panic!("playlist must parse, got error: {e}"),
+        };
+        match content {
+            M3u8Content::Media { segments, .. } => {
+                assert_eq!(segments.len(), 2);
+                let encrypted = match &segments[0].key {
+                    Some(k) => k,
+                    None => panic!("segment 0 must stay AES-128 encrypted"),
+                };
+                assert!(
+                    encrypted.method == HlsKeyMethod::Aes128,
+                    "segment 0 must stay AES-128 encrypted"
+                );
+                assert_eq!(encrypted.uri, "https://cdn.example.com/live/key.bin");
+                assert!(
+                    segments[1].key.is_none(),
+                    "METHOD=NONE must end encryption instead of inheriting the previous key"
+                );
+            }
+            M3u8Content::Master { .. } => panic!("expected media playlist"),
+        }
+    }
+
+    #[test]
+    fn test_parse_m3u8_bytes_unrelated_unknown_tag_keeps_sticky_key() {
+        // 兜底只认 METHOD=NONE:其他未知标签不得改动粘性密钥状态。
+        let base_url = "https://cdn.example.com/live/media.m3u8";
+        let playlist = "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:6\n\
+#EXT-X-MEDIA-SEQUENCE:0\n\
+#EXT-X-KEY:METHOD=AES-128,URI=\"key.bin\",IV=0x00000000000000000000000000000001\n\
+#EXTINF:6.000,\nseg0.ts\n#EXT-X-UNKNOWN-TAG:whatever\n#EXTINF:6.000,\nseg1.ts\n#EXT-X-ENDLIST\n";
+        let content = match parse_m3u8_bytes(base_url, playlist.as_bytes()) {
+            Ok(c) => c,
+            Err(e) => panic!("playlist must parse, got error: {e}"),
+        };
+        match content {
+            M3u8Content::Media { segments, .. } => {
+                assert_eq!(segments.len(), 2);
+                let inherited = match &segments[1].key {
+                    Some(k) => k,
+                    None => panic!("AES-128 must stay in effect across segments"),
+                };
+                assert!(
+                    inherited.method == HlsKeyMethod::Aes128,
+                    "AES-128 must stay in effect across segments"
+                );
+                assert_eq!(inherited.uri, "https://cdn.example.com/live/key.bin");
+            }
+            M3u8Content::Master { .. } => panic!("expected media playlist"),
+        }
     }
 }

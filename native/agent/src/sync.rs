@@ -10,13 +10,14 @@
 //! - 拉取到的单条毒值只跳过并记录，不阻塞水位前进；
 //! - 首次 / resync 把目录里云端没有的本机值播种上云。
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
 use fluxdown_protocol::{
-    AgentEvent, DaemonConfigPatch, ErrorReason, RpcErrorData, ServiceEvent, SettingSpec,
-    SyncStatusDto, daemon_config_default, daemon_config_to_value, normalize_daemon_config_value,
+    AgentEvent, CUSTOM_THEMES_KEY, DaemonConfigPatch, ErrorReason, RpcErrorData, ServiceEvent,
+    SettingSpec, SyncStatusDto, custom_theme_id, daemon_config_default, daemon_config_to_value,
+    normalize_daemon_config_value, sync_scope_key,
 };
 use futures_util::StreamExt;
 use serde::Deserialize;
@@ -41,6 +42,12 @@ pub fn owner_for_key(key: &str) -> SyncOwner {
     setting_spec(key).map_or(SyncOwner::Excluded, |spec| spec.owner)
 }
 
+/// 键（或其所属集合，如自定义主题键之于 [`CUSTOM_THEMES_KEY`]）已设为本机专属。
+fn is_local_only(local_only_keys: &[String], key: &str) -> bool {
+    let scope = sync_scope_key(key);
+    local_only_keys.iter().any(|local| local == scope)
+}
+
 const SSE_IDLE_TIMEOUT: Duration = Duration::from_secs(75);
 const LOCAL_DEBOUNCE: Duration = Duration::from_millis(600);
 const RESYNC_PAUSE: Duration = Duration::from_secs(1);
@@ -53,6 +60,9 @@ const RETRY_DELAYS: [Duration; 4] = [
 ];
 /// SSE 单行上限；超过说明流已损坏。
 const MAX_SSE_LINE_BYTES: usize = 1024 * 1024;
+/// 单次推送的条目上限，镜像 FluxCloud `sync::MAX_ITEMS_PER_PUSH`：自定义主题逐个成键，
+/// 首次播种时脏键数可能超出，必须分批。
+const MAX_ITEMS_PER_PUSH: usize = 128;
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -180,9 +190,11 @@ impl SyncService {
             for key in keys {
                 if local_only {
                     set.insert(key.clone());
-                    // 专属键不再推送本机的待上传编辑。
-                    if let Some(entry) = state.sync_entries.get_mut(key) {
-                        entry.dirty = false;
+                    // 专属键（含集合下的全部成员键）不再推送本机的待上传编辑。
+                    for (entry_key, entry) in &mut state.sync_entries {
+                        if sync_scope_key(entry_key) == key {
+                            entry.dirty = false;
+                        }
                     }
                 } else if set.remove(key) {
                     rejoined = true;
@@ -608,49 +620,58 @@ impl SyncService {
         }
         let mut idle = false;
         if !sent_entries.is_empty() {
-            let payload = sent_entries
-                .iter()
-                .map(|(key, entry)| {
-                    serde_json::json!({
-                        "key": key,
-                        "value": entry.value,
-                        "deleted": entry.deleted,
-                        "version": entry.version,
+            let sent_entries = sent_entries.into_iter().collect::<Vec<_>>();
+            // 每批回包恰好是上一水位的下一个 revision（本批无实变时等于上一水位）才说明期间无他人
+            // 写入；否则保持 pull 水位，让后续 SSE 触发的 pull 补回并发写入。
+            let mut watermark = Some(pull.revision);
+            for batch in sent_entries.chunks(MAX_ITEMS_PER_PUSH) {
+                let payload = batch
+                    .iter()
+                    .map(|(key, entry)| {
+                        serde_json::json!({
+                            "key": key,
+                            "value": entry.value,
+                            "deleted": entry.deleted,
+                            "version": entry.version,
+                        })
                     })
-                })
-                .collect::<Vec<_>>();
-            let response = self
-                .cloud
-                .at_epoch(epoch)
-                .sync_push(&serde_json::json!({
-                    "deviceId": device_id,
-                    "items": payload,
-                }))
-                .await?;
-            let revision = response
-                .get("revision")
-                .and_then(Value::as_u64)
-                .ok_or_else(|| SyncError::Protocol("sync push returned no revision".to_owned()))?;
+                    .collect::<Vec<_>>();
+                let response = self
+                    .cloud
+                    .at_epoch(epoch)
+                    .sync_push(&serde_json::json!({
+                        "deviceId": device_id,
+                        "items": payload,
+                    }))
+                    .await?;
+                let revision = response
+                    .get("revision")
+                    .and_then(Value::as_u64)
+                    .ok_or_else(|| {
+                        SyncError::Protocol("sync push returned no revision".to_owned())
+                    })?;
+                let mut state = self.cloud.lock_epoch(epoch).await?;
+                if state.account_uid.as_deref() != Some(uid.as_str()) {
+                    return Err(SyncError::AccountChanged);
+                }
+                for (key, sent) in batch {
+                    if let Some(entry) = state.sync_entries.get_mut(key)
+                        && entry.value == sent.value
+                        && entry.deleted == sent.deleted
+                        && entry.version == sent.version
+                    {
+                        entry.dirty = false;
+                    }
+                }
+                watermark = watermark
+                    .filter(|current| revision == *current || revision == current.saturating_add(1))
+                    .map(|_| revision);
+            }
             let mut state = self.cloud.lock_epoch(epoch).await?;
             if state.account_uid.as_deref() != Some(uid.as_str()) {
                 return Err(SyncError::AccountChanged);
             }
-            for (key, sent) in &sent_entries {
-                if let Some(entry) = state.sync_entries.get_mut(key)
-                    && entry.value == sent.value
-                    && entry.deleted == sent.deleted
-                    && entry.version == sent.version
-                {
-                    entry.dirty = false;
-                }
-            }
-            // 回包恰好是 pull 之后的下一个 revision 才说明期间无他人写入；
-            // 否则保持 pull 水位，让后续 SSE 触发的 pull 补回并发写入。
-            state.sync.revision = if revision == pull.revision.saturating_add(1) {
-                revision
-            } else {
-                pull.revision
-            };
+            state.sync.revision = watermark.unwrap_or(pull.revision);
         } else {
             let mut state = self.cloud.lock_epoch(epoch).await?;
             if state.account_uid.as_deref() != Some(uid.as_str()) {
@@ -733,6 +754,12 @@ impl SyncService {
         deleted: bool,
     ) -> Result<u64, SyncError> {
         let epoch = self.cloud.request_epoch();
+        if key == CUSTOM_THEMES_KEY {
+            // 集合范围键只承载分组与本机专属开关；主题逐个写 `appearance.custom_themes.<id>`。
+            return Err(SyncError::InvalidValue(format!(
+                "{key} is a collection; write per-theme keys"
+            )));
+        }
         let Some(spec) = setting_spec(&key).filter(|spec| spec.owner != SyncOwner::Excluded) else {
             return self.set_local_preference(key, value, deleted).await;
         };
@@ -768,7 +795,7 @@ impl SyncService {
                 }
                 state.preferences.revision = state.preferences.revision.saturating_add(1);
             }
-            if !state.sync.local_only_keys.iter().any(|local| local == &key) {
+            if !is_local_only(&state.sync.local_only_keys, &key) {
                 let entry = state.sync_entries.entry(key).or_default();
                 entry.value = wire;
                 entry.deleted = deleted;
@@ -855,7 +882,11 @@ fn apply_pull(
             report.skipped.push((item.key, "outside the sync catalog"));
             continue;
         };
-        if local_only.contains(&item.key) {
+        if item.key == CUSTOM_THEMES_KEY {
+            report.skipped.push((item.key, "collection scope key"));
+            continue;
+        }
+        if local_only.contains(sync_scope_key(&item.key)) {
             report.skipped.push((item.key, "local-only key"));
             continue;
         }
@@ -968,26 +999,34 @@ fn prepare_remote_value(
 
 /// 首次 / resync：目录里云端没有的键，用本机当前值播种（标脏重传）。
 /// resync 时已有条目也重新标脏（云端可能已丢失它们）。本机专属键不播种。
+/// 自定义主题按成员键逐个播种（集合范围键本身不承载值）。
 fn seed_local_values(
     state: &mut AgentState,
     remote_keys: &HashSet<String>,
     current_daemon: &BTreeMap<String, String>,
     resync: bool,
 ) {
-    let local_only = state
-        .sync
-        .local_only_keys
-        .iter()
+    let theme_keys = state
+        .preferences
+        .values
+        .keys()
+        .chain(state.sync_entries.keys())
+        .filter(|key| custom_theme_id(key).is_some())
         .cloned()
-        .collect::<HashSet<_>>();
-    for spec in fluxdown_protocol::SYNC_SETTING_SPECS {
-        if spec.owner == SyncOwner::Excluded
-            || remote_keys.contains(spec.key)
-            || local_only.contains(spec.key)
-        {
+        .collect::<BTreeSet<_>>();
+    let candidates = fluxdown_protocol::SYNC_SETTING_SPECS
+        .iter()
+        .filter(|spec| spec.key != CUSTOM_THEMES_KEY)
+        .map(|spec| spec.key.to_owned())
+        .chain(theme_keys);
+    for key in candidates {
+        let Some(spec) = setting_spec(&key).filter(|spec| spec.owner != SyncOwner::Excluded) else {
+            continue;
+        };
+        if remote_keys.contains(&key) || is_local_only(&state.sync.local_only_keys, &key) {
             continue;
         }
-        if let Some(entry) = state.sync_entries.get_mut(spec.key) {
+        if let Some(entry) = state.sync_entries.get_mut(&key) {
             if resync && !entry.deleted {
                 entry.dirty = true;
             }
@@ -1003,15 +1042,13 @@ fn seed_local_values(
                     }
                 }
             }),
-            SyncOwner::Agent | SyncOwner::Preferences => {
-                state.preferences.values.get(spec.key).cloned()
-            }
+            SyncOwner::Agent | SyncOwner::Preferences => state.preferences.values.get(&key).cloned(),
             SyncOwner::Excluded => None,
         };
         let Some(local_value) = local_value else {
             continue;
         };
-        let wire = if spec.key == CUSTOM_CATEGORIES_KEY {
+        let wire = if key == CUSTOM_CATEGORIES_KEY {
             match categories_to_wire(&local_value) {
                 Ok(wire) => wire,
                 Err(reason) => {
@@ -1021,13 +1058,13 @@ fn seed_local_values(
             }
         } else {
             if let Err(reason) = validate_value(spec.key, &local_value) {
-                tracing::warn!(key = %spec.key, reason = %reason, "not seeding invalid local setting");
+                tracing::warn!(key = %key, reason = %reason, "not seeding invalid local setting");
                 continue;
             }
             local_value
         };
         state.sync_entries.insert(
-            spec.key.to_owned(),
+            key,
             PersistedSyncEntry {
                 value: wire,
                 version: 0,
@@ -1046,7 +1083,7 @@ fn dirty_entries(state: &AgentState) -> BTreeMap<String, PersistedSyncEntry> {
         .filter(|(key, entry)| {
             entry.dirty
                 && owner_for_key(key) != SyncOwner::Excluded
-                && !state.sync.local_only_keys.iter().any(|local| local == *key)
+                && !is_local_only(&state.sync.local_only_keys, key)
         })
         .map(|(key, entry)| (key.clone(), entry.clone()))
         .collect()
@@ -1475,6 +1512,77 @@ mod tests {
         }
         let keys = dirty_entries(&state).into_keys().collect::<Vec<_>>();
         assert_eq!(keys, ["appearance.theme_mode"]);
+    }
+
+    fn theme_text(name: &str) -> Value {
+        json!(format!(r#"{{"meta":{{"name":"{name}"}}}}"#))
+    }
+
+    /// 主题逐个成键：首次播种逐个上云，云端增删按键应用；整组本机专属时成员键既不推送也不应用，
+    /// 集合范围键本身即便出现在云端也不落成偏好。
+    #[test]
+    fn custom_themes_sync_per_theme_and_follow_the_collection_local_only_switch() {
+        let ocean = fluxdown_protocol::custom_theme_key("ocean").expect("key");
+        let nord = fluxdown_protocol::custom_theme_key("nord-square").expect("key");
+        let rose = fluxdown_protocol::custom_theme_key("rose").expect("key");
+        let mut state = AgentState::default();
+        state
+            .preferences
+            .values
+            .insert(ocean.clone(), theme_text("Ocean"));
+        state
+            .preferences
+            .values
+            .insert(nord.clone(), theme_text("Nord"));
+        let remote_keys = [nord.clone()].into_iter().collect();
+        seed_local_values(&mut state, &remote_keys, &BTreeMap::new(), false);
+        let seeded = dirty_entries(&state);
+        assert_eq!(seeded[&ocean].value, theme_text("Ocean"));
+        assert!(
+            !seeded.contains_key(&nord),
+            "the cloud copy is not overwritten"
+        );
+        assert!(!seeded.contains_key(fluxdown_protocol::CUSTOM_THEMES_KEY));
+
+        let mut gone = item(&nord, Value::Null, 5, "device-2");
+        gone.deleted = true;
+        let report = apply_pull(
+            &mut state,
+            "device-1",
+            vec![
+                gone,
+                item(&rose, theme_text("Rose"), 6, "device-2"),
+                item(
+                    fluxdown_protocol::CUSTOM_THEMES_KEY,
+                    theme_text("Root"),
+                    7,
+                    "device-2",
+                ),
+            ],
+            &BTreeMap::new(),
+        );
+        assert!(report.prefs_changed);
+        assert!(!state.preferences.values.contains_key(&nord));
+        assert_eq!(state.preferences.values[&rose], theme_text("Rose"));
+        assert!(
+            !state
+                .preferences
+                .values
+                .contains_key(fluxdown_protocol::CUSTOM_THEMES_KEY)
+        );
+
+        state.sync.local_only_keys = vec![fluxdown_protocol::CUSTOM_THEMES_KEY.to_owned()];
+        assert!(
+            dirty_entries(&state).is_empty(),
+            "local-only members are not pushed"
+        );
+        apply_pull(
+            &mut state,
+            "device-1",
+            vec![item(&rose, theme_text("Rose 2"), 8, "device-2")],
+            &BTreeMap::new(),
+        );
+        assert_eq!(state.preferences.values[&rose], theme_text("Rose"));
     }
 
     #[test]
@@ -1988,6 +2096,49 @@ mod tests {
             !pushed_keys.contains(&"general.locale"),
             "echo of a fresh cloud item is not re-pushed"
         );
+        harness.finish().await;
+    }
+
+    /// 主题逐个成键后首次播种可能超过云端单批 128 条：分批推送且全部确认。
+    #[tokio::test]
+    async fn many_custom_themes_are_pushed_in_batches_within_the_cloud_item_limit() {
+        let harness = Harness::new("theme_batches", |state| {
+            state.sync.enabled = true;
+            for index in 0..140 {
+                let key =
+                    fluxdown_protocol::custom_theme_key(&format!("theme-{index}")).expect("key");
+                state
+                    .preferences
+                    .values
+                    .insert(key, theme_text(&index.to_string()));
+            }
+        })
+        .await;
+        harness.mock.push_revision.store(8, Ordering::SeqCst);
+        harness.service.sync_now().await.expect("sync now");
+        let pushes = harness.mock.pushes.lock().await.clone();
+        let sizes = pushes
+            .iter()
+            .map(|body| body["items"].as_array().map_or(0, Vec::len))
+            .collect::<Vec<_>>();
+        assert_eq!(sizes, [128, 12]);
+        let state = harness.state.lock().await;
+        assert!(state.sync.dirty_keys.is_empty());
+        assert_eq!(
+            state.sync.revision, 8,
+            "both batches confirm the same contiguous revision"
+        );
+        drop(state);
+        let error = harness
+            .service
+            .mark_local(
+                fluxdown_protocol::CUSTOM_THEMES_KEY.to_owned(),
+                theme_text("Root"),
+                false,
+            )
+            .await
+            .expect_err("the collection key carries no value");
+        assert!(matches!(error, super::SyncError::InvalidValue(_)));
         harness.finish().await;
     }
 

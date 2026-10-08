@@ -4,8 +4,8 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use fluxdown_protocol::{
-    DaemonEvent, EventFrame, SelectionKind, SelectionOutcome, SelectionRequestDto,
-    SelectionResolutionDto, ServiceEvent, SnapshotBody, TaskDto, WsServerMsg,
+    DaemonEvent, EventFrame, FileExistsAction, SelectionKind, SelectionOutcome,
+    SelectionRequestDto, SelectionResolutionDto, ServiceEvent, SnapshotBody, TaskDto, WsServerMsg,
 };
 use tokio::sync::{broadcast, oneshot};
 use tokio_util::sync::CancellationToken;
@@ -22,12 +22,15 @@ enum SelectionType {
     Hls,
     Bt,
     Variant,
+    FileExists,
 }
 
 struct PendingSelection {
     kind: SelectionType,
     task_id: String,
     default_choice: SelectionOutcome,
+    /// 仅 FileExists：该请求允许的动作；其余类型为空。
+    file_exists_actions: Vec<FileExistsAction>,
     sender: oneshot::Sender<SelectionOutcome>,
 }
 
@@ -120,6 +123,10 @@ impl DaemonSelection {
                 kind,
                 task_id: request.task_id.clone(),
                 default_choice: request.default_choice.clone(),
+                file_exists_actions: match &request.kind {
+                    SelectionKind::FileExists { actions, .. } => actions.clone(),
+                    _ => Vec::new(),
+                },
                 sender,
             },
         );
@@ -138,7 +145,7 @@ impl DaemonSelection {
                 }
                 return Err(SelectionError::NotFound);
             };
-            validate_outcome(pending.kind, &resolution.outcome)?;
+            validate_outcome(pending, &resolution.outcome)?;
             let Some(selection) = state.pending.remove(&resolution.request_id) else {
                 return Err(SelectionError::Conflict);
             };
@@ -252,7 +259,9 @@ impl DaemonSelection {
                 };
                 let outcome = match selection.kind {
                     SelectionType::Hls => selection.default_choice,
-                    SelectionType::Bt | SelectionType::Variant => SelectionOutcome::Cancelled,
+                    SelectionType::Bt | SelectionType::Variant | SelectionType::FileExists => {
+                        SelectionOutcome::Cancelled
+                    }
                 };
                 if selection.sender.send(outcome).is_err() {
                     tracing::debug!(request_id = %id, "selection waiter disconnected before task cancellation");
@@ -507,6 +516,81 @@ impl fluxdown_engine::selection::HostSelection for DaemonSelection {
             Err(error) => tracing::warn!(%error, task_id, "variant selection answer was rejected"),
         }
     }
+
+    fn can_prompt(&self) -> bool {
+        !lock_or_recover(&self.state).subscribers.is_empty()
+    }
+
+    async fn select_file_exists(
+        &self,
+        task_id: &str,
+        conflict: &fluxdown_engine::selection::FileConflict,
+        timeout: std::time::Duration,
+    ) -> fluxdown_engine::selection::SelectionOutcome<fluxdown_engine::selection::FileExistsChoice>
+    {
+        use fluxdown_engine::selection::{FileExistsChoice, SelectionOutcome as EngineOutcome};
+
+        let mut actions = vec![FileExistsAction::Rename, FileExistsAction::Overwrite];
+        if conflict.allow_skip {
+            actions.push(FileExistsAction::Skip);
+        }
+        let request_id = uuid::Uuid::new_v4().to_string();
+        let request = SelectionRequestDto {
+            request_id: request_id.clone(),
+            task_id: task_id.to_owned(),
+            kind: SelectionKind::FileExists {
+                file_name: conflict.file_name.clone(),
+                save_dir: conflict.save_dir.clone(),
+                existing_size: conflict.existing_size,
+                existing_modified_unix_ms: conflict.existing_modified_unix_ms,
+                incoming_size: conflict.incoming_size,
+                rename_preview: conflict.rename_preview.clone(),
+                actions,
+            },
+            default_choice: SelectionOutcome::FileExists {
+                action: FileExistsAction::Rename,
+            },
+            deadline_unix_ms: deadline_unix_ms(timeout),
+        };
+        match self.begin(request) {
+            SelectionWait::Immediate(_) => {
+                EngineOutcome::NoSelectorConfigured(FileExistsChoice::Rename)
+            }
+            SelectionWait::Pending(receiver) => {
+                // 引擎在任务暂停 / 删除时会直接丢弃本 future；守卫保证待选项随之撤销并广播。
+                let _guard = PendingGuard {
+                    selection: self,
+                    request_id,
+                };
+                match tokio::time::timeout(timeout, receiver).await {
+                    Ok(Ok(SelectionOutcome::FileExists { action })) => {
+                        EngineOutcome::UserChose(match action {
+                            FileExistsAction::Rename => FileExistsChoice::Rename,
+                            FileExistsAction::Overwrite => FileExistsChoice::Overwrite,
+                            FileExistsAction::Skip => FileExistsChoice::Skip,
+                        })
+                    }
+                    Ok(Ok(SelectionOutcome::Cancelled)) => {
+                        EngineOutcome::UserChose(FileExistsChoice::Cancel)
+                    }
+                    _ => EngineOutcome::TimedOutDefaulted(FileExistsChoice::Rename),
+                }
+            }
+        }
+    }
+}
+
+/// 等待方被丢弃或结束时撤销仍待处理的请求；已终局的请求无操作。
+struct PendingGuard<'a> {
+    selection: &'a DaemonSelection,
+    request_id: String,
+}
+
+impl Drop for PendingGuard<'_> {
+    fn drop(&mut self) {
+        // 已被终局时返回 None；仍待处理则移除并广播 SelectionResolved。
+        let _ = self.selection.timeout(&self.request_id);
+    }
 }
 
 fn deadline_unix_ms(timeout: std::time::Duration) -> i64 {
@@ -525,16 +609,28 @@ fn selection_type(kind: &SelectionKind) -> SelectionType {
         SelectionKind::Hls { .. } => SelectionType::Hls,
         SelectionKind::Bt { .. } => SelectionType::Bt,
         SelectionKind::Variant { .. } => SelectionType::Variant,
+        SelectionKind::FileExists { .. } => SelectionType::FileExists,
     }
 }
 
-fn validate_outcome(kind: SelectionType, outcome: &SelectionOutcome) -> Result<(), SelectionError> {
-    match (kind, outcome) {
+fn validate_outcome(
+    pending: &PendingSelection,
+    outcome: &SelectionOutcome,
+) -> Result<(), SelectionError> {
+    match (pending.kind, outcome) {
         (SelectionType::Hls, SelectionOutcome::Hls { .. })
         | (SelectionType::Bt, SelectionOutcome::Bt { .. })
         | (SelectionType::Variant, SelectionOutcome::Variant { .. }) => Ok(()),
+        (SelectionType::FileExists, SelectionOutcome::FileExists { action })
+            if pending.file_exists_actions.contains(action) =>
+        {
+            Ok(())
+        }
         (SelectionType::Hls, SelectionOutcome::Cancelled) => Err(SelectionError::HlsCancel),
-        (SelectionType::Bt | SelectionType::Variant, SelectionOutcome::Cancelled) => Ok(()),
+        (
+            SelectionType::Bt | SelectionType::Variant | SelectionType::FileExists,
+            SelectionOutcome::Cancelled,
+        ) => Ok(()),
         _ => Err(SelectionError::InvalidOutcome),
     }
 }
@@ -764,5 +860,190 @@ mod tests {
             )),
         });
         assert_eq!(orphan.await.expect("orphan"), SelectionOutcome::Cancelled);
+    }
+
+    fn file_exists_request(id: &str, task_id: &str, skip: bool) -> SelectionRequestDto {
+        use fluxdown_protocol::FileExistsAction;
+        let mut actions = vec![FileExistsAction::Rename, FileExistsAction::Overwrite];
+        if skip {
+            actions.push(FileExistsAction::Skip);
+        }
+        SelectionRequestDto {
+            request_id: id.to_owned(),
+            task_id: task_id.to_owned(),
+            kind: SelectionKind::FileExists {
+                file_name: "a.bin".to_owned(),
+                save_dir: "/tmp".to_owned(),
+                existing_size: Some(1),
+                existing_modified_unix_ms: None,
+                incoming_size: None,
+                rename_preview: "a (1).bin".to_owned(),
+                actions,
+            },
+            default_choice: SelectionOutcome::FileExists {
+                action: FileExistsAction::Rename,
+            },
+            deadline_unix_ms: i64::MAX,
+        }
+    }
+
+    #[tokio::test]
+    async fn file_exists_validates_action_against_offered_actions() {
+        use fluxdown_protocol::FileExistsAction;
+        let manager = manager();
+        manager.subscribe("c".to_owned());
+        let SelectionWait::Pending(receiver) = manager.begin(file_exists_request("f1", "t", false))
+        else {
+            panic!("subscribed request did not wait");
+        };
+        let resolve = |outcome| {
+            manager.resolve(SelectionResolutionDto {
+                request_id: "f1".to_owned(),
+                outcome,
+            })
+        };
+        assert!(matches!(
+            resolve(SelectionOutcome::FileExists {
+                action: FileExistsAction::Skip
+            }),
+            Err(SelectionError::InvalidOutcome)
+        ));
+        assert!(matches!(
+            resolve(SelectionOutcome::Hls { index: 0 }),
+            Err(SelectionError::InvalidOutcome)
+        ));
+        resolve(SelectionOutcome::FileExists {
+            action: FileExistsAction::Overwrite,
+        })
+        .expect("offered action");
+        assert_eq!(
+            receiver.await.expect("reply"),
+            SelectionOutcome::FileExists {
+                action: FileExistsAction::Overwrite
+            }
+        );
+        assert!(matches!(
+            resolve(SelectionOutcome::Cancelled),
+            Err(SelectionError::Conflict)
+        ));
+    }
+
+    #[tokio::test]
+    async fn file_exists_accepts_cancel_and_task_cancel_maps_to_cancelled() {
+        let manager = manager();
+        manager.subscribe("c".to_owned());
+        let SelectionWait::Pending(user) = manager.begin(file_exists_request("f2", "t", true))
+        else {
+            panic!("subscribed request did not wait");
+        };
+        manager
+            .resolve(SelectionResolutionDto {
+                request_id: "f2".to_owned(),
+                outcome: SelectionOutcome::Cancelled,
+            })
+            .expect("cancel is a valid answer");
+        assert_eq!(user.await.expect("reply"), SelectionOutcome::Cancelled);
+
+        let SelectionWait::Pending(paused) = manager.begin(file_exists_request("f3", "p", true))
+        else {
+            panic!("subscribed request did not wait");
+        };
+        assert_eq!(manager.cancel_task("p"), 1);
+        assert_eq!(paused.await.expect("reply"), SelectionOutcome::Cancelled);
+    }
+
+    #[tokio::test]
+    async fn file_exists_defaults_to_rename_without_subscribers_or_when_last_leaves() {
+        use fluxdown_engine::selection::{
+            FileConflict, FileExistsChoice, HostSelection, SelectionOutcome as Engine,
+        };
+        let conflict = FileConflict {
+            file_name: "a.bin".to_owned(),
+            save_dir: "/tmp".to_owned(),
+            existing_size: None,
+            existing_modified_unix_ms: None,
+            incoming_size: None,
+            rename_preview: "a (1).bin".to_owned(),
+            allow_skip: true,
+        };
+        let timeout = std::time::Duration::from_secs(30);
+        let manager = manager();
+        assert!(!manager.can_prompt());
+        assert_eq!(
+            manager.select_file_exists("t", &conflict, timeout).await,
+            Engine::NoSelectorConfigured(FileExistsChoice::Rename)
+        );
+
+        manager.subscribe("c".to_owned());
+        assert!(manager.can_prompt());
+        let waiter = {
+            let manager = manager.clone();
+            let conflict = conflict.clone();
+            tokio::spawn(async move { manager.select_file_exists("t", &conflict, timeout).await })
+        };
+        while lock_pending_len(&manager) == 0 {
+            tokio::task::yield_now().await;
+        }
+        manager.unsubscribe("c");
+        assert_eq!(
+            waiter.await.expect("join"),
+            Engine::UserChose(FileExistsChoice::Rename)
+        );
+    }
+
+    fn lock_pending_len(manager: &DaemonSelection) -> usize {
+        super::lock_or_recover(&manager.state).pending.len()
+    }
+}
+
+#[cfg(test)]
+mod drop_tests {
+    use fluxdown_engine::selection::{FileConflict, HostSelection};
+    use fluxdown_protocol::{DaemonSnapshot, SelectionResolutionDto};
+
+    use super::{DaemonSelection, SelectionError};
+    use crate::event_hub::DaemonEventHub;
+
+    #[tokio::test]
+    async fn dropping_the_file_exists_wait_withdraws_the_pending_request() {
+        let manager = DaemonSelection::new(DaemonEventHub::new(DaemonSnapshot::default(), 16));
+        manager.subscribe("c".to_owned());
+        let conflict = FileConflict {
+            file_name: "a.bin".to_owned(),
+            save_dir: "/tmp".to_owned(),
+            existing_size: None,
+            existing_modified_unix_ms: None,
+            incoming_size: None,
+            rename_preview: "a (1).bin".to_owned(),
+            allow_skip: false,
+        };
+        let waiter = {
+            let manager = manager.clone();
+            tokio::spawn(async move {
+                manager
+                    .select_file_exists("t", &conflict, std::time::Duration::from_secs(30))
+                    .await
+            })
+        };
+        let request_id = loop {
+            let id = super::lock_or_recover(&manager.state)
+                .pending
+                .keys()
+                .next()
+                .cloned();
+            if let Some(id) = id {
+                break id;
+            }
+            tokio::task::yield_now().await;
+        };
+        waiter.abort();
+        assert!(waiter.await.expect_err("aborted").is_cancelled());
+        assert!(matches!(
+            manager.resolve(SelectionResolutionDto {
+                request_id,
+                outcome: fluxdown_protocol::SelectionOutcome::Cancelled,
+            }),
+            Err(SelectionError::Conflict)
+        ));
     }
 }

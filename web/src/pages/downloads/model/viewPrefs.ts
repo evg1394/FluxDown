@@ -89,6 +89,19 @@ export const FILE_NAME_MAX_WIDTH = 1600
 /** 数字列：单元格与表头右对齐。 */
 export const NUMERIC_COLUMNS = new Set<ColumnKind>(['size', 'speed', 'eta', 'created'])
 
+/** 宽松密度把这些列并入文件名主列（镜像 GPUI `DownloadColumnKind::merged_in_relaxed`）。 */
+const RELAXED_MERGED_COLUMNS: Partial<Record<ColumnKind, true>> = { size: true, progress: true, speed: true, eta: true }
+
+/**
+ * 列在当前密度下是否实际渲染：宽松密度主列恒显示、被并入的列不单独显示；
+ * 列偏好本身不改，切回其他密度原样恢复。
+ */
+export function columnShown(kind: ColumnKind, visible: boolean, density: ViewDensity): boolean {
+  if (density !== 'relaxed') return visible
+  if (kind === 'file_name') return true
+  return visible && RELAXED_MERGED_COLUMNS[kind] !== true
+}
+
 /** 点击表头切换到的排序键（「智能排序」不对应任何列）；「状态」列按状态优先级排序。 */
 export const COLUMN_SORT_KEY: Partial<Record<ColumnKind, ViewSortKey>> = {
   file_name: 'name',

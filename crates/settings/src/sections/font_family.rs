@@ -1,6 +1,6 @@
 use fluxdown_ui_theme::{FONT_FAMILY_KEY, active_theme, available_font_families};
 use gpui::{
-    App, AppContext as _, Entity, IntoElement as _, SharedString, Styled as _, Subscription, px,
+    App, AppContext as _, Entity, IntoElement as _, SharedString, Styled as _, Subscription,
 };
 use gpui_component::{
     Sizable as _, Size,
@@ -109,7 +109,7 @@ pub(super) fn field(ctx: &SectionContext) -> Control {
         // also scale their text, so keep the control height separate.
         Select::new(&select)
             .placeholder(placeholder)
-            .w(px(INPUT_WIDTH))
+            .w(active_theme(cx).text_extent(INPUT_WIDTH))
             .with_size(Size::Large)
             .h(active_theme(cx).density().control)
             .py_0()

@@ -32,6 +32,16 @@ impl SidebarMotion {
         }
     }
 
+    /// [`Self::retarget`] 是否会改变状态；不会时调用方可只读采样。
+    pub(crate) fn needs_retarget(&self, open: bool, animate: bool) -> bool {
+        let target = if open { 1. } else { 0. };
+        if animate {
+            self.to != target
+        } else {
+            self.from != target || self.to != target || self.started_at.is_some()
+        }
+    }
+
     pub(crate) fn amount(&self, now: Instant) -> f32 {
         let progress = self.progress(now);
         self.from + (self.to - self.from) * ease_in_out_cubic(progress)
@@ -83,5 +93,38 @@ mod tests {
         motion.retarget(true, start + DURATION, false);
         assert_eq!(motion.amount(start + DURATION), 1.);
         assert!(!motion.is_animating(start + DURATION));
+    }
+
+    /// 渲染期只读采样依赖它：判定「无需改写」时，真实 retarget 不得改变任何一帧的展开量。
+    #[test]
+    fn needs_retarget_is_false_only_when_retarget_is_a_no_op() {
+        let start = Instant::now();
+        let probes = [
+            start,
+            start + DURATION / 3,
+            start + DURATION,
+            start + DURATION * 2,
+        ];
+        let mut states = vec![SidebarMotion::settled(true), SidebarMotion::settled(false)];
+        let mut inflight = SidebarMotion::settled(true);
+        inflight.retarget(false, start, true);
+        states.push(inflight);
+        for state in &states {
+            for open in [true, false] {
+                for animate in [true, false] {
+                    let mut next = SidebarMotion { ..*state };
+                    next.retarget(open, start + DURATION / 2, animate);
+                    let unchanged = probes
+                        .iter()
+                        .all(|now| next.amount(*now) == state.amount(*now))
+                        && next.started_at == state.started_at;
+                    assert_eq!(
+                        !state.needs_retarget(open, animate),
+                        unchanged,
+                        "open={open} animate={animate}"
+                    );
+                }
+            }
+        }
     }
 }

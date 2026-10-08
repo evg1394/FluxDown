@@ -23,6 +23,7 @@ use crate::{agent_client::AgentClient, app::Desktop};
 mod bounds;
 pub use bounds::RememberedWindow;
 
+pub mod file_conflict;
 pub mod group_detail;
 pub mod main;
 pub mod new_download;
@@ -40,6 +41,8 @@ pub enum WindowKey {
     NewDownload,
     QueueManager,
     Selection(String),
+    /// 所有待确认的「文件已存在」请求聚合在这一个窗口里。
+    FileConflicts,
     TaskDetail(String),
     GroupDetail(String),
     /// 独立下载进度 / 完成窗口（每任务一个）。
@@ -137,6 +140,10 @@ impl WindowRegistry {
         let options = crate::app_icon::window_options(options);
         let result = cx.open_window(options, move |window, cx| {
             crate::logging::observe_new_window(label, opened_at, window, cx);
+            // 「跟随系统」主题：系统明暗切换时重新解析；外观变化不会触发整窗刷新，必须显式订阅。
+            window
+                .observe_window_appearance(fluxdown_ui_theme::sync_system_theme)
+                .detach();
             build(window, cx)
         });
         match result {

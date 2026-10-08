@@ -448,7 +448,8 @@ async fn call_daemon(daemon: &DaemonClient, method_name: &str) {
 /// [`OpenAssociation`]: fluxdown_protocol::capture_link::OpenAssociation
 async fn submit_opened_urls(gateway: &crate::gateway::GatewayService, urls: Vec<String>) {
     use fluxdown_protocol::capture_link::{
-        OpenAssociation, is_capture_url, normalize_capture_url, torrent_file_path,
+        OpenAssociation, deep_link_file_name, is_capture_url, normalize_capture_url,
+        torrent_file_path,
     };
     for url in urls {
         let result = if let Some(path) = torrent_file_path(&url) {
@@ -467,7 +468,10 @@ async fn submit_opened_urls(gateway: &crate::gateway::GatewayService, urls: Vec<
                 .dispatch_local(
                     method::AGENT_CAPTURE_SUBMIT,
                     serde_json::json!({
-                        "request": { "url": normalize_capture_url(&url) },
+                        "request": {
+                            "url": normalize_capture_url(&url),
+                            "filename": deep_link_file_name(&url).unwrap_or_default(),
+                        },
                         "silent": true,
                         "association": OpenAssociation::of_url(&url),
                     }),

@@ -255,11 +255,11 @@ fn commands(labels: &Labels, cx: &App) -> Vec<PaletteItem> {
                     .keywords([page.to_owned()]),
                 );
             }
-            ActivityEntry::Theme => items.push(labels.command(
-                "cmd.toggle_theme",
+            ActivityEntry::Account => items.push(labels.command(
+                "cmd.open_account",
                 label_key,
-                FluxIcon::Palette,
-                crate::activity::toggle_theme,
+                FluxIcon::User,
+                |_, cx| crate::activity::open_account(cx),
             )),
             ActivityEntry::Settings => items.push(
                 labels
@@ -277,6 +277,12 @@ fn commands(labels: &Labels, cx: &App) -> Vec<PaletteItem> {
     }
 
     items.extend([
+        labels.command(
+            "cmd.toggle_theme",
+            "activityThemeToggle",
+            FluxIcon::Palette,
+            crate::activity::toggle_theme,
+        ),
         labels.command(
             "cmd.check_update",
             "menuCheckForUpdates",

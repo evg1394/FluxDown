@@ -226,7 +226,7 @@ impl ManifestView {
         Button::new(("manifest-variant", index))
             .outline()
             .control(cx)
-            .max_w(gpui::px(200.))
+            .max_w(active_theme(cx).text_extent(200.))
             .label(label)
             .tooltip(self.t("manifestVariantLabel", cx))
             .dropdown_caret(true)

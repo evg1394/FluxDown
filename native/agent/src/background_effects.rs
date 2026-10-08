@@ -302,12 +302,22 @@ fn should_keep_awake(snapshot: &AgentSnapshot) -> bool {
 
 /// 保持唤醒状态：`failed` 记住本次「应持有」区间内的获取失败（无 logind 等环境），
 /// 在不再需要持有之前不重试，避免每个进度帧都新建连接并刷警告。
+#[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
 #[derive(Default)]
 struct AwakeState {
     guard: Option<keepawake::KeepAwake>,
     failed: bool,
 }
 
+/// 移动平台没有进程内的休眠抑制 API（由宿主应用的前台服务 / 后台任务保活）。
+#[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
+#[derive(Default)]
+struct AwakeState;
+
+#[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
+async fn reconcile_awake(_should_hold: bool, _awake: &mut AwakeState) {}
+
+#[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
 async fn reconcile_awake(should_hold: bool, awake: &mut AwakeState) {
     if should_hold && awake.guard.is_none() && !awake.failed {
         match tokio::task::spawn_blocking(|| {

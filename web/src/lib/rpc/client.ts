@@ -12,10 +12,12 @@ import { RpcError, TRANSPORT_ERROR_CODE, errorMessage, transportError } from './
 import {
   CAPABILITY_CLIENT_SELECTIONS,
   CLOSE_REASON_SERVICE_QUIT,
+  CLOSE_REASON_SERVICE_RESTART,
   EVENT_GAP_CLOSE_CODE,
   MIN_PROTOCOL_VERSION,
   PROTOCOL_VERSION,
 } from './protocol'
+import { claimIncompatibleReload, shouldReloadForVersionChange } from './reload'
 import type { AgentEvent, ClientHello, EventFrame, RpcErrorData, ServiceHello, Snapshot } from './protocol'
 import { probeToken } from '../access/setup'
 import { rpcStore, setConnection } from './store'
@@ -67,6 +69,8 @@ class RpcConnection {
   private wanted = false
   private helloDone = false
   private everReady = false
+  /** 最近一次成功握手的 serviceVersion；重启后版本变化即刷新页面。 */
+  private lastServiceVersion: string | null = null
   private attempt = 0
   private nextId = 1
   private readonly pending = new Map<number, Pending>()
@@ -105,6 +109,7 @@ class RpcConnection {
   stop(): void {
     this.wanted = false
     this.token = ''
+    this.lastServiceVersion = null
     this.teardown()
     rpcStore.reset()
   }
@@ -198,6 +203,12 @@ class RpcConnection {
     const service = await this.request<ServiceHello>('system.hello', hello, DEFAULT_TIMEOUT_MS, true)
     if (generation !== this.generation) return
     this.helloDone = true
+    const serviceVersion = service.serviceVersion ?? ''
+    if (shouldReloadForVersionChange(this.lastServiceVersion, serviceVersion)) {
+      location.reload()
+      return
+    }
+    this.lastServiceVersion = serviceVersion
     rpcStore.update((state) => ({ ...state, hello: service }), true)
     this.resyncs = 0
     await this.sync(generation)
@@ -207,6 +218,11 @@ class RpcConnection {
     if (generation !== this.generation) return
     if (error instanceof RpcError) {
       if (error.is('protocolIncompatible')) {
+        // Docker / NAS 升级跨协议版本：新 SPA 在新服务里，刷新一次取新资源（限频，避免死循环）。
+        if (claimIncompatibleReload()) {
+          location.reload()
+          return
+        }
         this.fatal('incompatible', error.message)
         return
       }
@@ -241,7 +257,7 @@ class RpcConnection {
     }
     this.everReady = true
     this.attempt = 0
-    setConnection({ phase: 'ready', attempt: 0, nextRetryAt: null, lastError: null })
+    setConnection({ phase: 'ready', attempt: 0, nextRetryAt: null, lastError: null, restarting: false })
     this.startPing()
   }
 
@@ -318,6 +334,12 @@ class RpcConnection {
     this.rejectAll(transportError('connection closed', 'unavailable'))
     if (!this.wanted) return
 
+    if (event.reason === CLOSE_REASON_SERVICE_RESTART) {
+      // server 模式自更新重启：保持重连（含退避），握手发现 serviceVersion 变化后刷新页面。
+      setConnection({ restarting: true })
+      this.scheduleRetry(event.reason)
+      return
+    }
     if (event.reason === CLOSE_REASON_SERVICE_QUIT) {
       this.fatal('stopped', event.reason)
       return
@@ -340,7 +362,7 @@ class RpcConnection {
   private fatal(phase: 'unauthorized' | 'setupRequired' | 'stopped' | 'incompatible', message: string): void {
     this.teardown()
     this.wanted = false
-    setConnection({ phase, nextRetryAt: null, lastError: message })
+    setConnection({ phase, nextRetryAt: null, lastError: message, restarting: false })
   }
 
   private scheduleRetry(reason: string): void {

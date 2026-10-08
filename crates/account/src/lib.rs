@@ -12,6 +12,7 @@ mod host;
 mod link;
 mod pages;
 mod profile_edit;
+mod rail;
 mod sync_scope;
 mod ui;
 mod verification;
@@ -28,6 +29,7 @@ pub use controller::AccountController;
 pub use dialogs::add_device::open as open_add_device;
 pub use dialogs::pairing_prompt::open as open_pairing_prompt;
 pub use host::{AccountHost, AccountHostEvent};
+pub use rail::AccountRailButton;
 pub use view::AccountView;
 
 pub type PortFuture<T> =

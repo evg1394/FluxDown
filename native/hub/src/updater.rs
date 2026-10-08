@@ -3,12 +3,13 @@
 //! handled on the Dart/Kotlin side (FileProvider install intent).
 //!
 //! All HTTP requests go through the website API (`/api/release`, `/api/download/:fn`).
-//! `/api/download` 302s to a short-lived presigned Aliyun OSS URL when the
-//! release pipeline has synced the asset there, and falls back to the GitHub
-//! release CDN otherwise. Both honor Range requests, and every segment below
-//! requests `/api/download` itself (fresh 302 each time), so the multi-segment
-//! download works transparently and never depends on a single presigned URL's
-//! lifetime.
+//! `/api/download` 302s to the Cloudflare-cached mirror of the Aliyun OSS copy
+//! (`dl-fluxdown.zerx.dev`, or a short-lived presigned OSS URL when no CDN base
+//! is configured) when the release pipeline has synced the asset there, and
+//! falls back to the GitHub release CDN otherwise. All honor Range requests, and
+//! every segment below requests `/api/download` itself (fresh 302 each time), so
+//! the multi-segment download works transparently and never depends on a
+//! single redirect target's lifetime.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

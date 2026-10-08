@@ -10,6 +10,7 @@ use serde_json::json;
 
 use super::SectionContext;
 use crate::ui::{Control, SettingsPage, SettingsRow, SettingsSection, body_text, meta_text};
+use crate::update_view;
 
 pub(crate) const APP_VERSION: &str = fluxdown_protocol::APP_VERSION;
 const WEBSITE: &str = "https://fluxdown.zerx.dev";
@@ -67,7 +68,7 @@ fn update_section(ctx: &SectionContext) -> SettingsSection {
         ))
         .row(ctx.item(
             "autoCheckUpdate",
-            Some("autoCheckUpdateDesc"),
+            Some("autoCheckUpdateBackgroundDesc"),
             ctx.pref_switch("general.auto_check_update", true),
         ))
         .row(ctx.item(
@@ -81,61 +82,92 @@ fn update_section(ctx: &SectionContext) -> SettingsSection {
 fn check_update_control(ctx: &SectionContext) -> Control {
     let store = ctx.store();
     let translator = ctx.translator.clone();
-    let check = ctx.t("checkUpdate");
-    let latest = ctx.t("latestVersion");
     Control::custom(move |disabled, _key, _window, cx: &mut App| {
         let tokens = active_theme(cx).tokens();
-        let busy = store.read(cx).is_busy("update");
-        let result = store.read(cx).update_check().cloned();
-        let status = result.as_ref().map(|result| {
-            if result.has_update {
-                translator.text_with("newVersionFound", &[("v", &result.latest_version)])
-            } else {
-                format!("{latest}: v{}", result.latest_version)
-            }
-        });
-        let click_store = store.clone();
-        let download_url = result
-            .as_ref()
-            .filter(|result| result.has_update)
-            .map(|result| {
-                if result.download_url.is_empty() {
-                    result.release_page_url.clone()
-                } else {
-                    result.download_url.clone()
-                }
-            })
-            .filter(|url| !url.is_empty());
-        let update_now = translator.text("updateNow").to_owned();
-        h_flex()
-            .gap(tokens.spacing.sm)
-            .items_center()
-            .children(status.map(|status| meta_text(cx).child(SharedString::from(status))))
-            .children(download_url.map(|url| {
+        let (status, checking, installing, cancelling) = {
+            let store = store.read(cx);
+            (
+                store.update_status().clone(),
+                store.is_busy("update"),
+                store.is_busy("updateInstall"),
+                store.is_busy("updateCancel"),
+            )
+        };
+        let lines: Vec<SharedString> = [
+            update_view::status_line(&status),
+            update_view::manual_line(&status),
+        ]
+        .into_iter()
+        .flatten()
+        .map(|line| SharedString::from(line.text(&translator)))
+        .collect();
+        let manual_url = update_view::manual_url(&status).map(str::to_owned);
+        let mut buttons = h_flex().gap(tokens.spacing.sm).items_center();
+        if update_view::can_cancel(&status) {
+            let cancel_store = store.clone();
+            buttons = buttons.child(
+                loading_button(
+                    "about-update-cancel",
+                    SharedString::from(translator.text("cancel").to_owned()),
+                    ButtonVariant::Secondary,
+                    cancelling,
+                    cx,
+                )
+                .disabled(disabled || cancelling)
+                .on_click(move |_, _, cx| {
+                    cancel_store.update(cx, |store, cx| store.cancel_update(cx));
+                }),
+            );
+        }
+        if update_view::can_install(&status) {
+            let install_store = store.clone();
+            buttons = buttons.child(
+                loading_button(
+                    "about-update-install",
+                    SharedString::from(translator.text("updateRestartNow").to_owned()),
+                    ButtonVariant::Primary,
+                    installing,
+                    cx,
+                )
+                .disabled(disabled || installing)
+                .on_click(move |_, _, cx| {
+                    install_store.update(cx, |store, cx| store.install_update(cx));
+                }),
+            );
+        }
+        if let Some(url) = manual_url {
+            buttons = buttons.child(
                 button(
-                    "about-update-now",
-                    SharedString::from(update_now.clone()),
+                    "about-update-open-site",
+                    SharedString::from(translator.text("updateFailedOpenSite").to_owned()),
                     ButtonVariant::Primary,
                     cx,
                 )
-                .on_click(move |_, _, cx| cx.open_url(&url))
-            }))
-            .child(
-                loading_button(
-                    "about-check-update",
-                    check.clone(),
-                    ButtonVariant::Secondary,
-                    busy,
-                    cx,
-                )
-                .disabled(disabled || busy)
-                .on_click(move |_, _, cx| {
-                    click_store.update(cx, |store, cx| {
-                        let channel = store.pref_str("general.update_channel", "stable");
-                        store.check_update(Some(channel), cx);
-                    });
-                }),
+                .on_click(move |_, _, cx| cx.open_url(&url)),
+            );
+        }
+        let check_store = store.clone();
+        buttons = buttons.child(
+            loading_button(
+                "about-check-update",
+                SharedString::from(translator.text("checkUpdate").to_owned()),
+                ButtonVariant::Secondary,
+                checking,
+                cx,
             )
+            .disabled(disabled || checking)
+            .on_click(move |_, _, cx| {
+                check_store.update(cx, |store, cx| {
+                    let channel = store.pref_str("general.update_channel", "stable");
+                    store.check_update(Some(channel), cx);
+                });
+            }),
+        );
+        v_flex()
+            .gap(tokens.spacing.xs)
+            .items_end()
+            .children(lines.into_iter().map(|line| meta_text(cx).child(line)))
+            .child(buttons)
     })
 }
 
@@ -144,16 +176,14 @@ fn release_notes_item(ctx: &SectionContext) -> SettingsRow {
     let locale = system_locale();
     SettingsRow::custom(move |_, _, _, cx: &mut App| {
         let tokens = active_theme(cx).tokens();
-        let Some(result) = store.read(cx).update_check().cloned() else {
-            return div().into_any_element();
-        };
-        if result.notes.is_empty() {
+        let notes = store.read(cx).update_status().notes.clone();
+        if notes.is_empty() {
             return div().into_any_element();
         }
         v_flex()
             .w_full()
             .gap(tokens.spacing.sm)
-            .children(result.notes.into_iter().take(10).map(|note| {
+            .children(notes.into_iter().take(10).map(|note| {
                 v_flex()
                     .gap(tokens.spacing.xxs)
                     .child(body_text(cx).child(SharedString::from(format!(

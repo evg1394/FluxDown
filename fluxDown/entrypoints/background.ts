@@ -57,6 +57,13 @@ import type { DownloadItemInfo } from "@/utils/settings";
 import { cancelBeforeFilenameResolution } from "@/utils/download-cancellation";
 import { initI18n, t } from "@/utils/i18n";
 import {
+  dispositionNeedsPageCharset,
+  extractCleanFilename,
+  parseContentDispositionFilename,
+  readDispositionHeader,
+  resolveDownloadFilename,
+} from "@/utils/filename";
+import {
   matchSniffRule,
   classifyResource,
   extractFilenameFromUrl,
@@ -599,10 +606,88 @@ export default defineBackground(() => {
     url: string;
     contentType: string; // Content-Type
     contentLength: number; // Content-Length（-1 = 未知）
-    dispositionFilename: string; // 从 Content-Disposition 解析出的文件名
+    dispositionFilename: string; // 从 Content-Disposition 解析出的文件名（含 host 先验）
+    /** 原始 Content-Disposition（供页面字符集先验到位后重解码）。 */
+    disposition?: { text: string; byteCarrier: boolean };
+    tabId: number; // 发起导航的 tab（-1 = 未知）
     ts: number;
   }
   const responseDownloadCache = new Map<string, ResponseDownloadInfo>();
+
+  /** 下载 URL 的主机名（TLD 先验）；非法 URL 返回 undefined。 */
+  function urlHost(url: string): string | undefined {
+    try {
+      return new URL(url).hostname || undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  /** 询问发起页字符集的超时：失败/超时视为无先验。 */
+  const PAGE_CHARSET_TIMEOUT_MS = 300;
+
+  /**
+   * 向 tab 顶层框架的内容脚本询问 `document.characterSet`
+   * （消息 `{ action: "getPageCharset" }` → `{ charset: string }`）。
+   * 无内容脚本、tab 已关闭、超时均返回 undefined。
+   */
+  async function getPageCharset(tabId: number): Promise<string | undefined> {
+    if (tabId < 0) return undefined;
+    try {
+      const reply: unknown = await Promise.race([
+        browser.tabs.sendMessage(tabId, { action: "getPageCharset" }, {
+          frameId: 0,
+        }),
+        new Promise<undefined>((resolve) =>
+          setTimeout(resolve, PAGE_CHARSET_TIMEOUT_MS),
+        ),
+      ]);
+      if (reply && typeof reply === "object" && "charset" in reply) {
+        return typeof reply.charset === "string" && reply.charset
+          ? reply.charset
+          : undefined;
+      }
+    } catch {
+      // 内容脚本不存在（受限页面/尚未注入）：无先验
+    }
+    return undefined;
+  }
+
+  /**
+   * 重新解码 Content-Disposition：仅当原始字节需要页面字符集先验
+   * （字节载体、非 ASCII、非合法 UTF-8）时才询问发起页；否则或无先验时
+   * 返回 `fallback`（已带 host 先验的解码结果）。
+   */
+  async function decodeDispositionWithPageCharset(
+    text: string,
+    byteCarrier: boolean,
+    tabId: number,
+    url: string,
+    fallback: string,
+  ): Promise<string> {
+    if (!dispositionNeedsPageCharset(text, byteCarrier)) return fallback;
+    const pageCharset = await getPageCharset(tabId);
+    if (!pageCharset) return fallback;
+    return (
+      parseContentDispositionFilename(text, byteCarrier, {
+        host: urlHost(url),
+        pageCharset,
+      }) || fallback
+    );
+  }
+
+  function resolveResponseDispositionFilename(
+    info: ResponseDownloadInfo,
+  ): Promise<string> {
+    if (!info.disposition) return Promise.resolve(info.dispositionFilename);
+    return decodeDispositionWithPageCharset(
+      info.disposition.text,
+      info.disposition.byteCarrier,
+      info.tabId,
+      info.url,
+      info.dispositionFilename,
+    );
+  }
 
   // ──────────────────────────────────────────────────────────────
   // 完整请求事务捕获（method + body）—— 修复 form-POST 触发的下载
@@ -910,6 +995,7 @@ export default defineBackground(() => {
         let contentType = "";
         let contentLength = -1;
         let contentDisposition = "";
+        let dispositionByteCarrier = false;
 
         for (const h of details.responseHeaders) {
           const name = h.name.toLowerCase();
@@ -918,8 +1004,12 @@ export default defineBackground(() => {
           } else if (name === "content-length" && h.value) {
             const parsed = parseInt(h.value, 10);
             if (!isNaN(parsed)) contentLength = parsed;
-          } else if (name === "content-disposition" && h.value) {
-            contentDisposition = h.value;
+          } else if (name === "content-disposition") {
+            const d = readDispositionHeader(h, import.meta.env.FIREFOX);
+            if (d) {
+              contentDisposition = d.text;
+              dispositionByteCarrier = d.byteCarrier;
+            }
           }
         }
 
@@ -932,14 +1022,21 @@ export default defineBackground(() => {
         if (!isAttachment && !isDownloadMime) return;
 
         // 从 Content-Disposition 提取文件名
-        const dispositionFilename =
-          parseContentDispositionFilename(contentDisposition);
+        const dispositionFilename = parseContentDispositionFilename(
+          contentDisposition,
+          dispositionByteCarrier,
+          { host: urlHost(details.url) },
+        );
 
         const info: ResponseDownloadInfo = {
           url: details.url,
           contentType,
           contentLength,
           dispositionFilename,
+          disposition: contentDisposition
+            ? { text: contentDisposition, byteCarrier: dispositionByteCarrier }
+            : undefined,
+          tabId: details.tabId,
           ts: Date.now(),
         };
 
@@ -1009,6 +1106,7 @@ export default defineBackground(() => {
         let contentType = "";
         let contentLength = -1;
         let contentDisposition = "";
+        let dispositionByteCarrier = false;
 
         for (const h of details.responseHeaders) {
           const name = h.name.toLowerCase();
@@ -1017,8 +1115,12 @@ export default defineBackground(() => {
           } else if (name === "content-length" && h.value) {
             const parsed = parseInt(h.value, 10);
             if (!isNaN(parsed)) contentLength = parsed;
-          } else if (name === "content-disposition" && h.value) {
-            contentDisposition = h.value;
+          } else if (name === "content-disposition") {
+            const d = readDispositionHeader(h, import.meta.env.FIREFOX);
+            if (d) {
+              contentDisposition = d.text;
+              dispositionByteCarrier = d.byteCarrier;
+            }
           }
         }
 
@@ -1040,7 +1142,11 @@ export default defineBackground(() => {
         // 提取文件名
         let filename = "";
         if (contentDisposition) {
-          filename = parseContentDispositionFilename(contentDisposition);
+          filename = parseContentDispositionFilename(
+            contentDisposition,
+            dispositionByteCarrier,
+            { host: urlHost(details.url) },
+          );
         }
         if (!filename) {
           filename = extractFilenameFromUrl(details.url);
@@ -1279,6 +1385,7 @@ export default defineBackground(() => {
       let contentType = "";
       let contentLength = -1;
       let contentDisposition = "";
+      let dispositionByteCarrier = false;
       for (const h of details.responseHeaders) {
         const name = h.name.toLowerCase();
         if (name === "content-type" && h.value) {
@@ -1286,8 +1393,12 @@ export default defineBackground(() => {
         } else if (name === "content-length" && h.value) {
           const parsed = parseInt(h.value, 10);
           if (!isNaN(parsed)) contentLength = parsed;
-        } else if (name === "content-disposition" && h.value) {
-          contentDisposition = h.value;
+        } else if (name === "content-disposition") {
+          const d = readDispositionHeader(h, import.meta.env.FIREFOX);
+          if (d) {
+            contentDisposition = d.text;
+            dispositionByteCarrier = d.byteCarrier;
+          }
         }
       }
 
@@ -1313,8 +1424,11 @@ export default defineBackground(() => {
       // App 熔断期内放行浏览器原生下载，避免用户完全无法下载
       if (isAppKnownDown()) return undefined;
 
-      const dispositionFilename =
-        parseContentDispositionFilename(contentDisposition);
+      const dispositionFilename = parseContentDispositionFilename(
+        contentDisposition,
+        dispositionByteCarrier,
+        { host: urlHost(details.url) },
+      );
       const referrer: string | undefined =
         details.originUrl || details.documentUrl || undefined;
       const itemInfo: DownloadItemInfo = {
@@ -1334,33 +1448,48 @@ export default defineBackground(() => {
         dispositionFilename,
       });
 
-      const cleanFilename = extractCleanFilename(itemInfo.filename, details.url);
-      // fire-and-forget：blocking 回调必须尽快返回；发送失败时回退浏览器下载
-      sendToFluxDown(
-        details.url,
-        referrer,
-        cleanFilename,
-        itemInfo.fileSize,
-        itemInfo.mime,
-      )
-        .then((ok) => {
+      // fire-and-forget：blocking 回调必须尽快返回（cancel 同步返回）；原始字节
+      // 文件名需要发起页字符集先验时，异步取回后再重解码并发送。
+      // 发送失败时回退浏览器下载。
+      void (async () => {
+        const decodedFilename = await decodeDispositionWithPageCharset(
+          contentDisposition,
+          dispositionByteCarrier,
+          details.tabId,
+          details.url,
+          dispositionFilename,
+        );
+        const cleanFilename = resolveDownloadFilename(
+          decodedFilename,
+          undefined,
+          details.url,
+          contentType,
+        );
+        try {
+          const ok = await sendToFluxDown(
+            details.url,
+            referrer,
+            cleanFilename,
+            itemInfo.fileSize,
+            itemInfo.mime,
+          );
           if (!ok) {
             console.warn(
               "[FluxDown] Firefox blocking: send failed, falling back to browser download:",
               details.url,
             );
-            return fallbackAfterSendFailure(details.url, cleanFilename);
+            await fallbackAfterSendFailure(details.url, cleanFilename);
           }
-        })
-        .catch((e) => {
+        } catch (e) {
           console.error(
             "[FluxDown] Firefox blocking: sendToFluxDown threw:",
             e,
           );
-          return fallbackAfterSendFailure(details.url, cleanFilename).catch(
+          await fallbackAfterSendFailure(details.url, cleanFilename).catch(
             () => {},
           );
-        });
+        }
+      })();
 
       return { cancel: true };
     };
@@ -1594,11 +1723,18 @@ export default defineBackground(() => {
       return;
     }
 
+    const dispositionFilename = await resolveResponseDispositionFilename(rc);
     const itemInfo: DownloadItemInfo = {
       url,
       fileSize: rc.contentLength > 0 ? rc.contentLength : -1,
       mime: rc.contentType || undefined,
-      filename: rc.dispositionFilename || originalItem.filename || undefined,
+      filename:
+        resolveDownloadFilename(
+          dispositionFilename,
+          originalItem.filename,
+          url,
+          rc.contentType,
+        ) || undefined,
       referrerUrl: originalItem.referrer || undefined,
     };
 
@@ -1716,7 +1852,11 @@ export default defineBackground(() => {
     // 标记为 fallback 已处理，阻止其他层重复拦截
     handledDownloads.set(downloadId, "fallback");
 
-    const cleanFilename = extractCleanFilename(itemInfo.filename, url);
+    const cleanFilename = extractCleanFilename(
+      itemInfo.filename,
+      url,
+      itemInfo.mime,
+    );
 
     // 取消浏览器下载并抹除记录，防止双下载 + 残留失败/已取消记录（见 issue #21）。
     // 详见 cancelAndErase：Firefox 需等记录落终态再 erase 并重试确认。
@@ -1831,13 +1971,19 @@ export default defineBackground(() => {
           return;
         }
 
-        const dispositionFilename =
-          responseDownloadCache.get(downloadUrl)?.dispositionFilename ||
-          responseDownloadCache.get(url)?.dispositionFilename ||
-          "";
-        cleanFilename =
-          dispositionFilename ||
-          extractCleanFilename(itemInfo.filename, downloadUrl);
+        const cachedResponse =
+          [downloadUrl, url]
+            .map((u) => responseDownloadCache.get(u))
+            .find((r) => r?.dispositionFilename) ?? undefined;
+        const dispositionFilename = cachedResponse
+          ? await resolveResponseDispositionFilename(cachedResponse)
+          : "";
+        cleanFilename = resolveDownloadFilename(
+          dispositionFilename,
+          itemInfo.filename,
+          downloadUrl,
+          itemInfo.mime,
+        );
         const sendOk = await sendToFluxDown(
           downloadUrl,
           referrer,
@@ -2492,7 +2638,8 @@ export default defineBackground(() => {
         const ok = await openProtocolUrl(url, filename);
         await incrementStat(ok ? "sent" : "failed");
         if (ok && (await shouldNotifyChannel("local"))) {
-          const shownName = filename || extractCleanFilename(url) || url;
+          const shownName =
+            filename || extractCleanFilename(undefined, url) || url;
           notify(
             t("notify.downloadSent"),
             t("notify.sentToFluxDown", { name: shownName }),
@@ -2639,7 +2786,8 @@ export default defineBackground(() => {
       // 任务已创建提示（本地 NMH / 远程 server 分别受配置页两个开关控制；
       // notify 内置 5s 同文去重，密集拦截同一文件不会弹窗风暴）。
       if (notifyOk) {
-        const shownName = filename || extractCleanFilename(url) || url;
+        const shownName =
+          filename || extractCleanFilename(undefined, url) || url;
         notify(
           t("notify.downloadSent"),
           t("notify.sentToFluxDown", { name: shownName }),
@@ -3155,7 +3303,7 @@ export default defineBackground(() => {
         const sent = await sendToFluxDown(
           url,
           message.referrer,
-          message.filename,
+          extractCleanFilename(message.filename, url, message.mimeType),
           effectiveFileSize,
           message.mimeType,
           undefined,
@@ -3201,7 +3349,14 @@ export default defineBackground(() => {
           if (seenBatchItems.has(key)) return false;
           seenBatchItems.add(key);
           return true;
-        });
+        }).map((item) => ({
+          ...item,
+          // 与单项下载同一规则：extractCleanFilename 处理浏览器路径/脚本端点/
+          // 无扩展名（按 mime 补扩展名）；无法确定则留空交引擎探测。
+          filename:
+            extractCleanFilename(item.filename, item.url, item.mimeType) ||
+            undefined,
+        }));
         if (items.length === 0) {
           return { success: false, message: "No valid items" };
         }
@@ -3495,286 +3650,6 @@ export default defineBackground(() => {
       return true;
     if (ct.startsWith("application/vnd.ms-")) return true;
     return false;
-  }
-
-  /**
-   * 将字节数组解码为字符串：优先 UTF-8，失败时兼容 GBK / Big5（老旧中文
-   * 服务器常见），双失败返回 `null`。与 Rust 引擎保持一致的策略，
-   * 避免浏览器插件与桌面端对同一响应头解析出不同的文件名。
-   */
-  type LegacyFilenameCharset = "utf-8" | "gbk" | "big5";
-
-  function normalizeLegacyFilenameCharset(
-    charset: string | undefined,
-  ): LegacyFilenameCharset | undefined {
-    const normalized = charset?.trim().replace(/^"+|"+$/g, "").toLowerCase();
-    if (!normalized) return undefined;
-    if (normalized === "utf-8" || normalized === "utf8") return "utf-8";
-    if (["gbk", "gb2312", "gb18030", "cp936"].includes(normalized)) {
-      return "gbk";
-    }
-    if (
-      ["big5", "big5-hkscs", "cp950", "windows-950"].includes(normalized)
-    ) {
-      return "big5";
-    }
-    return undefined;
-  }
-
-  // 写成 \u{...} 转义而非字面字符：假名/CJK/私用区字符在编辑器与格式化
-  // 工具里容易被当成不可见字符吞掉，区间端点一旦丢失就退化成匹配连字符。
-  const KANA_RE = /[\u{3040}-\u{30ff}]/u;
-  const CJK_RE = /[\u{4e00}-\u{9fff}]/u;
-  const PUA_RE = /[\u{e000}-\u{f8ff}]/u;
-
-  function filenameEncodingScore(value: string): number {
-    let score = 0;
-    for (const ch of value) {
-      if (/\p{Cc}/u.test(ch)) score -= 8;
-      else if (KANA_RE.test(ch)) score -= 5;
-      else if (CJK_RE.test(ch)) score += 2;
-      else if (ch === "\ufffd") score -= 10;
-    }
-    return score;
-  }
-
-  function hasStrongLegacyMojibake(value: string): boolean {
-    return [...value].some(
-      (ch) =>
-        /\p{Cc}/u.test(ch) ||
-        KANA_RE.test(ch) ||
-        PUA_RE.test(ch) ||
-        ch === "\ufffd",
-    );
-  }
-
-  function tryDecode(bytes: Uint8Array, label: LegacyFilenameCharset): string | null {
-    try {
-      return new TextDecoder(label, { fatal: true }).decode(bytes);
-    } catch {
-      return null;
-    }
-  }
-
-  function decodeBytesUtf8OrChineseLegacy(
-    bytes: Uint8Array,
-    charset?: string,
-  ): string | null {
-    const preferred = normalizeLegacyFilenameCharset(charset);
-    if (preferred === "gbk" || preferred === "big5") {
-      // 显式声明的字符集优先；解码失败返回 null，由调用方决定是否回退到
-      // 下一个 filename 参数（与 Rust 引擎 extract_from_content_disposition 一致）。
-      return tryDecode(bytes, preferred);
-    }
-
-    const utf8 = tryDecode(bytes, "utf-8");
-    if (utf8 !== null) return utf8;
-    // A mislabeled UTF-8 filename may still contain legacy Chinese bytes.
-    // Keep the compatibility fallback below for that non-conforming case.
-    const gbk = tryDecode(bytes, "gbk");
-    const big5 = tryDecode(bytes, "big5");
-    if (gbk === null) return big5;
-    if (big5 === null) return gbk;
-    return hasStrongLegacyMojibake(gbk) &&
-      filenameEncodingScore(big5) > filenameEncodingScore(gbk)
-      ? big5
-      : gbk;
-  }
-
-  /**
-   * 把字符串按字节展开：`%XX` 转义解出对应字节，其余字符按其 UTF-16 code unit
-   * 截断到低 8 位当作一个字节。
-   *
-   * 后者依据 Chrome `webRequest` 的行为：响应头按 RFC 7230 定义只能是
-   * ISO-8859-1（Latin-1）字节序列，Chrome 将其逐字节映射为同码位的 JS
-   * 字符串（即字符码 = 原始字节值），不做 UTF-8 解释。如果服务器未做
-   * RFC 5987/percent-encoding，直接把原始 UTF-8 字节塞进 `filename=`，
-   * Chrome 交给扩展的字符串就会是这种"看起来像重音拉丁字母"的乱码
-   * （如 "æä»¶" 对应 UTF-8 编码的"文件"）。逐字符取低 8 位即可还原
-   * 原始字节，再交给 `decodeBytesUtf8OrGbk` 正确解码。
-   */
-  function percentDecodeToBytes(s: string): Uint8Array {
-    const bytes: number[] = [];
-    for (let i = 0; i < s.length; i++) {
-      const c = s.charCodeAt(i);
-      if (c === 0x25 /* '%' */ && i + 2 < s.length) {
-        const hex = s.slice(i + 1, i + 3);
-        if (/^[0-9a-fA-F]{2}$/.test(hex)) {
-          bytes.push(parseInt(hex, 16));
-          i += 2;
-          continue;
-        }
-      }
-      bytes.push(c & 0xff);
-    }
-    return new Uint8Array(bytes);
-  }
-
-  /**
-   * 解码 Content-Disposition `filename=` / `filename*=` 的原始值。
-   *
-   * 修复两类乱码 bug：
-   * - #406：服务器用 `filename="xxx"` 承载 percent-encoding（如中文云存储
-   *   OBS/S3），而非标准 `filename*=` 语法，导致文件名原样显示为
-   *   `%E5%A4%9A...`。
-   * - #380：服务器未做任何转义、直接把原始 UTF-8/GBK 字节写入
-   *   `filename=`，Chrome 按 Latin-1 语义把每个字节映射成同码位字符，
-   *   产生重音拉丁字母乱码。
-   *
-   * 纯 ASCII 值直接返回，避免无谓的字节往返；否则按字节展开
-   * （percent-decode + Latin-1 还原）后用 UTF-8/GBK/Big5 解码。
-   * 解码失败返回 `null`（显式 charset 解码失败或候选编码全部不接受该字节），
-   * 由调用方决定回退到原值还是下一个 filename 参数。
-   */
-  function decodeDispositionFilenameValue(
-    raw: string,
-    charset?: string,
-  ): string | null {
-    const trimmed = raw.trim();
-    if (!trimmed || !/[%\u0080-\uffff]/.test(trimmed)) {
-      return trimmed;
-    }
-    const bytes = percentDecodeToBytes(trimmed);
-    const decoded = decodeBytesUtf8OrChineseLegacy(bytes, charset);
-    return decoded && decoded.trim() ? decoded : null;
-  }
-
-  /**
-   * 剥掉值两端的双引号。
-   *
-   * 用于 `filename*=` 的 ext-value 与无引号 `filename=`：RFC 6266 规定
-   * ext-value 是 token、不得加引号，但腾讯云 COS 等实现会发
-   * `filename*="UTF-8''foo.exe"`，尾引号若不剥掉会跟进文件名。
-   */
-  function stripSurroundingQuotes(v: string): string {
-    return v.trim().replace(/^"+/, "").replace(/"+$/, "").trim();
-  }
-
-  /**
-   * 从 Content-Disposition 头解析文件名
-   *
-   * 支持格式：
-   * - Content-Disposition: attachment; filename="report.pdf"
-   * - Content-Disposition: attachment; filename=report.pdf
-   * - Content-Disposition: attachment; filename*=UTF-8''%E6%8A%A5%E5%91%8A.pdf
-   * - Content-Disposition: attachment; filename="%E6%B0%B8%E7%94%9F.mp4"（#406）
-   * - Content-Disposition: attachment; filename="<raw UTF-8/GBK bytes>"（#380）
-   * - Content-Disposition: attachment; filename*="UTF-8''report.pdf"
-   *   （非标准：ext-value 被加了引号，腾讯云 COS 等）
-   */
-  function parseContentDispositionFilename(disposition: string): string {
-    if (!disposition) return "";
-
-    // 优先尝试 filename*（RFC 5987 编码：charset'lang'percent-encoded-name）。
-    // charset 字段优先决定解码方式；未声明或声明不可靠时使用 UTF-8 优先、
-    // GBK/Big5 候选探测，与 filename= 分支及 Rust 引擎保持一致。
-    // charset 只允许 token 字符，避免在畸形头（`filename*=x.txt; note=a'b'c`）
-    // 上跨参数边界匹配；声明字符集解码失败时回退到 filename=（同 Rust 侧）。
-    const starMatch = disposition.match(
-      /filename\*\s*=\s*"?([A-Za-z0-9_\-]*)'[^';"]*'([^;"]+)"?/i,
-    );
-    if (starMatch) {
-      const decoded = decodeDispositionFilenameValue(
-        stripSurroundingQuotes(starMatch[2]),
-        starMatch[1],
-      );
-      if (decoded) return decoded;
-    }
-
-    // 再尝试 filename="..."（带引号）
-    const quotedMatch = disposition.match(/filename\s*=\s*"(.+?)"/i);
-    if (quotedMatch) {
-      return decodeDispositionFilenameValue(quotedMatch[1]) ?? quotedMatch[1].trim();
-    }
-
-    // 最后尝试 filename=...（无引号）
-    const plainMatch = disposition.match(/filename\s*=\s*([^\s;]+)/i);
-    if (plainMatch) {
-      const plain = stripSurroundingQuotes(plainMatch[1]);
-      return decodeDispositionFilenameValue(plain) ?? plain;
-    }
-
-    return "";
-  }
-
-  /**
-   * 从浏览器的 downloadItem.filename（本地保存路径）和 URL 中提取有意义的文件名。
-   *
-   * 策略：
-   * 1. 如果浏览器给出的 filename 有合法扩展名 → 使用它（浏览器已解析了 Content-Disposition）
-   * 2. 否则尝试从 URL 路径提取带扩展名的文件名
-   * 3. 从 URL 路径提取最后一段（即使没有扩展名，如 "download-no-header"）
-   * 4. 如果都无法获得文件名 → 返回空字符串，交给 Rust 引擎通过 HTTP 探测获取
-   */
-  function extractCleanFilename(
-    browserFilename: string | undefined,
-    url: string,
-  ): string {
-    // 从浏览器的本地路径中提取纯文件名
-    if (browserFilename) {
-      // downloadItem.filename 是完整路径，如 "C:\Users\xxx\Downloads\report.pdf"
-      // 或 "/home/user/Downloads/report.pdf"
-      const basename = browserFilename.split(/[/\\]/).pop() || "";
-      if (basename && looksLikeRealFilename(basename)) {
-        return basename;
-      }
-    }
-
-    // 从 URL 路径提取（带扩展名的优先）
-    try {
-      const pathname = new URL(url).pathname;
-      const segments = pathname.split("/");
-      const lastSegment = decodeURIComponent(
-        segments[segments.length - 1] || "",
-      );
-      if (lastSegment && looksLikeRealFilename(lastSegment)) {
-        return lastSegment;
-      }
-    } catch {
-      // ignore
-    }
-
-    // 放宽要求：从浏览器路径提取纯文件名（即使没有扩展名）
-    if (browserFilename) {
-      const basename = browserFilename.split(/[/\\]/).pop() || "";
-      if (basename) return basename;
-    }
-
-    // 放宽要求：从 URL 路径最后一段提取（即使没有扩展名）
-    // 例如 /download-no-header → "download-no-header"
-    try {
-      const pathname = new URL(url).pathname;
-      const segments = pathname.split("/").filter(Boolean);
-      if (segments.length > 0) {
-        const lastSegment = decodeURIComponent(segments[segments.length - 1]);
-        if (lastSegment) return lastSegment;
-      }
-    } catch {
-      // ignore
-    }
-
-    // 无法确定有意义的文件名，返回空字符串
-    // Rust 端会通过 HTTP HEAD/GET 探测 Content-Disposition 获取真实文件名
-    return "";
-  }
-
-  /**
-   * 判断一个文件名是否看起来像真实的文件名（而非 CDN hash / UUID / 无意义路径段）
-   *
-   * 真实文件名特征：有常见扩展名，如 "report.pdf", "video.mp4"
-   * 非真实文件名：纯 hash "a1b2c3d4e5f6", UUID "550e8400-e29b-41d4-a716-446655440000",
-   *               无扩展名 "download", 单字母段 "f", 短 ID "j5g6z92sied"
-   */
-  function looksLikeRealFilename(name: string): boolean {
-    // 必须包含扩展名（至少一个点，且点后有 1-10 个字母/数字）
-    const extMatch = name.match(/\.([a-zA-Z0-9]{1,10})$/);
-    if (!extMatch) return false;
-
-    // 排除看起来像网页路径的扩展名
-    const webExts = ["html", "htm", "php", "asp", "aspx", "jsp", "cgi"];
-    if (webExts.includes(extMatch[1].toLowerCase())) return false;
-
-    return true;
   }
 
   // 通知去重表：title+message → 上次展示时间戳。

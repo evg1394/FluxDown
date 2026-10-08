@@ -14,6 +14,7 @@ use tokio_util::sync::CancellationToken;
 use crate::db::Db;
 use crate::events::EventSink;
 use crate::logger::{log_info, log_warn};
+use crate::naming::{extract_filename, name_from_url, sanitize_filename};
 use crate::output;
 use crate::speed_limiter::SpeedLimiter;
 use crate::temp_file_guard::TempFileGuard;
@@ -164,8 +165,95 @@ pub(crate) fn is_range_not_satisfiable(e: &DownloadError) -> bool {
 // Public types
 // ---------------------------------------------------------------------------
 
+/// 完成期定名（见 [`crate::naming::refine_inferred_name`]）：仅当任务名由引擎推断
+/// （`tasks.name_inferred`）时，按记录的响应命名证据与临时文件头魔数给出新名；否则
+/// 原样返回。读状态 / 读文件头失败只放弃精修，不影响下载完成。
+async fn refine_completed_name(p: &DownloadParams, temp_path: &Path, current: &str) -> String {
+    let (inferred, resp_name, resp_mime) = match p.db.get_task_naming_state(&p.task_id).await {
+        Ok(state) => state,
+        Err(e) => {
+            log_warn!(
+                "[download] task {} failed to load naming state: {} (keeping '{}')",
+                p.task_id,
+                e,
+                current
+            );
+            return current.to_string();
+        }
+    };
+    if !inferred {
+        return current.to_string();
+    }
+    let head = match read_file_head(temp_path, SNIFF_HEAD_BYTES).await {
+        Ok(head) => head,
+        Err(e) => {
+            log_warn!(
+                "[download] task {} failed to read {} for type sniffing: {}",
+                p.task_id,
+                temp_path.display(),
+                e
+            );
+            Vec::new()
+        }
+    };
+    let evidence = crate::naming::NameEvidence {
+        disposition: (!resp_name.is_empty()).then_some(resp_name.as_str()),
+        mime: (!resp_mime.is_empty()).then_some(resp_mime.as_str()),
+        sniffed_ext: crate::naming::sniff_extension(&head),
+    };
+    match crate::naming::refine_inferred_name(current, &evidence) {
+        Some(name) => {
+            log_info!(
+                "[download] task {} refined inferred file name '{}' → '{}' (evidence: {:?})",
+                p.task_id,
+                current,
+                name,
+                evidence
+            );
+            name
+        }
+        None => current.to_string(),
+    }
+}
+
+/// 文件头魔数嗅探读取的字节数（tar 的 `ustar` 位于 257，OOXML/APK 条目名在前几 KB）。
+const SNIFF_HEAD_BYTES: u64 = 4096;
+
+async fn read_file_head(path: &Path, limit: u64) -> std::io::Result<Vec<u8>> {
+    use tokio::io::AsyncReadExt;
+    let file = File::open(path).await?;
+    let mut head = Vec::new();
+    file.take(limit).read_to_end(&mut head).await?;
+    Ok(head)
+}
+
+/// 记录实际响应的命名证据（见 [`Db::record_task_response_naming`]）。写失败只会让完成期
+/// 不精修推断名，不影响下载本身，故记日志后继续。
+pub(crate) async fn record_naming_evidence(db: &Db, task_id: &str, disposition: &str, mime: &str) {
+    if let Err(e) = db
+        .record_task_response_naming(task_id, disposition, mime)
+        .await
+    {
+        log_warn!(
+            "[download] task {} failed to record response naming evidence: {} \
+             (inferred file name will not be refined at completion)",
+            task_id,
+            e
+        );
+    }
+}
+
+/// 从一个实际 GET 响应提取命名证据（Content-Disposition 名 + Content-Type）并记录。
+pub(crate) async fn record_response_naming(db: &Db, task_id: &str, resp: &reqwest::Response) {
+    let (disposition, mime) = crate::naming::response_naming(resp.headers(), resp.url().as_str());
+    record_naming_evidence(db, task_id, disposition.as_deref().unwrap_or(""), &mime).await;
+}
+
 pub struct FileInfo {
     pub file_name: String,
+    /// `file_name` 的来源：只有 Content-Disposition（含 URL 查询里的 CD）才是权威名，
+    /// 作为响应命名证据落库供完成期精修引擎推断的名字。
+    pub name_source: crate::naming::NameSource,
     pub total_bytes: i64,
     pub supports_range: bool,
     /// MIME content type from the server (e.g. "text/html", "application/octet-stream").
@@ -310,12 +398,12 @@ pub struct DownloadParams {
     /// （config `use_server_time`）。服务器未提供该头、解析失败或写入失败时
     /// 保留本地完成时间，绝不影响下载结果。
     pub use_server_time: bool,
-    /// 文件已存在时是否覆盖旧文件（config `file_exists_behavior` ==
-    /// `"overwrite"`，manager 注入）。true 时，起名/终名冲突若**仅**来自
-    /// 磁盘上已存在的最终文件，则保留原名并在 finalize 时删除旧文件后
-    /// 占名；`.fdownloading` 临时文件、并发任务预订（reserved）与 avoid
-    /// 集合仍按编号改名，绝不覆盖其他任务的在途/产物。
-    pub allow_overwrite: bool,
+    /// 覆盖旧文件的授权（manager 注入）：全局 overwrite → `Any`；逐任务
+    /// 「覆盖」答复 → `Only(询问时的文件名)`；其余 `Never`。授权时，起名/
+    /// 终名冲突若**仅**来自磁盘上已存在的最终文件，则保留原名并在 finalize
+    /// 时删除旧文件后占名；`.fdownloading` 临时文件、并发任务预订（reserved）
+    /// 与 avoid 集合仍按编号改名，绝不覆盖其他任务的在途/产物。
+    pub overwrite: crate::file_exists::OverwritePolicy,
     /// 段行布局属主令牌（= manager 的 spawn generation）。多段路径起飞时
     /// 写入 `tasks.segments_epoch`，worker 段进度写入以它作存在性守卫——
     /// 快速 pause→resume 后旧 spawn 迟到的写入全类失效（含段 0），杜绝
@@ -1200,16 +1288,77 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(15);
 /// Maximum retries for the probe phase (HEAD + GET).
 ///
 /// 3 attempts total:
-///   1. Original headers (incl. browser UA from extension, if any)
-///   2. Normal retry (same headers, covers DNS/TLS cold-start)
-///   3. **UA-downgrade retry** — strips browser UA from extra_headers so that
-///      the request uses the neutral `DEFAULT_UA`.  This handles Cloudflare
-///      Bot Management which rejects requests where the TLS fingerprint
-///      (rustls ≠ Chrome) contradicts a Chrome User-Agent header.
+///   1. Original headers (incl. browser UA from extension, or default UA)
+///   2. First adaptive retry:
+///      - If server rejected (403/429) and request carried a browser UA: strip browser UA
+///        (handles Cloudflare bot detection rejecting rustls TLS fingerprint with Chrome UA).
+///      - If server rejected (403/429) and request lacked browser UA: inject standard browser UA
+///        and inferred origin Referer (handles NVIDIA / Akamai / CDNs that block non-browser UAs
+///        or enforce same-origin anti-hotlinking).
+///   3. Second adaptive retry:
+///      - Browser UA was rejected → stripped UA with inferred origin Referer
+///        (Cloudflare with hotlink check; only when the request had no Referer)
+///      - Default UA was rejected → default UA with inferred origin Referer
+///        (rustls fingerprint vs Chrome UA conflict, but Referer is required)
 const PROBE_MAX_RETRIES: u32 = 3;
 
-/// Base delay for probe retries (used with exponential backoff).
+/// Base delay for probe retries (used with exponential backoff on network errors).
 const PROBE_RETRY_BASE_DELAY: Duration = Duration::from_secs(1);
+
+/// 针对反爬 / 防盗链拒绝（如 NVIDIA / Akamai 返回 403 Forbidden）时可采用的默认浏览器 UA。
+/// 优先使用当前系统平台的典型 Chrome UA，确保指纹与操作系统一致。
+pub const DEFAULT_BROWSER_UA: &str = if cfg!(target_os = "macos") {
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36"
+} else if cfg!(target_os = "windows") {
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36"
+} else if cfg!(target_os = "android") {
+    "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Mobile Safari/537.36"
+} else if cfg!(target_os = "ios") {
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1"
+} else {
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36"
+};
+
+/// 从 HTTP/HTTPS 目标 URL 推导出默认源站 Referer（例如 `https://cn.download.nvidia.com/...`
+/// 推导为 `https://cn.download.nvidia.com/`）。供防盗链检查要求同源/合法来源页的 CDN 回落使用。
+pub fn infer_origin_referrer(url: &str) -> Option<String> {
+    if let Ok(parsed) = url::Url::parse(url)
+        && matches!(parsed.scheme(), "http" | "https")
+        && let Some(host) = parsed.host_str()
+    {
+        let port_part = if let Some(p) = parsed.port() {
+            format!(":{}", p)
+        } else {
+            String::new()
+        };
+        return Some(format!("{}://{}{}/", parsed.scheme(), host, port_part));
+    }
+    None
+}
+
+/// 判断探测失败是否为服务端明确拒绝（403 Forbidden / 429 Too Many Requests）。
+/// 严格解析 probe failure 状态位或 HTTP 状态码，避免误判带 403/429 端口或 URL 的网络错误。
+pub(crate) fn is_probe_server_rejection(e: &DownloadError) -> bool {
+    if is_server_rejection(e) {
+        return true;
+    }
+    match e {
+        DownloadError::Other(msg) => {
+            if let Some(rest) = msg.strip_prefix("probes failed: ") {
+                for part in rest.split(", ") {
+                    if let Some((_probe_type, status_desc)) = part.split_once('=') {
+                        let trimmed = status_desc.trim();
+                        if matches!(trimmed, "403" | "429") {
+                            return true;
+                        }
+                    }
+                }
+            }
+            false
+        }
+        _ => false,
+    }
+}
 
 /// Resolve file info with automatic retry on transient failures.
 ///
@@ -1242,75 +1391,138 @@ fn spec_without_browser_ua(spec: &RequestSpec) -> RequestSpec {
     }
 }
 
-/// 把 UA 降级结果写回任务的持久化请求头，续传（尤其免探测的 hint 续传）沿用。
-async fn persist_ua_downgrade(db: &Db, task_id: &str) {
-    let Ok(Some((cookies, referrer, headers_json))) = db.load_task_request_context(task_id).await
+/// 为请求附加默认浏览器 UA（用于服务器拒绝非浏览器 UA / FluxDown 默认 UA 的场景）。
+fn spec_with_browser_ua(spec: &RequestSpec) -> RequestSpec {
+    let mut s = spec.clone();
+    s.extra_headers
+        .insert("User-Agent".to_string(), DEFAULT_BROWSER_UA.to_string());
+    s
+}
+
+/// 为请求附加推导来源页 Referer（用于 CDN 防盗链拒绝无 Referer 的场景）。
+fn spec_with_inferred_referrer(spec: &RequestSpec, url: &str) -> RequestSpec {
+    let mut s = spec.clone();
+    if s.referrer.is_empty()
+        && let Some(ref_url) = infer_origin_referrer(url)
+    {
+        s.referrer = ref_url;
+    }
+    s
+}
+
+/// 同时附加浏览器 UA 与推导 Referer。
+fn spec_with_browser_ua_and_referrer(spec: &RequestSpec, url: &str) -> RequestSpec {
+    let mut s = spec_with_browser_ua(spec);
+    if s.referrer.is_empty()
+        && let Some(ref_url) = infer_origin_referrer(url)
+    {
+        s.referrer = ref_url;
+    }
+    s
+}
+
+/// 把请求头自适应结果写回任务的持久化请求头，使后续分段 worker 与续传（尤其免探测的 hint 续传）沿用。
+async fn persist_adapted_spec(db: &Db, task_id: &str, adapted: &RequestSpec) {
+    let Ok(Some((cookies, current_referrer, headers_json))) =
+        db.load_task_request_context(task_id).await
     else {
         return;
     };
-    if headers_json.is_empty() {
+
+    let mut headers = if headers_json.is_empty() {
+        std::collections::HashMap::new()
+    } else {
+        match serde_json::from_str::<std::collections::HashMap<String, String>>(&headers_json) {
+            Ok(h) => h,
+            Err(e) => {
+                // 已落库的请求头损坏：放弃自适应落库，绝不以残缺 map 覆写原值。
+                log_warn!(
+                    "[resolve] task {} persisted request headers are corrupt, skip persisting adapted context: {e:#}",
+                    task_id
+                );
+                return;
+            }
+        }
+    };
+
+    let before_headers = headers.clone();
+    let before_referrer = current_referrer.clone();
+
+    // 同步 extra_headers（如去掉了浏览器 UA，或补充了默认浏览器 UA）。
+    // 插入前按大小写不敏感移除同名键，避免库里的 `user-agent` 与新写入的
+    // `User-Agent` 并存成两个 UA 键。
+    for (k, v) in &adapted.extra_headers {
+        headers.retain(|existing, _| !existing.eq_ignore_ascii_case(k));
+        headers.insert(k.clone(), v.clone());
+    }
+    // 如果 adapted 中显式移除了 user-agent，也从持久化 headers 中移除
+    if !adapted
+        .extra_headers
+        .keys()
+        .any(|k| k.eq_ignore_ascii_case("user-agent"))
+    {
+        headers.retain(|k, _| !k.eq_ignore_ascii_case("user-agent"));
+    }
+
+    let next_referrer = if !adapted.referrer.is_empty() {
+        &adapted.referrer
+    } else {
+        &current_referrer
+    };
+
+    if headers == before_headers && *next_referrer == before_referrer {
         return;
     }
-    let Ok(mut headers) =
-        serde_json::from_str::<std::collections::HashMap<String, String>>(&headers_json)
-    else {
-        return;
+
+    let json = match serde_json::to_string(&headers) {
+        Ok(j) => j,
+        Err(e) => {
+            log_warn!(
+                "[resolve] task {} failed to serialize adapted request headers: {e:#}",
+                task_id
+            );
+            return;
+        }
     };
-    let before = headers.len();
-    headers.retain(|k, _| !k.eq_ignore_ascii_case("user-agent"));
-    if headers.len() == before {
-        return;
-    }
-    let Ok(json) = serde_json::to_string(&headers) else {
-        return;
-    };
+
     if let Err(e) = db
-        .set_task_request_context(task_id, &cookies, &referrer, &json)
+        .set_task_request_context(task_id, &cookies, next_referrer, &json)
         .await
     {
         log_warn!(
-            "[resolve] task {} failed to persist UA downgrade: {}",
+            "[resolve] task {} failed to persist adapted request context: {}",
             task_id,
             e
         );
     }
 }
 
-/// 同 [`resolve_file_info`]，额外返回探测是否靠「去掉浏览器 UA」才成功。
+/// 同 [`resolve_file_info`]，额外返回探测是否靠请求头自适应（去掉浏览器 UA /
+/// 补充浏览器 UA / 补充防盗链 Referer）才成功。成功时返回 `Some(adapted_spec)`。
 pub(crate) async fn resolve_file_info_with_ua_fallback(
     client: &Client,
     url: &str,
     spec: &RequestSpec,
-) -> Result<(FileInfo, bool), DownloadError> {
+) -> Result<(FileInfo, Option<RequestSpec>), DownloadError> {
     let has_browser_ua = spec
         .extra_headers
         .keys()
         .any(|k| k.eq_ignore_ascii_case("user-agent"));
 
-    // Holder for the UA-downgraded variant; allocated once outside the loop so
-    // we can borrow it without repeated cloning.
-    let downgraded_spec = has_browser_ua.then(|| spec_without_browser_ua(spec));
-
     let mut last_err = None;
+    let mut current_adapted: Option<RequestSpec> = None;
+
     for attempt in 0..PROBE_MAX_RETRIES {
-        // Last attempt: if extra_headers carried a browser UA, drop it so
-        // the request falls back to DEFAULT_UA ("FluxDown/<version>").  This
-        // avoids Cloudflare's TLS-fingerprint-vs-UA bot detection.
-        let downgraded = match &downgraded_spec {
-            Some(d) if attempt > 0 && attempt + 1 == PROBE_MAX_RETRIES => {
-                log_info!(
-                    "[resolve] retry {}/{}: stripping browser UA to avoid bot detection",
-                    attempt + 1,
-                    PROBE_MAX_RETRIES
-                );
-                Some(d)
-            }
-            _ => None,
+        let attempt_spec = if attempt == 0 {
+            spec
+        } else if let Some(ref adapted) = current_adapted {
+            adapted
+        } else {
+            spec
         };
-        let attempt_spec = downgraded.unwrap_or(spec);
 
         match resolve_file_info_once(client, url, attempt_spec).await {
-            Ok(info) => return Ok((info, downgraded.is_some())),
+            Ok(info) => return Ok((info, current_adapted)),
             Err(e) => {
                 log_info!(
                     "[resolve] probe attempt {}/{} failed: {}",
@@ -1318,9 +1530,58 @@ pub(crate) async fn resolve_file_info_with_ua_fallback(
                     PROBE_MAX_RETRIES,
                     e
                 );
+                let is_rejection = is_probe_server_rejection(&e);
                 last_err = Some(e);
+
                 if attempt + 1 < PROBE_MAX_RETRIES {
-                    let delay = PROBE_RETRY_BASE_DELAY * 2u32.saturating_pow(attempt);
+                    // 若收到 403 / 429 等服务端拒绝，根据当前请求头生成自适应候选：
+                    if is_rejection {
+                        if has_browser_ua {
+                            // 场景 A（Cloudflare 反爬）：浏览器 UA 与 rustls 指纹冲突，剥离 UA
+                            if attempt == 0 {
+                                log_info!(
+                                    "[resolve] server rejection (403/429): stripping browser UA to avoid bot detection"
+                                );
+                                current_adapted = Some(spec_without_browser_ua(spec));
+                            } else if spec.referrer.is_empty() {
+                                // 若剥离 UA 依然被拒绝且无 Referer，尝试补全推导 Referer
+                                log_info!(
+                                    "[resolve] server rejection persists: trying stripped UA with inferred origin Referer"
+                                );
+                                current_adapted = Some(spec_with_inferred_referrer(
+                                    &spec_without_browser_ua(spec),
+                                    url,
+                                ));
+                            }
+                        } else {
+                            // 场景 B（NVIDIA / Akamai 反盗链/爬虫）：默认 UA（FluxDown/*）或缺 Referer 被拒
+                            if attempt == 0 {
+                                log_info!(
+                                    "[resolve] server rejection (403/429): adapting with browser UA and inferred origin Referer"
+                                );
+                                current_adapted =
+                                    Some(spec_with_browser_ua_and_referrer(spec, url));
+                            } else if attempt == 1 {
+                                // 若组合仍被拒绝，回退为默认 UA + 推导 Referer（针对需要 Referer 但拦截 Chrome+rustls 指纹的 Cloudflare 等站点）
+                                log_info!(
+                                    "[resolve] server rejection persists: trying default UA with inferred origin Referer"
+                                );
+                                current_adapted = Some(spec_with_inferred_referrer(spec, url));
+                            }
+                        }
+                    } else if has_browser_ua && attempt + 2 == PROBE_MAX_RETRIES {
+                        // 最后一轮重试前的兜底降级（即便不是明确 403）：尝试剥离浏览器 UA（保留可能已设置的 Referer）
+                        let base = current_adapted.as_ref().unwrap_or(spec);
+                        current_adapted = Some(spec_without_browser_ua(base));
+                    }
+
+                    // 服务端拒绝无需长时退避，短等待 200ms 即可切换新请求头重试；
+                    // 网络抖动保持指数退避。
+                    let delay = if is_rejection {
+                        Duration::from_millis(200)
+                    } else {
+                        PROBE_RETRY_BASE_DELAY * 2u32.saturating_pow(attempt)
+                    };
                     tokio::time::sleep(delay).await;
                 }
             }
@@ -1557,7 +1818,8 @@ async fn resolve_file_info_once(
         .unwrap_or("")
         .to_string();
 
-    let file_name = extract_filename(&headers, url, final_url.as_str());
+    let resolved = extract_filename(&headers, url, final_url.as_str());
+    let (file_name, name_source) = (resolved.name, resolved.source);
     log_info!(
         "[resolve] url={} → name={}, size={}, range={}, ct={}",
         crate::logger::sanitize_log_str(url),
@@ -1650,6 +1912,7 @@ async fn resolve_file_info_once(
 
     Ok(FileInfo {
         file_name,
+        name_source,
         total_bytes,
         supports_range,
         content_type,
@@ -1756,7 +2019,8 @@ async fn resolve_file_info_plain_get_fallback(
         .unwrap_or("")
         .to_string();
 
-    let file_name = extract_filename(&headers, url, final_url.as_str());
+    let resolved = extract_filename(&headers, url, final_url.as_str());
+    let (file_name, name_source) = (resolved.name, resolved.source);
 
     let etag = headers
         .get(reqwest::header::ETAG)
@@ -1794,6 +2058,7 @@ async fn resolve_file_info_plain_get_fallback(
 
     Ok(FileInfo {
         file_name,
+        name_source,
         total_bytes,
         supports_range,
         content_type,
@@ -1861,7 +2126,8 @@ async fn resolve_file_info_non_get(
         .unwrap_or("")
         .to_string();
 
-    let file_name = extract_filename(&headers, url, final_url.as_str());
+    let resolved = extract_filename(&headers, url, final_url.as_str());
+    let (file_name, name_source) = (resolved.name, resolved.source);
 
     let etag = headers
         .get(reqwest::header::ETAG)
@@ -1886,6 +2152,7 @@ async fn resolve_file_info_non_get(
 
     Ok(FileInfo {
         file_name,
+        name_source,
         total_bytes,
         // 非 GET 强制单流——POST + Range 在标准上未定义，服务端实现不一致
         supports_range: false,
@@ -1893,539 +2160,6 @@ async fn resolve_file_info_non_get(
         etag,
         last_modified,
         content_encoding_compressed,
-    })
-}
-
-// ---------------------------------------------------------------------------
-// File-name extraction
-// ---------------------------------------------------------------------------
-
-/// MIME type → common extension mapping for when there is no filename.
-fn mime_to_ext(content_type: &str) -> Option<&'static str> {
-    let ct = content_type.split(';').next().unwrap_or("").trim();
-    match ct {
-        "application/pdf" => Some("pdf"),
-        "application/zip" => Some("zip"),
-        "application/x-gzip" | "application/gzip" => Some("gz"),
-        "application/x-tar" => Some("tar"),
-        "application/x-bzip2" => Some("bz2"),
-        "application/x-xz" => Some("xz"),
-        "application/x-7z-compressed" => Some("7z"),
-        "application/x-rar-compressed" | "application/vnd.rar" => Some("rar"),
-        "application/json" => Some("json"),
-        "application/xml" | "text/xml" => Some("xml"),
-        "application/javascript" | "text/javascript" => Some("js"),
-        "application/wasm" => Some("wasm"),
-        "application/octet-stream" => None, // generic binary
-        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" => Some("xlsx"),
-        "application/vnd.openxmlformats-officedocument.wordprocessingml.document" => Some("docx"),
-        "application/vnd.openxmlformats-officedocument.presentationml.presentation" => Some("pptx"),
-        "application/msword" => Some("doc"),
-        "application/vnd.ms-excel" => Some("xls"),
-        "application/vnd.ms-powerpoint" => Some("ppt"),
-        "application/x-iso9660-image" => Some("iso"),
-        "application/x-msdownload" | "application/x-dosexec" => Some("exe"),
-        "application/vnd.android.package-archive" => Some("apk"),
-        "application/java-archive" => Some("jar"),
-        "application/x-shockwave-flash" => Some("swf"),
-        "application/x-debian-package" => Some("deb"),
-        "application/x-rpm" => Some("rpm"),
-        "application/x-msi" => Some("msi"),
-        "application/vnd.apple.installer+xml" => Some("pkg"),
-        "text/html" => Some("html"),
-        "text/css" => Some("css"),
-        "text/csv" => Some("csv"),
-        "text/plain" => Some("txt"),
-        "image/jpeg" => Some("jpg"),
-        "image/png" => Some("png"),
-        "image/gif" => Some("gif"),
-        "image/webp" => Some("webp"),
-        "image/svg+xml" => Some("svg"),
-        "image/bmp" => Some("bmp"),
-        "image/x-icon" | "image/vnd.microsoft.icon" => Some("ico"),
-        "image/tiff" => Some("tiff"),
-        "image/avif" => Some("avif"),
-        "audio/mpeg" => Some("mp3"),
-        "audio/ogg" => Some("ogg"),
-        "audio/wav" | "audio/x-wav" => Some("wav"),
-        "audio/flac" => Some("flac"),
-        "audio/aac" => Some("aac"),
-        "audio/mp4" | "audio/x-m4a" => Some("m4a"),
-        "audio/webm" => Some("weba"),
-        "video/mp4" => Some("mp4"),
-        "video/webm" => Some("webm"),
-        "video/x-matroska" => Some("mkv"),
-        "video/x-msvideo" => Some("avi"),
-        "video/quicktime" => Some("mov"),
-        "video/x-flv" => Some("flv"),
-        "video/mp2t" => Some("ts"),
-        "video/3gpp" => Some("3gp"),
-        "font/woff" => Some("woff"),
-        "font/woff2" => Some("woff2"),
-        "font/ttf" | "application/x-font-ttf" => Some("ttf"),
-        "font/otf" => Some("otf"),
-        _ => None,
-    }
-}
-
-pub(crate) fn extract_filename(
-    headers: &reqwest::header::HeaderMap,
-    request_url: &str,
-    final_url: &str,
-) -> String {
-    // 1. Try Content-Disposition: attachment; filename="xxx"
-    if let Some(name) = extract_from_content_disposition(headers) {
-        return name;
-    }
-
-    // 2. Try URL path (after removing query & fragment).
-    //
-    // Redirects make this ambiguous: either side may hold the real name.
-    // GitHub's `archive/refs/tags/<tag>.zip` redirects to codeload's
-    // `.../zip/refs/tags/<tag>` (extension dropped — a dot inside the tag,
-    // like "11.0-1b", then manufactures a bogus ".0-1b"), while a
-    // `download.php`-style endpoint redirects to a CDN URL that is the only
-    // place the real filename exists. No static preference is right for
-    // both, so decide per-case:
-    //
-    //   a. The final segment equals the request segment minus its (possibly
-    //      multi-part) extension → the redirect provably dropped the
-    //      extension (codeload pattern, both `.zip` and `.tar.gz`); use the
-    //      request segment, restoring it.
-    //   b. The final segment carries a plausible extension → trust it, same
-    //      as the pre-redirect-aware behavior (covers shortlinks and
-    //      `download.php` → CDN redirects).
-    //   c. Only the request segment carries a plausible extension → use it
-    //      (redirect target structurally lacks a filename).
-    //   d. Neither looks like a filename → final, then request. The request
-    //      tier is new relative to the pre-redirect-aware code and outranks
-    //      the MIME fallback: an extensionless request segment beats a
-    //      generic "download.<ext>".
-    let from_request = extract_from_url(request_url);
-    let from_final = extract_from_url(final_url);
-    if let (Some(req), Some(fin)) = (&from_request, &from_final)
-        && let Some(rest) = req.strip_prefix(fin.as_str())
-        && let Some(ext) = rest.strip_prefix('.')
-        && !ext.is_empty()
-        && ext.split('.').all(|part| {
-            (1..=10).contains(&part.len()) && part.chars().all(|c| c.is_ascii_alphanumeric())
-        })
-    {
-        return req.clone();
-    }
-    if let Some(fin) = &from_final
-        && has_plausible_extension(fin)
-    {
-        return fin.clone();
-    }
-    if let Some(req) = &from_request
-        && has_plausible_extension(req)
-    {
-        return req.clone();
-    }
-    if let Some(name) = from_final {
-        return name;
-    }
-    if let Some(name) = from_request {
-        return name;
-    }
-
-    // 3. Try Content-Type → build "download.ext"
-    if let Some(ct) = headers.get(reqwest::header::CONTENT_TYPE)
-        && let Ok(ct_str) = ct.to_str()
-        && let Some(ext) = mime_to_ext(ct_str)
-    {
-        return format!("download.{}", ext);
-    }
-
-    "download".to_string()
-}
-
-/// Whether `name`'s trailing "extension" (the part after the last `.`) looks
-/// like a real file extension: 1–10 ASCII alphanumeric characters. Used to
-/// prefer a URL whose last path segment carries a genuine extension over one
-/// that merely contains a stray dot — e.g. a version number embedded in a
-/// path segment, as in GitHub's codeload redirect targets.
-fn has_plausible_extension(name: &str) -> bool {
-    match name.rfind('.') {
-        Some(pos) if pos + 1 < name.len() => {
-            let ext = &name[pos + 1..];
-            (1..=10).contains(&ext.len()) && ext.chars().all(|c| c.is_ascii_alphanumeric())
-        }
-        _ => false,
-    }
-}
-
-/// 按 RFC 6266 把 Content-Disposition 切成 `(参数名, 参数值)`：分号在引号内
-/// 不分隔（`filename="a;b.zip"`），`=` 两侧的空白被容忍，参数名由调用方按
-/// 大小写不敏感比较。没有 `=` 的片段（如 `attachment`）被跳过。
-fn disposition_params(value: &str) -> Vec<(&str, &str)> {
-    let mut parts = Vec::new();
-    let mut start = 0usize;
-    let mut in_quotes = false;
-    let mut escaped = false;
-    for (i, c) in value.char_indices() {
-        match c {
-            _ if escaped => escaped = false,
-            '\\' if in_quotes => escaped = true,
-            '"' => in_quotes = !in_quotes,
-            ';' if !in_quotes => {
-                parts.push(&value[start..i]);
-                start = i + 1;
-            }
-            _ => {}
-        }
-    }
-    parts.push(&value[start..]);
-    parts
-        .into_iter()
-        .filter_map(|part| {
-            let (name, val) = part.split_once('=')?;
-            Some((name.trim(), val.trim()))
-        })
-        .collect()
-}
-
-fn extract_from_content_disposition(headers: &reqwest::header::HeaderMap) -> Option<String> {
-    let disposition = headers.get(reqwest::header::CONTENT_DISPOSITION)?;
-    // HeaderValue may contain raw UTF-8, GBK, or Big5 bytes in legacy filename= values.
-    // Carry each header byte as a Latin-1 code unit so the ASCII parameter structure can
-    // be split with &str tools; every value is turned back into its original bytes with
-    // `latin1_bytes` before decoding — `str::as_bytes` on this carrier would re-encode
-    // the non-ASCII code units as two-byte UTF-8 and corrupt raw legacy bytes.
-    let value: String = disposition
-        .as_bytes()
-        .iter()
-        .map(|&byte| byte as char)
-        .collect();
-
-    // Prefer filename*= (RFC 5987 / RFC 6266) over filename=
-    for (param, name) in disposition_params(&value) {
-        if param.eq_ignore_ascii_case("filename*") {
-            // Format: charset'language'percent-encoded-name
-            // e.g. UTF-8''My%20File.pdf
-            //
-            // 注：按 RFC 5987 charset 字段明确指定编码，严格实现
-            // 应该读取该字段。这里读取并支持 UTF-8、GBK 与 Big5；
-            // 对声明不可靠的老旧中文服务器仍保留候选探测。
-            // （它们通常话不对题，声明 UTF-8 但发 GBK）。
-            // 非标准实现（腾讯云 COS 等）会把整个 ext-value 用双引号包起来：
-            // `filename*="UTF-8''foo.exe"`。RFC 6266 的 ext-value 是 token 不
-            // 允许加引号，若原样保留，尾引号会跟进文件名（Windows 上再被
-            // sanitize_filename 换成 `_`，落盘名多一个下划线）。
-            let name = name.trim().trim_matches('"').trim();
-            let mut parts = name.splitn(3, '\'');
-            let charset = parts.next();
-            let _language = parts.next();
-            if let Some(encoded) = parts.next()
-                && let Ok(decoded) =
-                    percent_decode_bytes_with_charset(&latin1_bytes(encoded), charset)
-            {
-                let decoded = decoded.trim();
-                if !decoded.is_empty() {
-                    return Some(sanitize_filename(decoded));
-                }
-            }
-        }
-    }
-
-    for (param, name) in disposition_params(&value) {
-        if param.eq_ignore_ascii_case("filename") {
-            let name = name.trim_matches(|c| c == '"' || c == '\'' || c == ' ');
-            if !name.is_empty() {
-                // Heuristic: some servers (e.g. Chinese cloud storage OBS/S3)
-                // percent-encode the filename= value instead of using the
-                // RFC 5987 filename*= syntax.  When the raw value contains
-                // percent-encoded sequences, try URL-decoding it so that
-                // `%E6%B0%B8%E7%94%9F.mp4` becomes `永生.mp4`.
-                if name.contains('%')
-                    && let Ok(decoded) =
-                        percent_decode_bytes_with_charset(&latin1_bytes(name), None)
-                {
-                    let decoded = decoded.trim();
-                    if !decoded.is_empty() && decoded != name {
-                        return Some(sanitize_filename(decoded));
-                    }
-                }
-                let decoded = decode_bytes_with_charset(&latin1_bytes(name), None)
-                    .unwrap_or_else(|_| name.to_owned());
-                return Some(sanitize_filename(&decoded));
-            }
-        }
-    }
-
-    None
-}
-
-pub fn extract_from_url(url: &str) -> Option<String> {
-    // Strip query and fragment
-    let path = url.split('?').next().unwrap_or(url);
-    let path = path.split('#').next().unwrap_or(path);
-    let segment = path.rsplit('/').next()?;
-    let decoded = urlencoding_decode(segment).unwrap_or_else(|_| segment.to_string());
-    let decoded = decoded.trim();
-    if decoded.is_empty() || decoded == "/" {
-        return None;
-    }
-    Some(sanitize_filename(decoded))
-}
-
-/// 文件名单组件的最大字节数（F051）。
-///
-/// 大多数文件系统（ext4/APFS/NTFS）的单路径组件上限为 255 字节；这里取 200
-/// 作为保守预算，给 `.fdownloading` 临时后缀（13 字节）及未来可能的 dedup
-/// `" (NN)"` 后缀留出余量。超长的 Content-Disposition / URL 段若原样放行，
-/// `save_dir.join(name) + ".fdownloading"` 会触顶导致 create 报 ENAMETOOLONG，
-/// 下载以晦涩 OS 错误失败。多字节 CJK 约 66 字即可触及 200 字节。
-const MAX_FILENAME_BYTES: usize = 200;
-
-/// Windows 保留设备名（不区分大小写，比较时取扩展名前的 stem）。
-///
-/// 在 Windows 上创建这些名字（无论是否带扩展名，如 `CON`、`NUL.txt`）会失败
-/// 或行为异常。本项目主要目标平台为 Windows，故统一在文件名出口处规避。
-const WINDOWS_RESERVED_NAMES: &[&str] = &[
-    "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8",
-    "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
-];
-
-/// Remove or replace characters that are illegal in file names on Windows/macOS/Linux.
-///
-/// 额外保证（F051）：
-///   - 规避 Windows 保留设备名（CON/PRN/AUX/NUL/COM1-9/LPT1-9）——在 stem 前
-///     加下划线；
-///   - 把结果按字节截断到 [`MAX_FILENAME_BYTES`]，截断在 char 边界进行，避免
-///     切断多字节 CJK 字符。
-pub fn sanitize_filename(name: &str) -> String {
-    let s: String = name
-        .chars()
-        .map(|c| match c {
-            '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*' => '_',
-            c if c.is_control() => '_',
-            c => c,
-        })
-        .collect();
-    let s = s.trim_matches(|c: char| c == '.' || c == ' ');
-    if s.is_empty() {
-        return "download".to_string();
-    }
-
-    // --- F051(1): Windows 保留设备名规避 ---
-    // 取扩展名前的 stem（首个 '.' 之前的部分）做大小写无关比较。
-    let stem_end = s.find('.').unwrap_or(s.len());
-    let stem = &s[..stem_end];
-    let s = if WINDOWS_RESERVED_NAMES
-        .iter()
-        .any(|r| stem.eq_ignore_ascii_case(r))
-    {
-        format!("_{}", s)
-    } else {
-        s.to_string()
-    };
-
-    // --- F051(2): 字节长度截断（在 char 边界） ---
-    if s.len() <= MAX_FILENAME_BYTES {
-        return s;
-    }
-    // 保留扩展名（最后一个 '.' 起的部分），从 stem 尾部按 char 边界裁剪。
-    let ext_start = s.rfind('.').unwrap_or(s.len());
-    let (stem, ext) = s.split_at(ext_start);
-    let budget = MAX_FILENAME_BYTES.saturating_sub(ext.len());
-    // 找到 <= budget 的最大 char 边界。
-    let cut = stem
-        .char_indices()
-        .map(|(i, _)| i)
-        .take_while(|&i| i <= budget)
-        .last()
-        .unwrap_or(0);
-    let truncated = format!("{}{}", &stem[..cut], ext);
-    // 截断后再次 trim 尾部 '.'/' '（避免裁出以点/空格结尾的名）；若整体为空则兜底。
-    let truncated = truncated.trim_matches(|c: char| c == '.' || c == ' ');
-    if truncated.is_empty() {
-        "download".to_string()
-    } else {
-        truncated.to_string()
-    }
-}
-
-/// 将单个十六进制 ASCII 字节解析为 0..=15 的半字节（nibble）。
-///
-/// 仅接受 `0-9` / `a-f` / `A-F`；其他字节返回 `None`。供 `urlencoding_decode`
-/// 按字节解析 `%XX` 转义使用，避免对 `&str` 切片导致的字符边界 panic。
-fn hex_nibble(b: u8) -> Option<u8> {
-    match b {
-        b'0'..=b'9' => Some(b - b'0'),
-        b'a'..=b'f' => Some(b - b'a' + 10),
-        b'A'..=b'F' => Some(b - b'A' + 10),
-        _ => None,
-    }
-}
-
-/// 解码 URL 路径段 / Content-Disposition 文件名中的百分号转义。
-///
-/// **按字节解析，绝不对 `&str` 切片**：原实现用 `&s[i+1..i+3]` 取两位十六进制，
-/// 当 `%` 后紧跟原始多字节 UTF-8 字符（如 `50%折扣.txt`）时，切片终点会落在
-/// 多字节字符内部触发 `byte index N is not a char boundary` panic（F017）。改为
-/// 直接对 `bytes[i+1]` / `bytes[i+2]` 解析半字节后即可消除该 panic。
-///
-/// **不把 `+` 解码为空格**（F046）：按 RFC 3986，`+` 仅在
-/// `application/x-www-form-urlencoded`（query / form body）中表示空格；在 URL
-/// 路径段、Content-Disposition、RFC 5987 `filename*=` 中 `+` 都是字面加号
-/// （空格用 `%20`）。本函数的所有调用方（extract_from_url /
-/// extract_from_content_disposition）均为路径/文件名场景，且 extract_from_url
-/// 在调用前已 `split('?')` 丢弃 query，故 `+`→空格 在所有实际用途下都是错的
-/// （会把 `C++Primer.pdf` 损坏成 `C  Primer.pdf`）。
-fn urlencoding_decode(s: &str) -> Result<String, String> {
-    urlencoding_decode_with_charset(s, None)
-}
-
-/// 解码 URL / `Content-Disposition` 中的百分号转义，并在声明了字符集时
-/// 使用声明的字符集。未声明字符集时保留 UTF-8 → GBK/Big5 的兼容探测。
-fn urlencoding_decode_with_charset(s: &str, charset: Option<&str>) -> Result<String, String> {
-    percent_decode_bytes_with_charset(s.as_bytes(), charset)
-}
-
-/// 把 Latin-1 载体字符串（每个 char 的码位 = 原始字节值）还原为原始字节。
-///
-/// 只用于 `extract_from_content_disposition`：响应头按 RFC 7230 是字节序列，
-/// 这里用 `byte as char` 承载以便按 ASCII 结构切分，取值前必须还原。
-fn latin1_bytes(carrier: &str) -> Vec<u8> {
-    carrier.chars().map(|ch| (ch as u32 & 0xff) as u8).collect()
-}
-
-/// 字节级百分号解码 + 字符集解码：`bytes` 是待解码的原始字节（可含字面的
-/// 非 ASCII 字节），`%XX` 展开后整体交给 [`decode_bytes_with_charset`]。
-fn percent_decode_bytes_with_charset(
-    bytes: &[u8],
-    charset: Option<&str>,
-) -> Result<String, String> {
-    let mut result = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%'
-            && i + 2 < bytes.len()
-            && let (Some(hi), Some(lo)) = (hex_nibble(bytes[i + 1]), hex_nibble(bytes[i + 2]))
-        {
-            result.push((hi << 4) | lo);
-            i += 3;
-            continue;
-        }
-        // 非法 `%` 转义或普通字节：原样保留（含字面 `+`）。
-        result.push(bytes[i]);
-        i += 1;
-    }
-    decode_bytes_with_charset(&result, charset)
-}
-
-/// 将一组字节解码为字符串，优先 UTF-8，失败时兼容 GBK 与 Big5。
-///
-/// HTML5 规范要求 URL percent-encoding 使用 UTF-8，但大量老旧中文站点
-/// （包括一些 CDN/云存储）仍使用 GBK 编码，如 `%CE%C4%BC%FE.txt`
-/// 对应 GBK 的 "文件.txt"。若不做回退则 UTF-8 解码必然失败，最终
-/// 用户看到 `%CE%C4%BC%FE.txt` 这种看似乱码的文件名。
-///
-/// # 返回值
-///
-/// 返回 Err 仅当候选编码都无法解码时（极罕见，需要出现 GBK/Big5 都不允许的
-/// 字节组合，如 0x81 0x7F）。
-pub(crate) fn decode_bytes_utf8_or_gbk(bytes: &[u8]) -> Result<String, String> {
-    decode_bytes_with_charset(bytes, None)
-}
-
-fn decode_bytes_with_charset(bytes: &[u8], charset: Option<&str>) -> Result<String, String> {
-    match normalized_legacy_charset(charset) {
-        Some(LegacyCharset::Gbk) => decode_with_encoding(bytes, encoding_rs::GBK, "GBK"),
-        Some(LegacyCharset::Big5) => decode_with_encoding(bytes, encoding_rs::BIG5, "Big5"),
-        Some(LegacyCharset::Utf8) | None => match std::str::from_utf8(bytes) {
-            Ok(s) => Ok(s.to_string()),
-            Err(_) => {
-                // Some legacy servers declare UTF-8 but send GBK/Big5 bytes.
-                // Preserve the historical compatibility fallback for that case.
-                decode_legacy_filename(bytes)
-            }
-        },
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum LegacyCharset {
-    Utf8,
-    Gbk,
-    Big5,
-}
-
-fn normalized_legacy_charset(charset: Option<&str>) -> Option<LegacyCharset> {
-    let charset = charset?.trim().trim_matches('"').to_ascii_lowercase();
-    match charset.as_str() {
-        "utf-8" | "utf8" => Some(LegacyCharset::Utf8),
-        "gbk" | "gb2312" | "gb18030" | "cp936" => Some(LegacyCharset::Gbk),
-        "big5" | "big5-hkscs" | "cp950" | "windows-950" => Some(LegacyCharset::Big5),
-        _ => None,
-    }
-}
-
-fn decode_with_encoding(
-    bytes: &[u8],
-    encoding: &'static encoding_rs::Encoding,
-    label: &str,
-) -> Result<String, String> {
-    encoding
-        .decode_without_bom_handling_and_without_replacement(bytes)
-        .map(|decoded| decoded.into_owned())
-        .ok_or_else(|| format!("bytes are not valid {label} ({} bytes)", bytes.len()))
-}
-
-/// 对未声明字符集的传统中文文件名做有限候选选择。
-///
-/// GBK 与 Big5 的字节范围存在重叠，不能简单地把 Big5 放在 GBK 前面，否则
-/// 现有大陆站点的文件名会被误判。优先保留 GBK；只有 Big5 候选明显更像中文，
-/// 且 GBK 候选含假名、控制字符、私用区字符等典型误解码结果时才选择 Big5。
-fn decode_legacy_filename(bytes: &[u8]) -> Result<String, String> {
-    let gbk = encoding_rs::GBK
-        .decode_without_bom_handling_and_without_replacement(bytes)
-        .map(|decoded| decoded.into_owned());
-    let big5 = encoding_rs::BIG5
-        .decode_without_bom_handling_and_without_replacement(bytes)
-        .map(|decoded| decoded.into_owned());
-
-    match (gbk, big5) {
-        (Some(gbk), Some(big5))
-            if has_strong_legacy_mojibake(&gbk)
-                && filename_encoding_score(&big5) > filename_encoding_score(&gbk) =>
-        {
-            Ok(big5)
-        }
-        (Some(gbk), _) => Ok(gbk),
-        (None, Some(big5)) => Ok(big5),
-        (None, None) => Err(format!(
-            "bytes are neither valid GBK nor Big5 ({} bytes)",
-            bytes.len()
-        )),
-    }
-}
-
-fn filename_encoding_score(value: &str) -> i32 {
-    value.chars().fold(0, |score, ch| {
-        score
-            + if ch.is_control() {
-                -8
-            } else if ('\u{3040}'..='\u{30ff}').contains(&ch) {
-                -5
-            } else if ('\u{4e00}'..='\u{9fff}').contains(&ch) {
-                2
-            } else if ch == '\u{fffd}' {
-                -10
-            } else {
-                0
-            }
-    })
-}
-
-fn has_strong_legacy_mojibake(value: &str) -> bool {
-    value.chars().any(|ch| {
-        ch.is_control()
-            || ('\u{3040}'..='\u{30ff}').contains(&ch)
-            || ('\u{e000}'..='\u{f8ff}').contains(&ch)
-            || ch == '\u{fffd}'
     })
 }
 
@@ -2461,24 +2195,23 @@ fn has_strong_legacy_mojibake(value: &str) -> bool {
 /// 兄弟任务「已预订但临时文件尚未落盘」的名字造成 DB 指针别名(两任务
 /// file_name 指向同一磁盘名,误删其一即毁对方产物)。
 ///
-/// `allow_overwrite`（config `file_exists_behavior` == "overwrite"）:为
-/// true 时,磁盘上**仅最终文件**存在不算冲突——保留原名,完成时由
-/// finalize 覆盖旧文件;`.fdownloading` 临时文件、`reserved` 预订与
-/// `avoid` 集合命中仍是硬冲突,照旧编号改名。目录同名也照旧改名
-/// (文件不能覆盖目录)。
+/// `overwrite` 允许替换该名字对应的同名旧文件时:磁盘上**仅最终文件**存在
+/// 不算冲突——保留原名,完成时由 finalize 覆盖旧文件;`.fdownloading` 临时
+/// 文件、`reserved` 预订与 `avoid` 集合命中仍是硬冲突,照旧编号改名。目录
+/// 同名也照旧改名(文件不能覆盖目录)。
 pub async fn dedup_filename(
     dir: &Path,
     name: &str,
     reserved: &std::collections::HashSet<std::path::PathBuf>,
     avoid: &std::collections::HashSet<String>,
-    allow_overwrite: bool,
+    overwrite: &crate::file_exists::OverwritePolicy,
 ) -> String {
     // Phase 1: fast probe — most of the time there is no conflict.
     let candidate = dir.join(name);
     let temp_candidate = PathBuf::from(format!("{}{}", candidate.display(), TEMP_EXT));
     // Also check the in-flight reservation set BEFORE the async disk probes
     // so that two tasks starting simultaneously both see each other's claim.
-    let final_conflict = if allow_overwrite {
+    let final_conflict = if overwrite.permits(name) {
         // overwrite 模式:仅目录算最终名冲突(文件不能覆盖目录);普通
         // 文件存在 = 保留原名,finalize 时覆盖。
         tokio::fs::metadata(&candidate)
@@ -2586,15 +2319,15 @@ pub(crate) async fn claim_rename(src: &Path, dst: &Path) -> std::io::Result<()> 
 /// 完成期占名改名:把 `src` 以不覆盖语义落到 `save_dir/name`,返回实际落盘的文件名。
 ///
 /// 基于 [`claim_rename`] 的 `create_new` 占名。占名冲突(`AlreadyExists`)时:
-/// `allow_overwrite`(config `file_exists_behavior` == "overwrite")对原名且不在
-/// 兄弟任务预订名 `avoid`(小写)内的普通旧文件,删除后重试一次;其余情况重新 dedup
-/// 换名(避开 `avoid`)。连续 5 次冲突视为目录被持续抢占,报错并保留 `src`。
+/// `overwrite` 对原名授权且不在兄弟任务预订名 `avoid`(小写)内的普通旧文件,
+/// 删除后重试一次;其余情况重新 dedup 换名(避开 `avoid`)。连续 5 次冲突视为
+/// 目录被持续抢占,报错并保留 `src`。
 /// 调用方须在返回名与 `name` 不同时同步任务的 file_name。
 pub(crate) async fn claim_final_name(
     src: &Path,
     save_dir: &Path,
     name: &str,
-    allow_overwrite: bool,
+    overwrite: &crate::file_exists::OverwritePolicy,
     avoid: &std::collections::HashSet<String>,
 ) -> Result<String, DownloadError> {
     let mut chosen = name.to_string();
@@ -2609,7 +2342,7 @@ pub(crate) async fn claim_final_name(
                 if attempt > 5 {
                     return Err(DownloadError::Io(e));
                 }
-                if allow_overwrite
+                if overwrite.permits(name)
                     && !overwrite_attempted
                     && chosen == name
                     && !avoid.contains(&chosen.to_lowercase())
@@ -2628,7 +2361,7 @@ pub(crate) async fn claim_final_name(
                     name,
                     &std::collections::HashSet::new(),
                     avoid,
-                    false,
+                    &crate::file_exists::OverwritePolicy::Never,
                 )
                 .await;
             }
@@ -3058,7 +2791,7 @@ async fn run_download_inner(p: &DownloadParams) -> Result<(i64, Option<String>),
     //   -1   — size unknown but confirmed downloadable (webRequest sniffed),
     //          skip probe to preserve one-time tokens
     //    0   — no hint, run normal probe
-    let mut ua_stripped_spec: Option<RequestSpec> = None;
+    let mut applied_spec: Option<RequestSpec> = None;
     let info = if p.hint_file_size != 0 {
         // fresh hint 任务：持久化 Range 验证状态。浏览器扩展 hint → 0（未验证，
         // coordinator 首响应证实支持后置回 1；resume 据此延续「首连接 plain GET」
@@ -3082,7 +2815,9 @@ async fn run_download_inner(p: &DownloadParams) -> Result<(i64, Option<String>),
             // if that also yields nothing (e.g. "/download?token=abc") fall
             // back to "download" so we never end up with an empty dest_path
             // that would point at the save directory itself.
-            extract_from_url(&p.url).unwrap_or_else(|| "download".to_string())
+            name_from_url(&p.url)
+                .map(|r| r.name)
+                .unwrap_or_else(|| "download".to_string())
         } else {
             p.file_name.clone()
         };
@@ -3102,6 +2837,7 @@ async fn run_download_inner(p: &DownloadParams) -> Result<(i64, Option<String>),
         );
         FileInfo {
             file_name: name,
+            name_source: crate::naming::NameSource::Fallback,
             total_bytes: effective_size,
             // Hint 模式没有 probe：自动/显式多段任务仍按既有策略乐观尝试
             // Range；已持久化 range_verified 的恢复任务则必须沿用这份证据。
@@ -3121,13 +2857,13 @@ async fn run_download_inner(p: &DownloadParams) -> Result<(i64, Option<String>),
         }
     } else {
         log_info!("[download] task {} resolving file info...", p.task_id);
-        let (info, ua_downgraded) =
-            resolve_file_info_with_ua_fallback(client, &p.url, &p.spec).await?;
-        if ua_downgraded {
-            // 探测靠去掉浏览器 UA 才通过：真实下载（含分段 worker）必须用同一份
-            // 请求头，否则探测通过、下载 403；并落库让续传保持一致。
-            ua_stripped_spec = Some(spec_without_browser_ua(&p.spec));
-            persist_ua_downgrade(&p.db, &p.task_id).await;
+        let (info, adapted) = resolve_file_info_with_ua_fallback(client, &p.url, &p.spec).await?;
+        if let Some(adapted_spec) = adapted {
+            // 探测靠请求头自适应（去 UA / 补浏览器 UA / 补防盗链 Referer）才通过：
+            // 真实下载（含分段 worker）必须用同一份请求头，否则探测通过、下载 403；
+            // 并落库让续传保持一致。
+            persist_adapted_spec(&p.db, &p.task_id, &adapted_spec).await;
+            applied_spec = Some(adapted_spec);
         }
         log_info!(
             "[download] task {} resolved: name={}, size={}, range={}",
@@ -3136,9 +2872,20 @@ async fn run_download_inner(p: &DownloadParams) -> Result<(i64, Option<String>),
             info.total_bytes,
             info.supports_range
         );
+        // probe 已经看过真实响应：把权威名 / Content-Type 记为命名证据，完成期据此
+        // 精修启动序幕用 URL 占位的推断名（HEAD 被拒、CD 只在 GET 上下发等）。
+        let disposition = if matches!(
+            info.name_source,
+            crate::naming::NameSource::Disposition | crate::naming::NameSource::QueryDisposition
+        ) {
+            info.file_name.as_str()
+        } else {
+            ""
+        };
+        record_naming_evidence(&p.db, &p.task_id, disposition, &info.content_type).await;
         info
     };
-    let spec_ref: &RequestSpec = ua_stripped_spec.as_ref().unwrap_or(&p.spec);
+    let spec_ref: &RequestSpec = applied_spec.as_ref().unwrap_or(&p.spec);
 
     // Safety net (probe 阶段)：服务器在 probe 阶段返回 HTML 但用户期望二进制
     // 文件——典型场景：Lanzou 等 CDN transit page、form-POST 端点用 GET 访问。
@@ -3857,7 +3604,12 @@ async fn run_download_inner(p: &DownloadParams) -> Result<(i64, Option<String>),
     // 的 `create_new` 原子占名,占名失败(AlreadyExists)则重新 dedup 换名
     // 重试;换名候选同时避开 DB 里同目录未完成任务已登记的 file_name
     // (兄弟任务预订名),防 DB 指针别名。
-    let mut chosen = actual_name.clone();
+    //
+    // 完成期定名：引擎推断的名字（HEAD 被拒 / 无 Content-Disposition 时的 URL 占位、
+    // 无扩展名、脚本端点名）按实际响应证据与文件头魔数精修；显式名永不改。精修名
+    // 没有启动期预订，同样经下方原子占名环避让冲突。
+    let target_name = refine_completed_name(p, &temp_path, &actual_name).await;
+    let mut chosen = target_name.clone();
     let mut avoid: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut avoid_loaded = false;
     // overwrite 模式的一次性删除机会:仅对原名尝试,删除后重试同名占名;
@@ -3893,9 +3645,9 @@ async fn run_download_inner(p: &DownloadParams) -> Result<(i64, Option<String>),
                 // 已存在的普通旧文件(非目录、不在兄弟任务 avoid 集)时,删除
                 // 旧文件后按原名重试占名一次。avoid 命中/目录/删除失败都不覆盖,
                 // 走下方既有换名环。
-                if p.allow_overwrite
+                if p.overwrite.permits(&chosen)
                     && !overwrite_attempted
-                    && chosen == actual_name
+                    && chosen == target_name
                     && !avoid.contains(&chosen.to_lowercase())
                 {
                     overwrite_attempted = true;
@@ -3929,14 +3681,14 @@ async fn run_download_inner(p: &DownloadParams) -> Result<(i64, Option<String>),
                     p.task_id,
                     dst.display()
                 );
-                // re-dedup 恒按保守语义(allow_overwrite=false):此环仅在原名
-                // 已被抢占/覆盖失败后进入,再放行原名会原地打转直到 attempt 耗尽。
+                // re-dedup 恒按保守语义(不授权覆盖):此环仅在原名已被抢占/
+                // 覆盖失败后进入,再放行原名会原地打转直到 attempt 耗尽。
                 chosen = dedup_filename(
                     &save_dir,
-                    &actual_name,
+                    &target_name,
                     &std::collections::HashSet::new(),
                     &avoid,
-                    false,
+                    &crate::file_exists::OverwritePolicy::Never,
                 )
                 .await;
             }
@@ -4624,6 +4376,9 @@ async fn download_single_once(
             );
         }
     }
+    // 实际 GET 响应的命名证据（hint 模式唯一能看到 Content-Disposition 的地方）；
+    // 先写者胜，续传轮次重复调用无害。
+    record_response_naming(db, task_id, &resp).await;
 
     // Capture the response's own Content-Length before consuming the body.
     // For resumed downloads (206), this is the *remaining* length, not total.
@@ -4895,9 +4650,7 @@ async fn download_multi_segment(
 mod tests {
     use super::{
         PROBE_MAX_RETRIES, PROBE_RETRY_BASE_DELAY, PROBE_TIMEOUT, TEMP_EXT, dedup_filename,
-        extract_filename, extract_from_content_disposition, extract_from_url, format_probe_failure,
-        mime_to_ext, parse_http_date, sanitize_filename, urlencoding_decode,
-        urlencoding_decode_with_charset,
+        format_probe_failure, parse_http_date,
     };
     use std::time::Duration;
 
@@ -4936,680 +4689,6 @@ mod tests {
         assert_eq!(parse_http_date("2025-01-01T00:00:00Z"), None);
         // Unix 纪元之前的时间无法表示为 SystemTime 偏移，须整体放弃。
         assert_eq!(parse_http_date("Wed, 01 Jan 1902 00:00:00 GMT"), None);
-    }
-
-    // -----------------------------------------------------------------------
-    // sanitize_filename
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn sanitize_replaces_illegal_chars() {
-        assert_eq!(sanitize_filename("file<1>:2.txt"), "file_1__2.txt");
-    }
-
-    #[test]
-    fn sanitize_replaces_all_special_chars() {
-        assert_eq!(
-            sanitize_filename(r#"a<b>c:d"e/f\g|h?i*j"#),
-            "a_b_c_d_e_f_g_h_i_j"
-        );
-    }
-
-    #[test]
-    fn sanitize_strips_leading_trailing_dots_and_spaces() {
-        assert_eq!(sanitize_filename("...file..."), "file");
-        assert_eq!(sanitize_filename("  file  "), "file");
-        assert_eq!(sanitize_filename("..file.."), "file");
-    }
-
-    #[test]
-    fn sanitize_empty_and_only_dots() {
-        assert_eq!(sanitize_filename(""), "download");
-        assert_eq!(sanitize_filename("..."), "download");
-        assert_eq!(sanitize_filename("   "), "download");
-    }
-
-    #[test]
-    fn sanitize_control_characters() {
-        assert_eq!(sanitize_filename("file\x00name\x1F.txt"), "file_name_.txt");
-    }
-
-    #[test]
-    fn sanitize_blocks_path_traversal() {
-        // 安全回归：用户/API 显式提供的 file_name（RPC `out` / 管理 API file_name /
-        // 浏览器接管）经 sanitize_filename 后必须不含路径分隔符，且不是绝对路径，
-        // 否则 save_dir.join(name) 会穿越 save_dir 落盘任意路径。
-        for evil in [
-            "../../../etc/passwd",
-            "..\\..\\Windows\\System32\\evil.exe",
-            "/etc/passwd",
-            "C:\\Windows\\evil.exe",
-            "foo/../bar",
-        ] {
-            let safe = sanitize_filename(evil);
-            let p = std::path::Path::new(&safe);
-            assert!(
-                !safe.contains('/') && !safe.contains('\\'),
-                "sanitized {evil:?} → {safe:?} still contains a path separator"
-            );
-            assert!(
-                !p.is_absolute(),
-                "sanitized {evil:?} → {safe:?} is still an absolute path"
-            );
-            assert!(
-                p.components().count() == 1,
-                "sanitized {evil:?} → {safe:?} resolves to multiple path components"
-            );
-        }
-    }
-
-    #[test]
-    fn sanitize_preserves_unicode() {
-        assert_eq!(sanitize_filename("文件下载.zip"), "文件下载.zip");
-        assert_eq!(sanitize_filename("ファイル.tar.gz"), "ファイル.tar.gz");
-    }
-
-    #[test]
-    fn sanitize_windows_reserved_names() {
-        // F051: Windows 保留设备名（含/不含扩展名、混合大小写）应加下划线规避。
-        assert_eq!(sanitize_filename("CON"), "_CON");
-        assert_eq!(sanitize_filename("NUL.txt"), "_NUL.txt");
-        assert_eq!(sanitize_filename("com1"), "_com1");
-        assert_eq!(sanitize_filename("LpT9.log"), "_LpT9.log");
-        assert_eq!(sanitize_filename("Aux.tar.gz"), "_Aux.tar.gz");
-        // 非保留名不受影响（仅 stem 完全匹配才规避）。
-        assert_eq!(sanitize_filename("CONSOLE.txt"), "CONSOLE.txt");
-        assert_eq!(sanitize_filename("COM10.txt"), "COM10.txt");
-    }
-
-    #[test]
-    fn sanitize_truncates_overlong_names_at_char_boundary() {
-        // F051: 超过 200 字节的名字应截断，且保留扩展名、不切断多字节字符。
-        let long_ascii = format!("{}.bin", "a".repeat(300));
-        let out = sanitize_filename(&long_ascii);
-        assert!(out.len() <= 200, "ascii truncated len = {}", out.len());
-        assert!(out.ends_with(".bin"), "extension preserved: {out}");
-
-        // 多字节 CJK：每个 '永' 3 字节，120 个 = 360 字节。
-        let long_cjk = format!("{}.mp4", "永".repeat(120));
-        let out = sanitize_filename(&long_cjk);
-        assert!(out.len() <= 200, "cjk truncated len = {}", out.len());
-        assert!(out.ends_with(".mp4"), "extension preserved: {out}");
-        // 截断必须落在 char 边界——能成功重新解析为合法 UTF-8（String 本身保证）。
-        assert!(out.starts_with('永'));
-
-        // 未超限的名字原样返回。
-        assert_eq!(sanitize_filename("short.txt"), "short.txt");
-    }
-
-    // -----------------------------------------------------------------------
-    // extract_from_url
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn extract_from_url_basic() {
-        let name = extract_from_url("https://example.com/path/file.zip");
-        assert_eq!(name.as_deref(), Some("file.zip"));
-    }
-
-    #[test]
-    fn extract_from_url_strips_query_and_fragment() {
-        let name = extract_from_url("https://example.com/file.zip?v=1&token=abc#section");
-        assert_eq!(name.as_deref(), Some("file.zip"));
-    }
-
-    #[test]
-    fn extract_from_url_encoded_filename() {
-        let name = extract_from_url("https://example.com/My%20File%20(1).pdf");
-        assert_eq!(name.as_deref(), Some("My File (1).pdf"));
-    }
-
-    #[test]
-    fn extract_from_url_trailing_slash_returns_none() {
-        let name = extract_from_url("https://example.com/path/");
-        assert!(
-            name.is_none(),
-            "trailing slash should return None, got: {name:?}"
-        );
-    }
-
-    #[test]
-    fn extract_from_url_no_path() {
-        let name = extract_from_url("https://example.com");
-        // The last segment is "example.com" — should extract it
-        assert!(name.is_some());
-    }
-
-    #[test]
-    fn extract_from_url_preserves_literal_plus() {
-        // F046: 含字面 `+` 的文件名（C++ 教材、版本号 build metadata）不应被
-        // `+`→空格 损坏。
-        let name = extract_from_url("https://example.com/C++Primer.pdf");
-        assert_eq!(name.as_deref(), Some("C++Primer.pdf"));
-        let name = extract_from_url("https://example.com/v1.2+build.bin");
-        assert_eq!(name.as_deref(), Some("v1.2+build.bin"));
-    }
-
-    #[test]
-    fn extract_from_url_literal_percent_with_unicode_no_panic() {
-        // F017: URL 路径段含字面 `%` 紧跟多字节 UTF-8 字符不应 panic。
-        let name = extract_from_url("https://example.com/50%折扣.txt");
-        assert_eq!(name.as_deref(), Some("50%折扣.txt"));
-    }
-
-    #[test]
-    fn extract_from_url_chinese_filename() {
-        let name = extract_from_url("https://example.com/%E4%B8%8B%E8%BD%BD.exe");
-        assert_eq!(name.as_deref(), Some("下载.exe"));
-    }
-
-    #[test]
-    fn extract_from_url_gbk_chinese_filename() {
-        // 老旧中文站点用 GBK 编码中文：“文件” 的 GBK = CE C4 BC FE
-        // UTF-8 解码会失败，必须回退到 GBK 才能得到可读文件名。
-        let name = extract_from_url("http://example.com/%CE%C4%BC%FE.txt");
-        assert_eq!(
-            name.as_deref(),
-            Some("文件.txt"),
-            "GBK percent-encoded 中文 URL 应能被正确解码而不是保留原始 %XX"
-        );
-    }
-
-    #[test]
-    fn extract_from_content_disposition_param_name_case_and_spacing() {
-        let h = make_headers_with_cd("attachment; FileName=\"report.pdf\"");
-        assert_eq!(
-            extract_from_content_disposition(&h).as_deref(),
-            Some("report.pdf")
-        );
-        let h = make_headers_with_cd("attachment; filename = \"a.zip\"");
-        assert_eq!(
-            extract_from_content_disposition(&h).as_deref(),
-            Some("a.zip")
-        );
-        let h = make_headers_with_cd("attachment; FILENAME*=UTF-8''My%20File.pdf");
-        assert_eq!(
-            extract_from_content_disposition(&h).as_deref(),
-            Some("My File.pdf")
-        );
-    }
-
-    #[test]
-    fn extract_from_content_disposition_semicolon_inside_quotes() {
-        let h = make_headers_with_cd("attachment; filename=\"a;b.zip\"; size=10");
-        assert_eq!(
-            extract_from_content_disposition(&h).as_deref(),
-            Some("a;b.zip")
-        );
-    }
-
-    #[test]
-    fn extract_from_content_disposition_gbk_filename() {
-        // 中文云存储 OBS/S3 类服务器可能返回 GBK 编码的 filename=
-        let headers = make_headers_with_cd("attachment; filename=\"%CE%C4%BC%FE.txt\"");
-        let name = extract_from_content_disposition(&headers);
-        assert_eq!(
-            name.as_deref(),
-            Some("文件.txt"),
-            "GBK percent-encoded Content-Disposition 应能被正确解码"
-        );
-    }
-
-    #[test]
-    fn extract_from_content_disposition_big5_filename() {
-        // 台湾站点常见的 Big5/CP950 编码：“中文” = A4 A4 A4 E5。
-        let headers = make_headers_with_cd("attachment; filename=\"%A4%A4%A4%E5.txt\"");
-        let name = extract_from_content_disposition(&headers);
-        assert_eq!(
-            name.as_deref(),
-            Some("中文.txt"),
-            "Big5 percent-encoded Content-Disposition 应能被正确解码"
-        );
-    }
-
-    #[test]
-    fn extract_from_content_disposition_explicit_big5_charset() {
-        let headers = make_headers_with_cd("attachment; filename*=Big5''%A4%A4%A4%E5.txt");
-        let name = extract_from_content_disposition(&headers);
-        assert_eq!(name.as_deref(), Some("中文.txt"));
-    }
-
-    #[test]
-    fn extract_from_content_disposition_explicit_big5_charset_overrides_utf8() {
-        // C2 A1 is valid UTF-8 (U+00A1) but Big5 "癒". The declared charset
-        // must win when both decoders accept the same bytes.
-        let headers = make_headers_with_cd("attachment; filename*=Big5''%C2%A1.txt");
-        let name = extract_from_content_disposition(&headers);
-        assert_eq!(name.as_deref(), Some("癒.txt"));
-    }
-
-    #[test]
-    fn extract_from_content_disposition_raw_big5_bytes() {
-        let headers = make_headers_with_raw_cd(b"attachment; filename=\"\xA4\xA4\xA4\xE5.txt\"");
-        let name = extract_from_content_disposition(&headers);
-        assert_eq!(name.as_deref(), Some("中文.txt"));
-    }
-
-    fn make_headers_with_raw_cd(raw: &[u8]) -> reqwest::header::HeaderMap {
-        let mut headers = reqwest::header::HeaderMap::new();
-        let value = reqwest::header::HeaderValue::from_bytes(raw)
-            .unwrap_or_else(|_| reqwest::header::HeaderValue::from_static("attachment"));
-        headers.insert(reqwest::header::CONTENT_DISPOSITION, value);
-        headers
-    }
-
-    #[test]
-    fn extract_from_content_disposition_raw_utf8_in_filename_star() {
-        // 非标准但常见：filename* 的 ext-value 直接塞原始 UTF-8 字节而非 %XX。
-        // 回归：Latin-1 载体若经 str::as_bytes 二次编码会得到 "ä¸\u{ad}æ__.txt"。
-        let headers =
-            make_headers_with_raw_cd(b"attachment; filename*=UTF-8''\xe4\xb8\xad\xe6\x96\x87.txt");
-        assert_eq!(
-            extract_from_content_disposition(&headers).as_deref(),
-            Some("中文.txt")
-        );
-    }
-
-    #[test]
-    fn extract_from_content_disposition_raw_utf8_mixed_with_percent() {
-        // 原始 UTF-8 字节与 %20 混排：percent 分支也必须先还原原始字节。
-        let headers =
-            make_headers_with_raw_cd(b"attachment; filename=\"\xe4\xb8\xad\xe6\x96\x87%20a.txt\"");
-        assert_eq!(
-            extract_from_content_disposition(&headers).as_deref(),
-            Some("中文 a.txt")
-        );
-    }
-
-    #[test]
-    fn extract_from_content_disposition_raw_gbk_with_declared_charset() {
-        let headers = make_headers_with_raw_cd(b"attachment; filename*=GBK''\xce\xc4\xbc\xfe.txt");
-        assert_eq!(
-            extract_from_content_disposition(&headers).as_deref(),
-            Some("文件.txt")
-        );
-    }
-
-    // -----------------------------------------------------------------------
-    // urlencoding_decode
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn urlencoding_decode_basic() {
-        assert_eq!(
-            urlencoding_decode("hello%20world").unwrap_or_default(),
-            "hello world"
-        );
-    }
-
-    #[test]
-    fn urlencoding_decode_plus_is_literal() {
-        // F046: `+` 在 URL 路径段 / Content-Disposition 文件名中是字面加号，
-        // 不应被解码为空格（空格用 %20）。所有调用方均为路径/文件名场景。
-        assert_eq!(
-            urlencoding_decode("hello+world").unwrap_or_default(),
-            "hello+world"
-        );
-        assert_eq!(
-            urlencoding_decode("C++Primer.pdf").unwrap_or_default(),
-            "C++Primer.pdf"
-        );
-        // 混合：%20 仍解码为空格，`+` 保留为字面。
-        assert_eq!(
-            urlencoding_decode("v1.2+build%20final.bin").unwrap_or_default(),
-            "v1.2+build final.bin"
-        );
-    }
-
-    #[test]
-    fn urlencoding_decode_no_panic_on_non_char_boundary() {
-        // F017: `%` 紧跟原始多字节 UTF-8 字符时，旧实现 `&s[i+1..i+3]` 会在
-        // 非字符边界处 panic。按字节解析后应安全地把 `%` 当字面量保留。
-        // "50%折扣.txt"：`%` 后是 `折`（E6 8A 98），i+3 落在多字节字符内部。
-        let result = urlencoding_decode("50%折扣.txt").unwrap_or_default();
-        assert_eq!(result, "50%折扣.txt");
-        // `%X` 后接多字节字符：第二位非 hex，亦应原样保留 `%`。
-        let result = urlencoding_decode("%a你.zip").unwrap_or_default();
-        assert_eq!(result, "%a你.zip");
-    }
-
-    #[test]
-    fn urlencoding_decode_invalid_utf8_returns_error() {
-        // 0x81 0x7F 既不是合法 UTF-8（0x81 不能作为首字节）
-        // 也不是合法 GBK（尾字节不能是 0x7F）——两种都失败时应返回 Err。
-        let result = urlencoding_decode("%81%7F");
-        assert!(
-            result.is_err(),
-            "既非合法 UTF-8 又非合法 GBK 的字节应返回 Err，got: {:?}",
-            result
-        );
-    }
-
-    #[test]
-    fn urlencoding_decode_invalid_utf8_falls_back_to_gbk() {
-        // 0x80 不是合法 UTF-8 首字节，但是合法 GBK（€ 符号）
-        // 不应报错，应返回 GBK 解码后的字符。
-        let result = urlencoding_decode("%80").unwrap_or_default();
-        assert_eq!(result, "€", "GBK 0x80 应解码为 €");
-    }
-
-    #[test]
-    fn urlencoding_decode_mislabeled_utf8_falls_back_to_gbk() {
-        let result =
-            urlencoding_decode_with_charset("%CE%C4%BC%FE", Some("UTF-8")).unwrap_or_default();
-        assert_eq!(result, "文件");
-    }
-
-    #[test]
-    fn urlencoding_decode_big5_chinese_filename() {
-        // Big5 编码的 “中文” = A4 A4 A4 E5；GBK 会错误解码为日文假名。
-        let result = urlencoding_decode("%A4%A4%A4%E5").unwrap_or_default();
-        assert_eq!(result, "中文");
-    }
-
-    #[test]
-    fn urlencoding_decode_big5_filename_with_private_use_mojibake() {
-        // Big5 “檔案下載” = C0 C9 AE D7 A4 55 B8 FC；GBK 会产生私用区字符。
-        let result = urlencoding_decode("%C0%C9%AE%D7%A4%55%B8%FC").unwrap_or_default();
-        assert_eq!(result, "檔案下載");
-    }
-
-    #[test]
-    fn urlencoding_decode_ambiguous_legacy_bytes_keeps_gbk() {
-        // C0 C9 也能被两种编码解码为普通 CJK 字符，无法可靠自动判断；
-        // 未出现强乱码特征时保留既有 GBK 优先行为，避免静默误改文件名。
-        let result = urlencoding_decode("%C0%C9").unwrap_or_default();
-        assert_eq!(result, "郎");
-    }
-
-    #[test]
-    fn urlencoding_decode_partial_percent() {
-        // "%" at end should pass through
-        let result = urlencoding_decode("test%").unwrap_or_default();
-        assert_eq!(result, "test%");
-    }
-
-    // -----------------------------------------------------------------------
-    // extract_from_content_disposition (private, tested via extract_filename)
-    // -----------------------------------------------------------------------
-
-    fn make_headers_with_cd(value: &str) -> reqwest::header::HeaderMap {
-        let mut headers = reqwest::header::HeaderMap::new();
-        if let Ok(v) = reqwest::header::HeaderValue::from_str(value) {
-            headers.insert(reqwest::header::CONTENT_DISPOSITION, v);
-        }
-        headers
-    }
-
-    #[test]
-    fn content_disposition_quoted_filename() {
-        let headers = make_headers_with_cd("attachment; filename=\"my_file.zip\"");
-        let name = extract_from_content_disposition(&headers);
-        assert_eq!(name.as_deref(), Some("my_file.zip"));
-    }
-
-    #[test]
-    fn content_disposition_unquoted_filename() {
-        let headers = make_headers_with_cd("attachment; filename=simple.txt");
-        let name = extract_from_content_disposition(&headers);
-        assert_eq!(name.as_deref(), Some("simple.txt"));
-    }
-
-    #[test]
-    fn content_disposition_rfc5987_filename_star() {
-        let headers = make_headers_with_cd("attachment; filename*=UTF-8''%E6%96%87%E4%BB%B6.pdf");
-        let name = extract_from_content_disposition(&headers);
-        assert_eq!(name.as_deref(), Some("文件.pdf"));
-    }
-
-    #[test]
-    fn content_disposition_filename_star_quoted_ext_value() {
-        // 腾讯云 COS（devtools.wxqcloud.qq.com.cn 等）把整个 ext-value 加了引号，
-        // RFC 6266 不允许；尾引号若泄漏进文件名，会被 sanitize 成 `..exe_`。
-        let headers =
-            make_headers_with_cd("attachment; filename*=\"UTF-8''wechat_devtools_x64.exe\"");
-        let name = extract_from_content_disposition(&headers);
-        assert_eq!(name.as_deref(), Some("wechat_devtools_x64.exe"));
-    }
-
-    #[test]
-    fn content_disposition_filename_star_overrides_plain() {
-        let headers = make_headers_with_cd(
-            "attachment; filename=\"fallback.txt\"; filename*=UTF-8''preferred.txt",
-        );
-        let name = extract_from_content_disposition(&headers);
-        // filename* should take precedence
-        assert_eq!(name.as_deref(), Some("preferred.txt"));
-    }
-
-    #[test]
-    fn content_disposition_empty_filename() {
-        let headers = make_headers_with_cd("attachment; filename=\"\"");
-        let name = extract_from_content_disposition(&headers);
-        assert!(name.is_none(), "empty filename should return None");
-    }
-
-    #[test]
-    fn content_disposition_no_filename_param() {
-        let headers = make_headers_with_cd("inline");
-        let name = extract_from_content_disposition(&headers);
-        assert!(name.is_none());
-    }
-
-    #[test]
-    fn content_disposition_percent_encoded_filename_unquoted() {
-        // Chinese cloud storage (OBS/S3) often sends percent-encoded filename=
-        // instead of using the RFC 5987 filename*= syntax.
-        let headers = make_headers_with_cd(
-            "attachment;filename=%E6%B0%B8%E7%94%9F%E6%88%98%E5%A3%AB.Sisu.2022265.mp4",
-        );
-        let name = extract_from_content_disposition(&headers);
-        assert_eq!(name.as_deref(), Some("永生战士.Sisu.2022265.mp4"));
-    }
-
-    #[test]
-    fn content_disposition_percent_encoded_filename_quoted() {
-        let headers = make_headers_with_cd(
-            "attachment; filename=\"%E6%B0%B8%E7%94%9F%E6%88%98%E5%A3%AB.Sisu.2022265.mp4\"",
-        );
-        let name = extract_from_content_disposition(&headers);
-        assert_eq!(name.as_deref(), Some("永生战士.Sisu.2022265.mp4"));
-    }
-
-    #[test]
-    fn content_disposition_plain_ascii_with_percent_literal() {
-        // A filename like "50%.txt" should NOT be mangled by the heuristic
-        // because urlencoding_decode("50%.txt") will fail or leave it unchanged.
-        let headers = make_headers_with_cd("attachment; filename=\"50%.txt\"");
-        let name = extract_from_content_disposition(&headers);
-        assert_eq!(name.as_deref(), Some("50%.txt"));
-    }
-
-    #[test]
-    fn content_disposition_percent_encoded_spaces() {
-        let headers = make_headers_with_cd("attachment; filename=My%20Great%20File.pdf");
-        let name = extract_from_content_disposition(&headers);
-        assert_eq!(name.as_deref(), Some("My Great File.pdf"));
-    }
-
-    // -----------------------------------------------------------------------
-    // extract_filename (integration of all strategies)
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn extract_filename_prefers_content_disposition() {
-        let headers = make_headers_with_cd("attachment; filename=\"from_header.zip\"");
-        let name = extract_filename(
-            &headers,
-            "https://example.com/from_url.tar.gz",
-            "https://example.com/from_url.tar.gz",
-        );
-        assert_eq!(name, "from_header.zip");
-    }
-
-    #[test]
-    fn extract_filename_falls_back_to_url() {
-        let headers = reqwest::header::HeaderMap::new();
-        let name = extract_filename(
-            &headers,
-            "https://example.com/from_url.tar.gz",
-            "https://example.com/from_url.tar.gz",
-        );
-        assert_eq!(name, "from_url.tar.gz");
-    }
-
-    #[test]
-    fn extract_filename_prefers_original_url_extension_over_extensionless_redirect() {
-        // Regression test for #223: GitHub's `archive/refs/tags/<tag>.zip`
-        // redirects to codeload's `.../zip/refs/tags/<tag>`, which drops the
-        // `.zip` suffix entirely. When the tag itself embeds a dot from a
-        // version number ("proton-11.0-1b"), naively reading only the
-        // post-redirect URL manufactures a bogus extension (".0-1b") instead
-        // of the correct ".zip" from the original request URL.
-        let headers = reqwest::header::HeaderMap::new();
-        let name = extract_filename(
-            &headers,
-            "https://github.com/ValveSoftware/Proton/archive/refs/tags/proton-11.0-1b.zip",
-            "https://codeload.github.com/ValveSoftware/Proton/zip/refs/tags/proton-11.0-1b",
-        );
-        assert_eq!(name, "proton-11.0-1b.zip");
-    }
-
-    #[test]
-    fn extract_filename_falls_back_to_final_url_when_original_has_no_extension() {
-        // A shortlink-style original URL has no real filename; the redirect
-        // target does — still usable when Content-Disposition is absent.
-        let headers = reqwest::header::HeaderMap::new();
-        let name = extract_filename(
-            &headers,
-            "https://dl.example.com/abc123",
-            "https://cdn.example.com/files/real-name.pdf",
-        );
-        assert_eq!(name, "real-name.pdf");
-    }
-
-    #[test]
-    fn extract_filename_keeps_final_url_for_script_endpoint_redirect() {
-        // Regression guard: a dynamic endpoint URL ("download.php") carries a
-        // plausible extension itself, but the redirect target is the only URL
-        // with the real filename. The pre-#224 behavior (trust the final URL)
-        // must be preserved here — the request URL wins only when the final
-        // segment lacks a real extension or is provably a truncation.
-        let headers = reqwest::header::HeaderMap::new();
-        let name = extract_filename(
-            &headers,
-            "https://example.com/download.php",
-            "https://cdn.example.com/files/real-file.zip",
-        );
-        assert_eq!(name, "real-file.zip");
-    }
-
-    #[test]
-    fn extract_filename_restores_extension_dropped_by_redirect_numeric_tag() {
-        // Codeload pattern with a purely numeric pseudo-extension: the final
-        // segment "v1.2" (ext "2" is 1 alnum char, hence "plausible") equals
-        // the request segment minus ".zip" — the stem match must win.
-        let headers = reqwest::header::HeaderMap::new();
-        let name = extract_filename(
-            &headers,
-            "https://github.com/o/r/archive/refs/tags/v1.2.zip",
-            "https://codeload.github.com/o/r/zip/refs/tags/v1.2",
-        );
-        assert_eq!(name, "v1.2.zip");
-    }
-
-    #[test]
-    fn extract_filename_restores_extension_dropped_by_redirect_letter_suffix_tag() {
-        // Tag whose pseudo-extension contains a letter ("0b") would pass the
-        // plausibility check on the final URL; only the stem match catches it.
-        let headers = reqwest::header::HeaderMap::new();
-        let name = extract_filename(
-            &headers,
-            "https://github.com/o/r/archive/refs/tags/proton-1.0b.zip",
-            "https://codeload.github.com/o/r/zip/refs/tags/proton-1.0b",
-        );
-        assert_eq!(name, "proton-1.0b.zip");
-    }
-
-    #[test]
-    fn extract_filename_restores_multipart_extension_dropped_by_redirect() {
-        // GitHub serves tarballs the same way: `archive/refs/tags/v1.2.tar.gz`
-        // redirects to codeload's `tar.gz/refs/tags/v1.2`. The stem match must
-        // strip the full multi-part extension, not just the last component —
-        // otherwise the final segment "v1.2" wins via its plausible ext "2".
-        let headers = reqwest::header::HeaderMap::new();
-        let name = extract_filename(
-            &headers,
-            "https://github.com/o/r/archive/refs/tags/v1.2.tar.gz",
-            "https://codeload.github.com/o/r/tar.gz/refs/tags/v1.2",
-        );
-        assert_eq!(name, "v1.2.tar.gz");
-    }
-
-    #[test]
-    fn extract_filename_prefers_request_extension_when_final_has_none_and_no_stem_match() {
-        // Branch (c) exclusively: the final segment exists but has no
-        // plausible extension and is not a truncation of the request segment.
-        let headers = reqwest::header::HeaderMap::new();
-        let name = extract_filename(
-            &headers,
-            "https://example.com/pkg/setup.exe",
-            "https://cdn.example.com/blob/8f3e-2b1",
-        );
-        assert_eq!(name, "setup.exe");
-    }
-
-    #[test]
-    fn extract_filename_falls_back_to_final_when_neither_side_has_extension() {
-        // Branch (d): neither segment looks like a filename → final URL wins,
-        // matching the pre-redirect-aware fallback order.
-        let headers = reqwest::header::HeaderMap::new();
-        let name = extract_filename(
-            &headers,
-            "https://example.com/api/fetch",
-            "https://cdn.example.com/blob/8f3e",
-        );
-        assert_eq!(name, "8f3e");
-    }
-
-    #[test]
-    fn extract_filename_falls_back_to_mime() {
-        let mut headers = reqwest::header::HeaderMap::new();
-        if let Ok(v) = reqwest::header::HeaderValue::from_str("application/pdf") {
-            headers.insert(reqwest::header::CONTENT_TYPE, v);
-        }
-        let name = extract_filename(&headers, "https://example.com/", "https://example.com/");
-        assert_eq!(name, "download.pdf");
-    }
-
-    #[test]
-    fn extract_filename_ultimate_fallback() {
-        let headers = reqwest::header::HeaderMap::new();
-        let name = extract_filename(&headers, "https://example.com/", "https://example.com/");
-        assert_eq!(name, "download");
-    }
-
-    // -----------------------------------------------------------------------
-    // mime_to_ext
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn mime_to_ext_common_types() {
-        assert_eq!(mime_to_ext("application/pdf"), Some("pdf"));
-        assert_eq!(mime_to_ext("application/zip"), Some("zip"));
-        assert_eq!(mime_to_ext("video/mp4"), Some("mp4"));
-        assert_eq!(mime_to_ext("image/jpeg"), Some("jpg"));
-    }
-
-    #[test]
-    fn mime_to_ext_with_charset_parameter() {
-        // MIME type often comes with ";charset=utf-8"
-        assert_eq!(mime_to_ext("text/html; charset=utf-8"), Some("html"));
-    }
-
-    #[test]
-    fn mime_to_ext_unknown_type() {
-        assert_eq!(mime_to_ext("application/x-unknown-format"), None);
     }
 
     // -----------------------------------------------------------------------
@@ -5659,6 +4738,372 @@ mod tests {
         assert_eq!(
             msg,
             "probes failed: HEAD=network-error: connection refused, ranged GET=network-error: connection refused, plain GET=403"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Adaptive header fallback tests (Issue #782 / NVIDIA 403 & anti-hotlinking)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn infer_origin_referrer_extracts_origin_with_slash() {
+        assert_eq!(
+            super::infer_origin_referrer(
+                "https://cn.download.nvidia.com/Windows/617.42/617.42-notebook.exe"
+            ),
+            Some("https://cn.download.nvidia.com/".to_string())
+        );
+        assert_eq!(
+            super::infer_origin_referrer("http://example.com:8080/path/file.bin?query=1"),
+            Some("http://example.com:8080/".to_string())
+        );
+        assert_eq!(
+            super::infer_origin_referrer("ftp://ftp.example.com/file"),
+            None
+        );
+        assert_eq!(super::infer_origin_referrer("not-a-valid-url"), None);
+    }
+
+    #[test]
+    fn is_probe_server_rejection_detects_forbidden_and_rate_limits() {
+        let err403 = super::DownloadError::Other(
+            "probes failed: HEAD=403, ranged GET=403, plain GET=403".to_string(),
+        );
+        assert!(super::is_probe_server_rejection(&err403));
+
+        let err429 = super::DownloadError::Other(
+            "probes failed: HEAD=405, ranged GET=429, plain GET=429".to_string(),
+        );
+        assert!(super::is_probe_server_rejection(&err429));
+
+        // 401 Unauthorized is credentials failure, not hotlink/anti-scraping bot rejection
+        let err401 = super::DownloadError::Other(
+            "probes failed: HEAD=401, ranged GET=401, plain GET=401".to_string(),
+        );
+        assert!(!super::is_probe_server_rejection(&err401));
+
+        // Network error containing numbers like 4010 or 4030 in URL/port must NOT trigger false positive
+        let err_net_port = super::DownloadError::Other(
+            "probes failed: HEAD=network-error: failed to connect to 127.0.0.1:4010, ranged GET=network-error: port 4030 unreachable, plain GET=network-error".to_string(),
+        );
+        assert!(!super::is_probe_server_rejection(&err_net_port));
+    }
+
+    #[test]
+    fn spec_adaptation_helpers_manage_browser_ua_and_referrer() {
+        let spec_empty = super::RequestSpec::empty_get();
+        let adapted = super::spec_with_browser_ua_and_referrer(
+            &spec_empty,
+            "https://cn.download.nvidia.com/Windows/617.42/driver.exe",
+        );
+        assert_eq!(
+            adapted.extra_headers.get("User-Agent").map(|s| s.as_str()),
+            Some(super::DEFAULT_BROWSER_UA)
+        );
+        assert_eq!(adapted.referrer, "https://cn.download.nvidia.com/");
+
+        // Preserves custom referrer if already set
+        let mut spec_with_custom_ref = super::RequestSpec::empty_get();
+        spec_with_custom_ref.referrer = "https://www.nvidia.com/drivers".to_string();
+        let adapted2 = super::spec_with_browser_ua_and_referrer(
+            &spec_with_custom_ref,
+            "https://cn.download.nvidia.com/Windows/617.42/driver.exe",
+        );
+        assert_eq!(adapted2.referrer, "https://www.nvidia.com/drivers");
+
+        // Stripping browser UA handles mixed-case keys (user-agent, User-Agent, USER-AGENT)
+        let mut mixed_case_spec = super::RequestSpec::empty_get();
+        mixed_case_spec
+            .extra_headers
+            .insert("uSeR-aGeNt".to_string(), "CustomBot/1.0".to_string());
+        mixed_case_spec.referrer = "https://example.com/".to_string();
+        let stripped = super::spec_without_browser_ua(&mixed_case_spec);
+        assert!(
+            !stripped
+                .extra_headers
+                .keys()
+                .any(|k| k.eq_ignore_ascii_case("user-agent")),
+            "all user-agent keys must be stripped regardless of case"
+        );
+        assert_eq!(stripped.referrer, "https://example.com/");
+    }
+
+    #[tokio::test]
+    async fn persist_adapted_spec_updates_headers_and_referrer_in_db() {
+        let db = crate::db::Db::connect("sqlite::memory:")
+            .await
+            .expect("connect mem db");
+        let task_id = "test-adapt-persist";
+        db.insert_task(
+            task_id,
+            "https://example.com/file.bin",
+            "test.bin",
+            "/tmp",
+            1,
+            0,
+            "",
+            "",
+            "",
+            1,
+        )
+        .await
+        .expect("insert task");
+
+        // Seed initial context with custom User-Agent and empty referrer
+        db.set_task_request_context(
+            task_id,
+            "session=abc",
+            "",
+            r#"{"user-agent":"Mozilla/5.0 Chrome/120","X-Custom":"1"}"#,
+        )
+        .await
+        .expect("seed context");
+
+        // 1. Adapted spec strips UA and adds inferred Referer
+        let mut adapted = super::RequestSpec::empty_get();
+        adapted.referrer = "https://example.com/".to_string();
+        adapted
+            .extra_headers
+            .insert("X-Custom".to_string(), "1".to_string());
+
+        super::persist_adapted_spec(&db, task_id, &adapted).await;
+
+        let (_, loaded_ref, loaded_headers_json) = db
+            .load_task_request_context(task_id)
+            .await
+            .expect("load")
+            .expect("exists");
+        assert_eq!(loaded_ref, "https://example.com/", "referrer persisted");
+        let loaded_headers: std::collections::HashMap<String, String> =
+            serde_json::from_str(&loaded_headers_json).expect("parse json");
+        assert!(
+            !loaded_headers.contains_key("user-agent"),
+            "stripped user-agent must be removed from db"
+        );
+        assert_eq!(
+            loaded_headers.get("X-Custom").map(|s| s.as_str()),
+            Some("1")
+        );
+    }
+
+    #[tokio::test]
+    async fn persist_adapted_spec_writes_browser_ua_without_duplicate_keys() {
+        let db = crate::db::Db::connect("sqlite::memory:")
+            .await
+            .expect("connect mem db");
+        let task_id = "test-adapt-persist-ua";
+        db.insert_task(
+            task_id,
+            "https://example.com/file.bin",
+            "test.bin",
+            "/tmp",
+            1,
+            0,
+            "",
+            "",
+            "",
+            1,
+        )
+        .await
+        .expect("insert task");
+        // 库里已有小写 user-agent；adapted 带 `User-Agent`，写回后只能剩一个 UA 键。
+        db.set_task_request_context(
+            task_id,
+            "",
+            "",
+            r#"{"user-agent":"old/1.0","X-Custom":"1"}"#,
+        )
+        .await
+        .expect("seed context");
+
+        let mut adapted = super::RequestSpec::empty_get();
+        adapted.extra_headers.insert(
+            "User-Agent".to_string(),
+            super::DEFAULT_BROWSER_UA.to_string(),
+        );
+        adapted
+            .extra_headers
+            .insert("X-Custom".to_string(), "1".to_string());
+        adapted.referrer = "https://example.com/".to_string();
+        super::persist_adapted_spec(&db, task_id, &adapted).await;
+
+        let (_, loaded_ref, json) = db
+            .load_task_request_context(task_id)
+            .await
+            .expect("load")
+            .expect("exists");
+        assert_eq!(loaded_ref, "https://example.com/");
+        let headers: std::collections::HashMap<String, String> =
+            serde_json::from_str(&json).expect("parse json");
+        let ua_keys: Vec<_> = headers
+            .keys()
+            .filter(|k| k.eq_ignore_ascii_case("user-agent"))
+            .collect();
+        assert_eq!(ua_keys.len(), 1, "exactly one UA key expected: {headers:?}");
+        assert_eq!(
+            headers.get("User-Agent").map(|s| s.as_str()),
+            Some(super::DEFAULT_BROWSER_UA)
+        );
+        assert_eq!(headers.get("X-Custom").map(|s| s.as_str()), Some("1"));
+    }
+
+    #[tokio::test]
+    async fn persist_adapted_spec_keeps_corrupt_persisted_headers_untouched() {
+        let db = crate::db::Db::connect("sqlite::memory:")
+            .await
+            .expect("connect mem db");
+        let task_id = "test-adapt-persist-corrupt";
+        db.insert_task(
+            task_id,
+            "https://example.com/file.bin",
+            "test.bin",
+            "/tmp",
+            1,
+            0,
+            "",
+            "",
+            "",
+            1,
+        )
+        .await
+        .expect("insert task");
+        let corrupt = r#"{"X-Custom":"1""#; // 截断的 JSON
+        db.set_task_request_context(task_id, "", "", corrupt)
+            .await
+            .expect("seed context");
+
+        let mut adapted = super::RequestSpec::empty_get();
+        adapted.extra_headers.insert(
+            "User-Agent".to_string(),
+            super::DEFAULT_BROWSER_UA.to_string(),
+        );
+        adapted.referrer = "https://example.com/".to_string();
+        super::persist_adapted_spec(&db, task_id, &adapted).await;
+
+        let (_, loaded_ref, json) = db
+            .load_task_request_context(task_id)
+            .await
+            .expect("load")
+            .expect("exists");
+        assert_eq!(json, corrupt, "corrupt headers must not be overwritten");
+        assert_eq!(loaded_ref, "", "referrer must not be written either");
+    }
+
+    #[tokio::test]
+    async fn resolve_file_info_adapts_to_403_rejection_with_browser_ua_and_referrer() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            while let Ok((mut stream, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let mut buf = Vec::new();
+                    let mut tmp = [0u8; 1024];
+                    while !buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                        let n = stream.read(&mut tmp).await.unwrap_or(0);
+                        if n == 0 {
+                            return;
+                        }
+                        buf.extend_from_slice(&tmp[..n]);
+                    }
+                    let text = String::from_utf8_lossy(&buf);
+                    let has_browser_ua = text.lines().any(|l| {
+                        let l = l.to_lowercase();
+                        l.starts_with("user-agent:") && l.contains("mozilla")
+                    });
+                    let has_referrer = text.lines().any(|l| {
+                        let l = l.to_lowercase();
+                        l.starts_with("referer:") && !l.trim().ends_with("referer:")
+                    });
+
+                    let resp = if has_browser_ua && has_referrer {
+                        if text.starts_with("HEAD") {
+                            "HTTP/1.1 200 OK\r\nContent-Length: 1000\r\nAccept-Ranges: bytes\r\nConnection: close\r\n\r\n"
+                        } else {
+                            "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 0-0/1000\r\nContent-Length: 1\r\nConnection: close\r\n\r\nX"
+                        }
+                    } else {
+                        "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    };
+                    let _ = stream.write_all(resp.as_bytes()).await.ok();
+                    let _ = stream.shutdown().await.ok();
+                });
+            }
+        });
+
+        let client = super::build_client(&crate::proxy_config::ProxyConfig::default(), "").unwrap();
+        let url = format!("http://127.0.0.1:{}/test-driver.exe", port);
+        let spec = super::RequestSpec::empty_get();
+
+        let (info, adapted) = super::resolve_file_info_with_ua_fallback(&client, &url, &spec)
+            .await
+            .expect("probe should succeed after adapting headers");
+
+        assert_eq!(info.total_bytes, 1000);
+        let adapted = adapted.expect("should have adapted headers");
+        assert!(adapted.extra_headers.contains_key("User-Agent"));
+        assert_eq!(adapted.referrer, format!("http://127.0.0.1:{}/", port));
+    }
+
+    #[tokio::test]
+    async fn resolve_file_info_strips_rejected_browser_ua_on_403() {
+        // 场景 A：扩展传入的浏览器 UA 被拒（Cloudflare 式 TLS 指纹 vs UA 冲突），
+        // 剥离 UA 后回落到 DEFAULT_UA 才被放行。
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            while let Ok((mut stream, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let mut buf = Vec::new();
+                    let mut tmp = [0u8; 1024];
+                    while !buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                        let n = stream.read(&mut tmp).await.unwrap_or(0);
+                        if n == 0 {
+                            return;
+                        }
+                        buf.extend_from_slice(&tmp[..n]);
+                    }
+                    let text = String::from_utf8_lossy(&buf);
+                    let has_browser_ua = text.lines().any(|l| {
+                        let l = l.to_lowercase();
+                        l.starts_with("user-agent:") && l.contains("mozilla")
+                    });
+                    let resp = if has_browser_ua {
+                        "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    } else if text.starts_with("HEAD") {
+                        "HTTP/1.1 200 OK\r\nContent-Length: 1000\r\nAccept-Ranges: bytes\r\nConnection: close\r\n\r\n"
+                    } else {
+                        "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 0-0/1000\r\nContent-Length: 1\r\nConnection: close\r\n\r\nX"
+                    };
+                    let _ = stream.write_all(resp.as_bytes()).await.ok();
+                    let _ = stream.shutdown().await.ok();
+                });
+            }
+        });
+
+        let client = super::build_client(&crate::proxy_config::ProxyConfig::default(), "").unwrap();
+        let url = format!("http://127.0.0.1:{}/file.bin", port);
+        let mut spec = super::RequestSpec::empty_get();
+        spec.extra_headers.insert(
+            "User-Agent".to_string(),
+            "Mozilla/5.0 Chrome/120".to_string(),
+        );
+
+        let (info, adapted) = super::resolve_file_info_with_ua_fallback(&client, &url, &spec)
+            .await
+            .expect("probe should succeed after stripping the rejected browser UA");
+
+        assert_eq!(info.total_bytes, 1000);
+        let adapted = adapted.expect("should report adapted spec");
+        assert!(
+            !adapted
+                .extra_headers
+                .keys()
+                .any(|k| k.eq_ignore_ascii_case("user-agent")),
+            "browser UA must be stripped"
         );
     }
 
@@ -5722,7 +5167,7 @@ mod tests {
             "test.txt",
             &std::collections::HashSet::new(),
             &std::collections::HashSet::new(),
-            false,
+            &crate::file_exists::OverwritePolicy::Never,
         )
         .await;
         assert_eq!(result, "test.txt");
@@ -5753,7 +5198,7 @@ mod tests {
             "test.txt",
             &std::collections::HashSet::new(),
             &std::collections::HashSet::new(),
-            false,
+            &crate::file_exists::OverwritePolicy::Never,
         )
         .await;
         assert_eq!(result, "test (1).txt");
@@ -5794,7 +5239,7 @@ mod tests {
             "TEST.txt",
             &std::collections::HashSet::new(),
             &std::collections::HashSet::new(),
-            false,
+            &crate::file_exists::OverwritePolicy::Never,
         )
         .await;
         assert_ne!(
@@ -5827,7 +5272,7 @@ mod tests {
             "test.txt",
             &std::collections::HashSet::new(),
             &std::collections::HashSet::new(),
-            false,
+            &crate::file_exists::OverwritePolicy::Never,
         )
         .await;
         assert_eq!(result, "test (1).txt");
@@ -5857,7 +5302,7 @@ mod tests {
             "README",
             &std::collections::HashSet::new(),
             &std::collections::HashSet::new(),
-            false,
+            &crate::file_exists::OverwritePolicy::Never,
         )
         .await;
         assert_eq!(result, "README (1)");
@@ -5894,7 +5339,7 @@ mod tests {
             "video.mp4",
             &reserved,
             &std::collections::HashSet::new(),
-            false,
+            &crate::file_exists::OverwritePolicy::Never,
         )
         .await;
         assert_eq!(result, "video (1).mp4");
@@ -5930,7 +5375,7 @@ mod tests {
             "video.mp4",
             &reserved,
             &std::collections::HashSet::new(),
-            false,
+            &crate::file_exists::OverwritePolicy::Never,
         )
         .await;
         assert_eq!(result, "video (2).mp4");
@@ -5983,7 +5428,7 @@ mod tests {
             "setup.exe",
             &reserved,
             &std::collections::HashSet::new(),
-            false,
+            &crate::file_exists::OverwritePolicy::Never,
         )
         .await;
         assert_eq!(
@@ -6027,7 +5472,7 @@ mod tests {
             "test.txt",
             &std::collections::HashSet::new(),
             &std::collections::HashSet::new(),
-            true,
+            &crate::file_exists::OverwritePolicy::Any,
         )
         .await;
         assert_eq!(
@@ -6066,7 +5511,7 @@ mod tests {
             "test.txt",
             &std::collections::HashSet::new(),
             &std::collections::HashSet::new(),
-            true,
+            &crate::file_exists::OverwritePolicy::Any,
         )
         .await;
         assert_eq!(result, "test (1).txt");
@@ -6101,7 +5546,7 @@ mod tests {
             "video.mp4",
             &reserved,
             &std::collections::HashSet::new(),
-            true,
+            &crate::file_exists::OverwritePolicy::Any,
         )
         .await;
         assert_eq!(result, "video (1).mp4");
@@ -6114,7 +5559,7 @@ mod tests {
             "Movie.mkv",
             &std::collections::HashSet::new(),
             &avoid,
-            true,
+            &crate::file_exists::OverwritePolicy::Any,
         )
         .await;
         assert_eq!(result, "Movie (1).mkv");
@@ -6146,7 +5591,7 @@ mod tests {
             "data.bin",
             &std::collections::HashSet::new(),
             &std::collections::HashSet::new(),
-            true,
+            &crate::file_exists::OverwritePolicy::Any,
         )
         .await;
         assert_eq!(result, "data (1).bin", "文件不能覆盖同名目录，必须改名");
@@ -6212,29 +5657,6 @@ mod tests {
         assert!(
             raw.iter().any(|&b| b > 0x7e),
             "test data must contain non-ASCII bytes"
-        );
-    }
-
-    #[test]
-    fn content_disposition_raw_utf8_chinese_filename_extracted_correctly() {
-        // Regression test for z-lib CDN: server sends raw UTF-8 bytes in filename="".
-        // Before the fix (to_str) this returned None and callers fell back to the URL,
-        // producing garbage like "redirection" or a hash string as the task name.
-        // After the fix (from_utf8) the correct Chinese filename is extracted via
-        // the filename*= parameter (RFC 5987 percent-encoding).
-        let raw: &[u8] = b"attachment; filename=\"\xe4\xb8\x89\xe4\xbd\x93 (\xe5\x88\x98\xe6\x85\x88\xe6\xac\xa3).epub\"; filename*=UTF-8''%E4%B8%89%E4%BD%93%20(%E5%88%98%E6%85%88%E6%AC%A3).epub";
-
-        let mut headers = reqwest::header::HeaderMap::new();
-        let hv = reqwest::header::HeaderValue::from_bytes(raw)
-            .expect("HeaderValue::from_bytes must accept arbitrary bytes");
-        headers.insert(reqwest::header::CONTENT_DISPOSITION, hv);
-
-        let name = extract_from_content_disposition(&headers);
-        // filename*= (RFC 5987) takes priority and decodes to the correct Chinese name.
-        assert_eq!(
-            name.as_deref(),
-            Some("三体 (刘慈欣).epub"),
-            "raw UTF-8 bytes in filename= must not prevent filename*= from being parsed"
         );
     }
 
@@ -7288,9 +6710,14 @@ mod tests {
             .await
             .expect("test filesystem operation succeeds");
 
-        let chosen =
-            super::claim_final_name(&src, &dir, "a.ts", false, &std::collections::HashSet::new())
-                .await;
+        let chosen = super::claim_final_name(
+            &src,
+            &dir,
+            "a.ts",
+            &crate::file_exists::OverwritePolicy::Never,
+            &std::collections::HashSet::new(),
+        )
+        .await;
 
         assert_eq!(chosen.ok().as_deref(), Some("a (1).ts"));
         assert_eq!(
@@ -7332,9 +6759,14 @@ mod tests {
             .await
             .expect("test filesystem operation succeeds");
 
-        let chosen =
-            super::claim_final_name(&src, &dir, "a.ts", true, &std::collections::HashSet::new())
-                .await;
+        let chosen = super::claim_final_name(
+            &src,
+            &dir,
+            "a.ts",
+            &crate::file_exists::OverwritePolicy::Any,
+            &std::collections::HashSet::new(),
+        )
+        .await;
 
         assert_eq!(chosen.ok().as_deref(), Some("a.ts"));
         assert_eq!(
@@ -7346,6 +6778,51 @@ mod tests {
         {
             panic!("test filesystem cleanup failed: {error}");
         }
+    }
+
+    #[tokio::test]
+    async fn claim_final_name_per_task_overwrite_binds_to_the_asked_name() {
+        let dir = std::env::temp_dir().join(format!(
+            "fluxdown_test_claim_final_only_{}",
+            uuid::Uuid::new_v4()
+        ));
+        tokio::fs::create_dir_all(&dir)
+            .await
+            .expect("test filesystem operation succeeds");
+        tokio::fs::write(dir.join("a.ts"), b"original")
+            .await
+            .expect("test filesystem operation succeeds");
+        let avoid = std::collections::HashSet::new();
+        let asked = crate::file_exists::OverwritePolicy::Only("a.ts".to_string());
+
+        let src = dir.join("a.ts.fdownloading");
+        tokio::fs::write(&src, b"incoming")
+            .await
+            .expect("test filesystem operation succeeds");
+        let chosen = super::claim_final_name(&src, &dir, "a.ts", &asked, &avoid).await;
+        assert_eq!(chosen.ok().as_deref(), Some("a.ts"));
+        assert_eq!(
+            tokio::fs::read(dir.join("a.ts")).await.unwrap_or_default(),
+            b"incoming"
+        );
+
+        // 名字被精修成别的名字：授权不随之扩散，已有同名文件保持原样。
+        tokio::fs::write(dir.join("b.ts"), b"other")
+            .await
+            .expect("test filesystem operation succeeds");
+        let src2 = dir.join("b.ts.fdownloading");
+        tokio::fs::write(&src2, b"incoming2")
+            .await
+            .expect("test filesystem operation succeeds");
+        let chosen = super::claim_final_name(&src2, &dir, "b.ts", &asked, &avoid).await;
+        assert_eq!(chosen.ok().as_deref(), Some("b (1).ts"));
+        assert_eq!(
+            tokio::fs::read(dir.join("b.ts")).await.unwrap_or_default(),
+            b"other"
+        );
+        tokio::fs::remove_dir_all(&dir)
+            .await
+            .expect("test filesystem cleanup");
     }
 
     #[tokio::test]
@@ -7371,7 +6848,14 @@ mod tests {
             .expect("test filesystem operation succeeds");
         let avoid: std::collections::HashSet<String> = ["a.ts".to_string()].into();
 
-        let chosen = super::claim_final_name(&src, &dir, "a.ts", true, &avoid).await;
+        let chosen = super::claim_final_name(
+            &src,
+            &dir,
+            "a.ts",
+            &crate::file_exists::OverwritePolicy::Any,
+            &avoid,
+        )
+        .await;
 
         assert_eq!(chosen.ok().as_deref(), Some("a (1).ts"));
         assert_eq!(
@@ -7423,7 +6907,7 @@ mod tests {
             "Movie.mkv",
             &std::collections::HashSet::new(),
             &avoid,
-            false,
+            &crate::file_exists::OverwritePolicy::Never,
         )
         .await;
         assert_eq!(result, "Movie (1).mkv");

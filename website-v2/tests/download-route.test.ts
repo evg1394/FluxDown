@@ -11,6 +11,10 @@ const ossMock = () => ({
     signatures.push(method);
     return `https://oss.example/${key}`;
   },
+  ossDownloadUrl: (key: string) => {
+    signatures.push("GET");
+    return `https://oss.example/${key}`;
+  },
 });
 mock.module("../src/lib/oss", ossMock);
 const { GET } = await import("../src/pages/api/download/[filename]");

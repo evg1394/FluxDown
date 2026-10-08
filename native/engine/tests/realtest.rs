@@ -1063,7 +1063,7 @@ async fn single_stream_resume_uses_plain_range_without_if_range() {
         audio_url: None,
         auto_max_connections: 0,
         use_server_time: false,
-        allow_overwrite: false,
+        overwrite: fluxdown_engine::file_exists::OverwritePolicy::Never,
         spawn_gen: 1,
         ffmpeg_path: None,
         cdn: fluxdown_engine::cdn::CdnTaskInput::default(),
@@ -1830,7 +1830,7 @@ async fn run_full(
         spec: RequestSpec::empty_get(),
         audio_url: None,
         use_server_time: false,
-        allow_overwrite: false,
+        overwrite: fluxdown_engine::file_exists::OverwritePolicy::Never,
         ffmpeg_path: None,
         cdn: fluxdown_engine::cdn::CdnTaskInput::default(),
     };
@@ -1923,7 +1923,7 @@ async fn run_full_server_time(
         spec: RequestSpec::empty_get(),
         audio_url: None,
         use_server_time,
-        allow_overwrite: false,
+        overwrite: fluxdown_engine::file_exists::OverwritePolicy::Never,
         ffmpeg_path: None,
         cdn: fluxdown_engine::cdn::CdnTaskInput::default(),
     };
@@ -2086,7 +2086,7 @@ async fn use_server_time_uses_new_last_modified_after_version_change() {
         spec: RequestSpec::empty_get(),
         audio_url: None,
         use_server_time: true,
-        allow_overwrite: false,
+        overwrite: fluxdown_engine::file_exists::OverwritePolicy::Never,
         ffmpeg_path: None,
         cdn: fluxdown_engine::cdn::CdnTaskInput::default(),
     };
@@ -3175,7 +3175,7 @@ async fn resume_of_unverified_hint_task_stays_plain_get() {
         spec: RequestSpec::empty_get(),
         audio_url: None,
         use_server_time: false,
-        allow_overwrite: false,
+        overwrite: fluxdown_engine::file_exists::OverwritePolicy::Never,
         ffmpeg_path: None,
         cdn: fluxdown_engine::cdn::CdnTaskInput::default(),
     };
@@ -3436,7 +3436,7 @@ async fn manual_real_url_hint_download() {
         spec: RequestSpec::empty_get(),
         audio_url: None,
         use_server_time: false,
-        allow_overwrite: false,
+        overwrite: fluxdown_engine::file_exists::OverwritePolicy::Never,
         ffmpeg_path: None,
         cdn: fluxdown_engine::cdn::CdnTaskInput::default(),
     };

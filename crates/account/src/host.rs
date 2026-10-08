@@ -11,6 +11,7 @@ use fluxdown_ui_i18n::Translator;
 use gpui::{Context, Entity, EventEmitter, SharedString};
 
 use crate::controller::AccountController;
+use crate::verification::SentCodes;
 use crate::{AccountCommand, AccountPort, PortFuture};
 
 /// 需要 app 在某个窗口里展示的一次性提示。
@@ -30,6 +31,8 @@ pub struct AccountHost {
     pub(crate) controller: AccountController,
     /// 已收到、尚未有窗口展示的撤销原因（两个承载窗口都没开时保留，下次打开主窗口补弹一次）。
     pending_revocation: Option<ErrorReason>,
+    /// 已发出的验证码（跨对话框实例），重开对话框时恢复倒计时而不是重复发码。
+    pub(crate) sent_codes: SentCodes,
 }
 
 impl EventEmitter<AccountHostEvent> for AccountHost {}
@@ -45,6 +48,7 @@ impl AccountHost {
             translator,
             controller: AccountController::new(port),
             pending_revocation: None,
+            sent_codes: SentCodes::default(),
         }
     }
 

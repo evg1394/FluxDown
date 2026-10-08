@@ -244,3 +244,152 @@ async fn ytdlp_list_versions_smoke() {
         v.versions.len()
     );
 }
+
+/// stdout 上限边界：用一个可控的假 yt-dlp 夹具输出任意大小的合法 JSON，验证
+/// `truncated_stdout` 语义（确定性、离线、无需真实 yt-dlp）。
+///
+/// 覆盖审查建议：>4 MiB 且 <16 MiB → `truncated_stdout == false` 且 JSON 可解析；
+/// >16 MiB → `truncated_stdout == true`。用脚本而非真实 yt-dlp，是因为本桥不提供
+/// 「任意大 stdout」的真实开关（`MAX_YTDLP_ARG_LEN` = 8 KiB 限制了参数尺寸）。
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stdout_cap_boundary() {
+    use std::io::Write;
+
+    let data_dir = unique_dir("data_cap");
+    // 假 yt-dlp：忽略参数，向 stdout 写出 SIZE 指定字节数的合法 JSON 对象。
+    // 参数校验在 spawn 前完成，因此仍需传真 yt-dlp 也能接受的参数（-J + URL）。
+    let script = data_dir.join("fake-ytdlp.sh");
+    {
+        let mut f = std::fs::File::create(&script).expect("create fake yt-dlp");
+        f.write_all(
+            b"#!/bin/sh\n\
+              # fake yt-dlp: scan args for the download URL and size stdout off it.\n\
+              for arg in \"$@\"; do case \"$arg\" in --version) echo 9999.99.99; exit 0;; esac; done\n\
+              size=64\n\
+              for arg in \"$@\"; do\n\
+                case \"$arg\" in\n\
+                */big) size=$((5*1024*1024));;\n\
+                */huge) size=$((17*1024*1024));;\n\
+                esac\n\
+              done\n\
+              printf '{\"pad\":\"'; \n\
+              head -c $size /dev/zero | tr '\\0' 'a'; \n\
+              printf '\"}\n'; \n",
+        )
+        .expect("write script");
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod fake yt-dlp");
+    }
+
+    // 用假二进制作为「手动路径」注入，使 resolve_ytdlp 命中它。
+    let db = Db::open(&data_dir).await.expect("open db");
+    db.set_config(
+        fluxdown_engine::components::CONFIG_YTDLP_PATH,
+        script.to_str().expect("script path utf8"),
+    )
+    .await
+    .expect("seed fake yt-dlp path");
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let bridge =
+        EngineBridge::new(db, &ProxyConfig::default(), tx, data_dir.clone()).expect("bridge");
+
+    // >4 MiB 且 <16 MiB：不截断。用 5 MiB 落在旧上限（4 MiB）与新上限（16 MiB）之间。
+    let out = bridge
+        .run_ytdlp("test@yt", spec(&["-J", "https://example.com/big"]))
+        .await
+        .expect("run_ytdlp 5MiB");
+    assert_eq!(out.code, 0, "fake yt-dlp exit; stderr: {}", out.stderr);
+    assert!(
+        !out.truncated_stdout,
+        "5 MiB stdout must NOT be truncated under the 16 MiB cap"
+    );
+    assert!(
+        serde_json::from_str::<serde_json::Value>(out.stdout.trim()).is_ok(),
+        "5 MiB stdout must be valid JSON (proves no truncation)"
+    );
+
+    // >16 MiB：截断。
+    let out2 = bridge
+        .run_ytdlp("test@yt", spec(&["-J", "https://example.com/huge"]))
+        .await
+        .expect("run_ytdlp 17MiB");
+    assert!(
+        out2.truncated_stdout,
+        "17 MiB stdout must be flagged truncated"
+    );
+}
+
+/// 动态上限：单插件 config `plugin.<id>.ytdlp.stdout_cap` 覆盖默认，且越界夹到区间。
+/// 同一假 yt-dlp 的 5 MiB 输出，在默认上限下不截断，在小上限下必须截断。
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stdout_cap_honours_per_plugin_config() {
+    use std::io::Write;
+
+    let data_dir = unique_dir("data_cap_cfg");
+    let script = data_dir.join("fake-ytdlp.sh");
+    {
+        let mut f = std::fs::File::create(&script).expect("create fake yt-dlp");
+        f.write_all(
+            b"#!/bin/sh\n\
+              for arg in \"$@\"; do case \"$arg\" in --version) echo 9999.99.99; exit 0;; esac; done\n\
+              printf '{\"pad\":\"'; \n\
+              head -c $((5*1024*1024)) /dev/zero | tr '\\0' 'a'; \n\
+              printf '\"}\n'; \n",
+        )
+        .expect("write script");
+    }
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod fake yt-dlp");
+    }
+
+    let db = Db::open(&data_dir).await.expect("open db");
+    db.set_config(
+        fluxdown_engine::components::CONFIG_YTDLP_PATH,
+        script.to_str().expect("script path utf8"),
+    )
+    .await
+    .expect("seed fake yt-dlp path");
+    let db_handle = db.clone();
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let bridge =
+        EngineBridge::new(db, &ProxyConfig::default(), tx, data_dir.clone()).expect("bridge");
+
+    // 默认 16 MiB：5 MiB 输出不截断。
+    let out = bridge
+        .run_ytdlp("cap@yt", spec(&["-J", "https://example.com/x"]))
+        .await
+        .expect("run_ytdlp default cap");
+    assert!(!out.truncated_stdout, "5 MiB under default 16 MiB cap");
+
+    // 单插件覆盖为 1 MiB（下限）：同一 5 MiB 输出必须被截断。
+    db_handle
+        .set_config("plugin.cap@yt.ytdlp.stdout_cap", "1m")
+        .await
+        .expect("seed per-plugin cap");
+    let out2 = bridge
+        .run_ytdlp("cap@yt", spec(&["-J", "https://example.com/x"]))
+        .await
+        .expect("run_ytdlp per-plugin cap");
+    assert!(
+        out2.truncated_stdout,
+        "5 MiB output must be truncated under a 1 MiB per-plugin cap"
+    );
+
+    // 另一插件不受该单插件覆盖影响（仍用默认）。
+    let out3 = bridge
+        .run_ytdlp("other@yt", spec(&["-J", "https://example.com/x"]))
+        .await
+        .expect("run_ytdlp other plugin");
+    assert!(
+        !out3.truncated_stdout,
+        "per-plugin cap must not leak to other plugins"
+    );
+}

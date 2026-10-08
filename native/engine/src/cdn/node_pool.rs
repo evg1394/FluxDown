@@ -248,11 +248,6 @@ impl NodeLease {
         self.node_id != 0
     }
 
-    /// 是否起飞路径之外的备选路径（代理，或代理起飞任务的直连回路）。
-    pub fn is_alternate_path(&self) -> bool {
-        self.ip.is_none() && self.node_id != 0
-    }
-
     /// 租约所属路径。
     pub fn route(&self) -> RoutePath {
         self.route

@@ -7,7 +7,7 @@
 import type { APIRoute } from "astro";
 import { GITHUB_TOKEN, GITHUB_REPO } from "astro:env/server";
 import { getCached, setCached } from "@/lib/api-cache";
-import { ossConfigured, presignOssUrl, releaseObjectKey } from "@/lib/oss";
+import { ossConfigured, ossDownloadUrl, presignOssUrl, releaseObjectKey } from "@/lib/oss";
 import { DownloadLookupCache } from "@/lib/download-cache";
 import { createOssProbe } from "@/lib/download-probe";
 import {
@@ -125,7 +125,7 @@ export const GET: APIRoute = async ({ params, url }) => {
       const key = releaseObjectKey(release.tag_name, asset.name);
       if (await ossHasAsset(key, asset.size)) {
         try {
-          return downloadRedirect(presignOssUrl("GET", key, 3600), "oss");
+          return downloadRedirect(ossDownloadUrl(key), "oss");
         } catch {
           // 签名失败同样遵循强制 OSS 的 503 / 旧客户端的 GitHub 兜底策略。
         }

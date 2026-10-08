@@ -27,7 +27,6 @@ use crate::launch::{self, LaunchOptions};
 use crate::service_bootstrap::ServiceBootstrap;
 use crate::session::{AgentSession, SessionSignal, attach};
 use crate::settings_port::AgentSettingsPort;
-use crate::theme_library::FsThemeLibrary;
 use crate::windows::WindowRegistry;
 
 /// 事件泵单次批量上限。
@@ -35,6 +34,9 @@ const EVENT_BATCH: usize = 256;
 /// 次实例等待刚启动主实例的 IPC 端点就绪、或等待旧主实例释放锁的最长时间。
 const ACTIVATION_RETRY_TIMEOUT: Duration = Duration::from_secs(5);
 const ACTIVATION_RETRY_INTERVAL: Duration = Duration::from_millis(50);
+/// `--after-update`：旧桌面进程随 agent 整体退出而退出，等它释放单实例锁的最长时间与轮询间隔。
+const AFTER_UPDATE_LOCK_WAIT: Duration = Duration::from_secs(30);
+const AFTER_UPDATE_LOCK_INTERVAL: Duration = Duration::from_millis(100);
 
 /// 桌面入口完成后的进程语义。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -129,18 +131,24 @@ pub(crate) fn run() -> Result<RunOutcome, AppError> {
         activate: launch.activate_existing || !launch.capture_only,
         settings: launch.settings,
     };
-    let _instance_lock =
-        match acquire_or_activate(&instance_dir, &endpoint, &message, launch.activate_existing)? {
-            LaunchDisposition::Primary(lock) => lock,
-            LaunchDisposition::Activated => {
-                log::info!("another desktop instance is primary; request forwarded, exiting");
-                return Ok(RunOutcome::Completed);
-            }
-            LaunchDisposition::NoPrimary => {
-                log::info!("--activate-existing without a primary instance; exiting");
-                return Ok(RunOutcome::NoPrimary);
-            }
-        };
+    let lock_wait = launch.after_update.then_some(AFTER_UPDATE_LOCK_WAIT);
+    let _instance_lock = match acquire_or_activate(
+        &instance_dir,
+        &endpoint,
+        &message,
+        launch.activate_existing,
+        lock_wait,
+    )? {
+        LaunchDisposition::Primary(lock) => lock,
+        LaunchDisposition::Activated => {
+            log::info!("another desktop instance is primary; request forwarded, exiting");
+            return Ok(RunOutcome::Completed);
+        }
+        LaunchDisposition::NoPrimary => {
+            log::info!("--activate-existing without a primary instance; exiting");
+            return Ok(RunOutcome::NoPrimary);
+        }
+    };
     let (activate_tx, mut activate_rx) = mpsc::channel::<ActivationRequest>(16);
     // Unix sockets can bind before Tokio starts, so parallel starters are queued immediately.
     #[cfg(unix)]
@@ -203,12 +211,6 @@ pub(crate) fn run() -> Result<RunOutcome, AppError> {
         crate::logging::install_ui_watchdog(cx);
         crate::app_icon::install();
         fluxdown_ui_theme::init(cx);
-        // 导入主题须在首个偏好快照前注册，`custom:<id>` 偏好才能直接命中；
-        // 库内缺失的 id 由主题 crate 回退到该槽位的内置默认主题。
-        let theme_library = FsThemeLibrary::new(app_data_dir().join("themes"));
-        for failure in fluxdown_ui_settings::install_theme_library(Arc::new(theme_library), cx) {
-            log::warn!("failed to load imported theme: {failure}");
-        }
         gpui_component::set_locale(&locale);
         let translator = cx.new(|_| translator);
         let session = cx.new(|cx| AgentSession::new(agent_client.clone(), cx));
@@ -260,6 +262,7 @@ pub(crate) fn run() -> Result<RunOutcome, AppError> {
         // 会话 → 运行时统计 / 外壳状态折叠进 Desktop。偏好不在此处理：`SettingsStore` 已订阅同一
         // 会话并叠加本地未回执编辑，外观与语言只从它投影（见 `observe_preferences`）。
         observe_preferences(cx);
+        after_first_snapshot(cx, crate::legacy_themes::migrate);
         cx.subscribe(&session, |_, signal, cx| match signal {
             SessionSignal::Snapshot(snapshot) => {
                 if let Some(body) = crate::session::agent_body(snapshot) {
@@ -351,7 +354,12 @@ pub(crate) fn run() -> Result<RunOutcome, AppError> {
         // 引擎选择请求窗口 / 外部捕获确认（并入新建下载窗口）：跟随会话事件独立开关，
         // 不依赖主窗口存在。
         crate::windows::selection::install(cx);
+        crate::windows::file_conflict::install(cx);
         crate::plugin_notices::install(cx);
+        crate::update_notices::install(cx);
+        if launch.after_update {
+            after_session_settled(cx, crate::update_notices::show_installed);
+        }
         crate::progress_windows::install(cx);
         if let Some(task_id) = launch.progress_task.clone() {
             // 须先于下方「无待确认即退出」登记：意图的界面保活会推迟那次退出。
@@ -382,12 +390,33 @@ pub(crate) fn run() -> Result<RunOutcome, AppError> {
 
     Ok(RunOutcome::Completed)
 }
+/// `lock_wait` 为 `Some`（`--after-update`）时先轮询等待旧主实例释放锁，而不是把请求转发给
+/// 正在退出的旧主实例；超时后回退到常规的转发 / 重试路径。
 fn acquire_or_activate(
     instance_dir: &Path,
     endpoint: &Endpoint,
     message: &ActivateMessage,
     activate_existing: bool,
+    lock_wait: Option<Duration>,
 ) -> Result<LaunchDisposition, AppError> {
+    if let Some(wait) = lock_wait {
+        let deadline = Instant::now() + wait;
+        loop {
+            match launch::InstanceLock::try_acquire(instance_dir).map_err(AppError::InstanceLock)? {
+                Some(_lock) if activate_existing => return Ok(LaunchDisposition::NoPrimary),
+                Some(lock) => return Ok(LaunchDisposition::Primary(lock)),
+                None if Instant::now() < deadline => {
+                    std::thread::sleep(AFTER_UPDATE_LOCK_INTERVAL);
+                }
+                None => {
+                    log::warn!(
+                        "old desktop instance still holds the lock after update; forwarding"
+                    );
+                    break;
+                }
+            }
+        }
+    }
     let deadline = Instant::now() + ACTIVATION_RETRY_TIMEOUT;
     loop {
         match launch::InstanceLock::try_acquire(instance_dir).map_err(AppError::InstanceLock)? {
@@ -546,7 +575,12 @@ fn observe_preferences(cx: &mut App) {
 
 fn apply_preferences(values: &BTreeMap<String, serde_json::Value>, cx: &mut App) {
     let translator = Desktop::global(cx).translator.clone();
+    // 导入主题先于外观注册，`custom:<id>` 选择才能直接命中。
+    for failure in fluxdown_ui_settings::sync_theme_library(values, cx) {
+        log::warn!("failed to load imported theme: {failure}");
+    }
     fluxdown_ui_theme::apply_appearance_preferences(values, cx);
+    fluxdown_ui_icon_pack::apply_icon_pack_preference(values, cx);
     apply_activity_bar_preferences(values, cx);
     if let Some(locale) = values
         .get("general.locale")
@@ -557,12 +591,19 @@ fn apply_preferences(values: &BTreeMap<String, serde_json::Value>, cx: &mut App)
         } else {
             locale.to_owned()
         };
-        translator.update(cx, |translator, cx| {
-            if translator.set_locale(&target) {
+        let locale_changed = translator.update(cx, |translator, cx| {
+            let changed = translator.set_locale(&target);
+            if changed {
                 gpui_component::set_locale(component_locale(translator.locale()));
                 cx.notify();
             }
+            changed
         });
+        if locale_changed {
+            // gpui-component 自带文案读进程级静态 locale，不在被追踪的状态里；retained 渲染
+            // 下只有整窗刷新才能让没读 Translator 的库控件换成新语言。
+            cx.refresh_windows();
+        }
     }
 }
 
@@ -590,16 +631,19 @@ fn capture_calls(
     &'static str,
     crate::agent_client::AgentFuture<serde_json::Value>,
 )> {
-    use fluxdown_protocol::capture_link::{OpenAssociation, normalize_capture_url};
+    use fluxdown_protocol::capture_link::{
+        OpenAssociation, deep_link_file_name, normalize_capture_url,
+    };
     let mut calls = Vec::with_capacity(urls.len() + files.len());
     for url in urls {
         // 关联按原始 scheme 判定：`fluxdown:` 深链解码出的 `magnet:` 不受 magnet 开关约束。
         let association = OpenAssociation::of_url(&url);
+        let filename = deep_link_file_name(&url).unwrap_or_default();
         let url = normalize_capture_url(&url);
         let future = client.call::<serde_json::Value, serde_json::Value>(
             fluxdown_protocol::method::AGENT_CAPTURE_SUBMIT,
             Some(serde_json::json!({
-                "request": { "url": url },
+                "request": { "url": url, "filename": filename },
                 "silent": true,
                 "association": association,
             })),
@@ -715,8 +759,8 @@ fn portable_data_dir() -> Option<std::path::PathBuf> {
     None
 }
 
-/// 桌面数据根目录（导入主题等）。
-fn app_data_dir() -> std::path::PathBuf {
+/// 桌面数据根目录（旧版导入主题文件所在，见 `legacy_themes`）。
+pub(crate) fn app_data_dir() -> std::path::PathBuf {
     DesktopPaths::from_env().data_root
 }
 
@@ -897,7 +941,7 @@ mod tests {
     fn activate_existing_never_claims_a_free_lock() {
         let dir = test_dir("activate-only");
         let endpoint = Endpoint::for_instance_dir(&dir);
-        let outcome = acquire_or_activate(&dir, &endpoint, &ActivateMessage::default(), true)
+        let outcome = acquire_or_activate(&dir, &endpoint, &ActivateMessage::default(), true, None)
             .expect("coordinate launch");
         assert!(matches!(outcome, LaunchDisposition::NoPrimary));
         if let Err(error) = std::fs::remove_dir_all(dir) {
@@ -916,8 +960,9 @@ mod tests {
             std::thread::sleep(Duration::from_millis(25));
             drop(held);
         });
-        let outcome = acquire_or_activate(&dir, &endpoint, &ActivateMessage::default(), false)
-            .expect("take over after release");
+        let outcome =
+            acquire_or_activate(&dir, &endpoint, &ActivateMessage::default(), false, None)
+                .expect("take over after release");
         releaser.join().expect("release thread");
         match outcome {
             LaunchDisposition::Primary(lock) => drop(lock),
@@ -927,6 +972,38 @@ mod tests {
         }
         if let Err(error) = std::fs::remove_dir_all(dir) {
             log::warn!("could not remove takeover test fixture: {error}");
+        }
+    }
+
+    #[test]
+    fn after_update_waits_for_the_old_primary_instead_of_forwarding() {
+        let dir = test_dir("after-update");
+        let endpoint = Endpoint::for_instance_dir(&dir);
+        let held = launch::InstanceLock::try_acquire(&dir)
+            .expect("acquire initial lock")
+            .expect("initial primary");
+        let releaser = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(300));
+            drop(held);
+        });
+        // 旧主实例没有激活监听：若转发则会以 Activation 错误失败。
+        let outcome = acquire_or_activate(
+            &dir,
+            &endpoint,
+            &ActivateMessage::default(),
+            false,
+            Some(Duration::from_secs(10)),
+        )
+        .expect("wait for old primary");
+        releaser.join().expect("release thread");
+        match outcome {
+            LaunchDisposition::Primary(lock) => drop(lock),
+            LaunchDisposition::Activated | LaunchDisposition::NoPrimary => {
+                panic!("expected primary after waiting")
+            }
+        }
+        if let Err(error) = std::fs::remove_dir_all(dir) {
+            log::warn!("could not remove after-update test fixture: {error}");
         }
     }
 }

@@ -1,15 +1,15 @@
 use std::rc::Rc;
 
 use fluxdown_ui_components::{
-    FluxIcon, SidebarState, activity_button as activity_bar_button, nav_icon_color,
-    toolbar_action_button,
+    FluxIcon, SidebarState, SlidingHighlight, activity_button as activity_bar_button,
+    color_transition, nav_icon_color, toolbar_action_button,
 };
 use fluxdown_ui_i18n::Translator;
 use fluxdown_ui_theme::active_theme;
 use gpui::{
-    AnyElement, AnyView, App, Context, Div, Entity, FontWeight, InteractiveElement as _,
-    IntoElement, MouseButton, ParentElement, Render, SharedString, StatefulInteractiveElement as _,
-    Styled, Window, div, img, percentage, px,
+    AnyElement, AnyView, App, Bounds, Context, Div, Entity, FontWeight, InteractiveElement as _,
+    IntoElement, MouseButton, ParentElement, Pixels, Render, SharedString,
+    StatefulInteractiveElement as _, Styled, Window, div, img, percentage, point, px, size,
 };
 use gpui_component::{Icon, TitleBar, h_flex, menu::AppMenuBar, tooltip::Tooltip, v_flex};
 
@@ -90,15 +90,23 @@ impl ShellRoute {
 }
 
 type ShellActionHandler = Rc<dyn Fn(&mut Window, &mut App)>;
-type ShellActionIcon = Rc<dyn Fn(&App) -> Icon>;
+
+/// 活动栏动作的呈现：标准图标按钮，或由 app 注入的自绘视图（如账户头像）。
+enum ShellActionContent {
+    Button {
+        tooltip_id: &'static str,
+        label_key: &'static str,
+        icon: Box<Icon>,
+        handler: ShellActionHandler,
+    },
+    /// 自绘视图自带悬浮提示与点击行为；shell 只提供按钮位。
+    View(AnyView),
+}
 
 /// 由应用装配并注入 shell 的窗口级活动栏动作。
 pub struct ShellAction {
     button_id: &'static str,
-    tooltip_id: &'static str,
-    label_key: &'static str,
-    icon: ShellActionIcon,
-    handler: ShellActionHandler,
+    content: ShellActionContent,
     /// 可选动作参与活动栏「是否整体渲染」的判定；固定动作（如设置）不参与。
     optional: bool,
     visible: bool,
@@ -113,29 +121,25 @@ impl ShellAction {
         icon: Icon,
         handler: impl Fn(&mut Window, &mut App) + 'static,
     ) -> Self {
-        Self::with_dynamic_icon(
-            button_id,
-            tooltip_id,
-            label_key,
-            move |_cx| icon.clone(),
-            handler,
-        )
-    }
-
-    /// 创建图标随运行时状态变化的活动栏动作（例如随主题模式在日/月间切换）。
-    pub fn with_dynamic_icon(
-        button_id: &'static str,
-        tooltip_id: &'static str,
-        label_key: &'static str,
-        icon: impl Fn(&App) -> Icon + 'static,
-        handler: impl Fn(&mut Window, &mut App) + 'static,
-    ) -> Self {
         Self {
             button_id,
-            tooltip_id,
-            label_key,
-            icon: Rc::new(icon),
-            handler: Rc::new(handler),
+            content: ShellActionContent::Button {
+                tooltip_id,
+                label_key,
+                icon: Box::new(icon),
+                handler: Rc::new(handler),
+            },
+            optional: false,
+            visible: true,
+        }
+    }
+
+    /// 以自绘视图占据一个活动栏按钮位（`ACTIVITY_BUTTON_SIZE` 见方，居中摆放）。
+    /// 视图自行观察数据源并 notify，shell 不重建它。
+    pub fn view(button_id: &'static str, view: AnyView) -> Self {
+        Self {
+            button_id,
+            content: ShellActionContent::View(view),
             optional: false,
             visible: true,
         }
@@ -160,6 +164,8 @@ pub struct AuxiliaryWindowView {
     /// 窗口是否可由用户调整尺寸；`false` 时 Windows / Linux 自绘只含最小化 + 关闭的标题栏
     /// （系统不会响应最大化，留着只会误导）。macOS 恒用系统交通灯。
     resizable: bool,
+    /// 已应用到 macOS 交通灯的纵向偏移；标题栏随文字放大撑高时重新居中。
+    traffic_light_y: Pixels,
 }
 
 impl AuxiliaryWindowView {
@@ -183,6 +189,7 @@ impl AuxiliaryWindowView {
             title_override: None,
             content,
             resizable: true,
+            traffic_light_y: crate::initial_traffic_light_y(),
         }
     }
 
@@ -217,7 +224,7 @@ impl AuxiliaryWindowView {
         let extended = theme.extended().colors;
         let spacing = tokens.spacing;
         let typography = tokens.typography.clone();
-        let height = theme.density().title_bar;
+        let height = crate::title_bar_height(cx);
         let title_row = h_flex()
             .absolute()
             .inset_0()
@@ -263,6 +270,11 @@ impl AuxiliaryWindowView {
 
 impl Render for AuxiliaryWindowView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        crate::sync_traffic_light(
+            window,
+            crate::title_bar_height(cx),
+            &mut self.traffic_light_y,
+        );
         // 构造时拿不到 Window：语言切换后在渲染期把默认标题同步到 OS 窗口标题。
         if self.title_override.is_none() && self.os_title != self.title {
             window.set_window_title(&self.title);
@@ -302,6 +314,8 @@ pub struct ShellView {
     actions: Vec<ShellAction>,
     /// Windows / Linux 标题栏内的应用菜单；macOS 走原生菜单不渲染。
     menu_bar: Option<Entity<AppMenuBar>>,
+    /// 已应用到 macOS 交通灯的纵向偏移；标题栏随文字放大撑高时重新居中。
+    traffic_light_y: Pixels,
 }
 
 impl ShellView {
@@ -332,6 +346,7 @@ impl ShellView {
             routes,
             actions,
             menu_bar,
+            traffic_light_y: crate::initial_traffic_light_y(),
         }
     }
 
@@ -404,7 +419,7 @@ impl ShellView {
 
         // 显式 `.bg` 覆盖 gpui-component 默认渐变；`.h` 经 refine_style 覆盖默认 34px。
         title_bar
-            .h(theme.density().title_bar)
+            .h(crate::title_bar_height(cx))
             .bg(extended.chrome)
             .border_color(extended.hairline)
             .child(
@@ -470,9 +485,16 @@ impl ShellView {
             .and_then(|route| route.title_bar.clone())
     }
 
-    fn route_button(&self, route: &ShellRoute, cx: &mut Context<Self>) -> AnyElement {
+    fn route_button(
+        &self,
+        route: &ShellRoute,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let selected = self.active_route == Some(route.id);
         let icon_size = active_theme(cx).extended().icon.lg + ACTIVITY_ICON_EXTRA;
+        let icon_color =
+            color_transition(route.button_id, nav_icon_color(selected, cx), window, cx);
         let label = SharedString::from(self.translator.read(cx).text(route.label_key).to_owned());
         let tooltip_label = label.clone();
         let route_id = route.id;
@@ -489,11 +511,7 @@ impl ShellView {
                 activity_bar_button(
                     route.button_id,
                     label,
-                    route
-                        .icon
-                        .clone()
-                        .size(icon_size)
-                        .text_color(nav_icon_color(selected, cx)),
+                    route.icon.clone().size(icon_size).text_color(icon_color),
                     selected,
                     ACTIVITY_BUTTON_SIZE,
                     cx,
@@ -508,32 +526,72 @@ impl ShellView {
             .into_any_element()
     }
 
-    fn route_buttons(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let gap = active_theme(cx).tokens().spacing.xs;
-        v_flex().gap(gap).children(
-            self.routes
-                .iter()
-                .filter(|route| route.visible)
-                .map(|route| self.route_button(route, cx)),
-        )
+    /// 路由按钮列：选中底是一块随选中项滑动的底块（按钮自身不画选中底）。
+    fn route_buttons(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = active_theme(cx);
+        let gap = theme.tokens().spacing.xs;
+        let radius = theme.components().nav_item_radius;
+        let selected_color = theme.extended().colors.nav_selected;
+        let highlight = self
+            .routes
+            .iter()
+            .filter(|route| route.visible)
+            .position(|route| self.active_route == Some(route.id))
+            .map(|index| {
+                let inset = (ACTIVITY_RAIL_WIDTH - ACTIVITY_BUTTON_SIZE) / 2.;
+                let top = (ACTIVITY_TILE_HEIGHT + gap) * index as f32
+                    + (ACTIVITY_TILE_HEIGHT - ACTIVITY_BUTTON_SIZE) / 2.;
+                SlidingHighlight::new(
+                    "shell-activity-selection",
+                    Bounds::new(
+                        point(inset, top),
+                        size(ACTIVITY_BUTTON_SIZE, ACTIVITY_BUTTON_SIZE),
+                    ),
+                    selected_color,
+                )
+                .radius(radius)
+            });
+        let buttons: Vec<AnyElement> = self
+            .routes
+            .iter()
+            .filter(|route| route.visible)
+            .map(|route| self.route_button(route, window, cx))
+            .collect();
+        v_flex()
+            .relative()
+            .gap(gap)
+            .children(highlight)
+            .children(buttons)
     }
 
     fn action_button(&self, action: &ShellAction, cx: &mut Context<Self>) -> AnyElement {
-        let label = SharedString::from(self.translator.read(cx).text(action.label_key).to_owned());
-        let tooltip_label = label.clone();
-        let handler = Rc::clone(&action.handler);
-        let icon = (action.icon)(cx);
-        let theme = active_theme(cx);
-        let icon_size = theme.extended().icon.lg + ACTIVITY_ICON_EXTRA;
-        let icon_color = theme.tokens().colors.muted_foreground;
-
-        div()
-            .id(action.tooltip_id)
+        let tile = div()
             .w(ACTIVITY_RAIL_WIDTH)
             .h(ACTIVITY_TILE_HEIGHT)
             .flex()
             .items_center()
-            .justify_center()
+            .justify_center();
+        let (tooltip_id, label_key, icon, handler) = match &action.content {
+            ShellActionContent::View(view) => return tile.child(view.clone()).into_any_element(),
+            ShellActionContent::Button {
+                tooltip_id,
+                label_key,
+                icon,
+                handler,
+            } => (
+                *tooltip_id,
+                *label_key,
+                Icon::clone(icon),
+                Rc::clone(handler),
+            ),
+        };
+        let label = SharedString::from(self.translator.read(cx).text(label_key).to_owned());
+        let tooltip_label = label.clone();
+        let theme = active_theme(cx);
+        let icon_size = theme.extended().icon.lg + ACTIVITY_ICON_EXTRA;
+        let icon_color = theme.tokens().colors.muted_foreground;
+
+        tile.id(tooltip_id)
             .tooltip(move |window, cx| Tooltip::new(tooltip_label.clone()).build(window, cx))
             .child(
                 activity_bar_button(
@@ -548,6 +606,9 @@ impl ShellView {
             )
             .into_any_element()
     }
+
+    /// 自绘动作视图的按钮位尺寸（视图按此尺寸绘制以与图标按钮对齐）。
+    pub const ACTION_BUTTON_SIZE: Pixels = ACTIVITY_BUTTON_SIZE;
 
     fn action_buttons(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let gap = active_theme(cx).tokens().spacing.xs;
@@ -570,7 +631,7 @@ impl ShellView {
                 .any(|action| action.optional && action.visible)
     }
 
-    fn render_activity_bar(&self, cx: &mut Context<Self>) -> Option<Div> {
+    fn render_activity_bar(&self, window: &mut Window, cx: &mut Context<Self>) -> Option<Div> {
         if !self.has_visible_optional_item() {
             return None;
         }
@@ -589,7 +650,7 @@ impl ShellView {
                 .border_color(extended.colors.hairline)
                 .pt(spacing.sm)
                 .pb(spacing.sm)
-                .child(self.route_buttons(cx))
+                .child(self.route_buttons(window, cx))
                 .child(self.action_buttons(cx)),
         )
     }
@@ -605,7 +666,12 @@ impl ShellView {
 }
 
 impl Render for ShellView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        crate::sync_traffic_light(
+            window,
+            crate::title_bar_height(cx),
+            &mut self.traffic_light_y,
+        );
         let colors = active_theme(cx).tokens().colors;
         v_flex()
             .size_full()
@@ -618,7 +684,7 @@ impl Render for ShellView {
                     .flex_1()
                     .min_h_0()
                     .items_stretch()
-                    .children(self.render_activity_bar(cx))
+                    .children(self.render_activity_bar(window, cx))
                     .child(
                         div()
                             .h_full()

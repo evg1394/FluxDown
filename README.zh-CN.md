@@ -13,7 +13,8 @@
 [![License: AGPL-3.0](https://img.shields.io/badge/license-AGPL--3.0-blue?style=flat-square)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux%20%7C%20NAS%20%7C%20Android-8b5cf6?style=flat-square)](#安装)
 [![Rust](https://img.shields.io/badge/engine-Rust-f74c00?style=flat-square&logo=rust)](native/engine)
-[![Flutter](https://img.shields.io/badge/UI-Flutter-02569B?style=flat-square&logo=flutter)](lib)
+[![GPUI](https://img.shields.io/badge/desktop-GPUI-f74c00?style=flat-square&logo=rust)](crates/app)
+[![Flutter](https://img.shields.io/badge/mobile-Flutter-02569B?style=flat-square&logo=flutter)](lib)
 [![MCP Server](https://glama.ai/mcp/servers/zerx-lab/FluxDown/badges/score.svg)](https://glama.ai/mcp/servers/zerx-lab/FluxDown)
 
 [![Awesome Rust](https://img.shields.io/badge/Awesome-Rust-orange?logo=rust&style=flat-square)](https://github.com/rust-unofficial/awesome-rust#utilities)
@@ -35,27 +36,30 @@
 
 ## 亮点
 
-- **最高 10 倍提速** —— Rust + Tokio 引擎，IDM 式运行时动态分段
+- **动态下载加速** —— Rust + Tokio 引擎，自适应分段与慢速分段接管
 - **多协议支持** —— HTTP/HTTPS、FTP、BitTorrent、eD2K、HLS 与 DASH 流媒体
-- **浏览器集成** —— Chrome / Edge / Firefox 扩展，三层下载拦截引擎
+- **一套引擎，多种客户端** —— 原生 GPUI 桌面、Flutter Android 应用、React Web 管理界面与 CLI
+- **浏览器集成** —— Chrome / Edge / Firefox 扩展，三层下载拦截引擎，另有用户脚本
 - **AI 智能体就绪** —— 内置 MCP（Model Context Protocol）服务器，Claude、Cursor 等 AI 客户端可直接管理下载
-- **随处续传** —— 下载状态全量持久化到 SQLite，崩溃断电不丢进度
-- **精美界面** —— 深浅主题、13 套配色、可调节三栏响应式布局
-- **干净纯粹** —— 免费开源、零广告、零追踪、无需账号、本地优先
+- **自动化与远程管理** —— RSS 订阅、定时队列、Webhook、插件，以及可选的 FluxCloud 设备协同
+- **本地优先** —— 免费开源、无广告，本地下载无需账号，续传状态默认保存在本地
 
 ## 功能特性
 
 | 特性 | 说明 |
 |---|---|
-| **Rust 驱动引擎** | 基于 Rust 与 Tokio 的零开销抽象 —— 内存安全的并发，榨干带宽 |
-| **智能分段** | 运行时动态拆分分段，空闲线程接管慢速分段 —— 像 IDM，但更聪明 |
+| **Rust 驱动引擎** | 桌面、移动端、服务器与独立 CLI 宿主共用 Rust + Tokio 引擎，不依赖 UI 或 FFI |
+| **智能分段** | 运行时动态拆分分段，空闲 worker 接管慢速分段 |
 | **多协议** | HTTP/HTTPS、FTP、BitTorrent（DHT/UPnP/磁力）、eD2K（服务器 + Kad DHT 找源、MD4 校验）、HLS（AES 解密）、DASH 专属引擎 |
-| **速度控制** | Token bucket 全局限速 —— 后台下载不影响正常上网 |
-| **随处续传** | 每个字节都记录在 SQLite（WAL 模式），断电也不丢进度 |
-| **浏览器集成** | 三层下载拦截、流媒体资源嗅探、Alt+Click 绕过、右键发送 |
-| **MCP 服务器** | 内置 Model Context Protocol 端点（Streamable HTTP），12 个工具 —— AI 智能体可新建、监控、控制下载 |
-| **精美界面** | shadcn 风格组件、IDM 式分段可视化、命名队列、系统托盘 |
-| **干净纯粹** | 零广告、零追踪、无账号 —— 数据完全留在本地 |
+| **队列与速度控制** | 命名队列、定时调度与 Token bucket 全局限速 |
+| **持久化与续传** | 默认使用 SQLite（WAL 模式），服务器可使用 PostgreSQL；从已持久化的状态恢复下载 |
+| **浏览器集成** | 下载拦截、流媒体资源嗅探、Alt+Click 绕过、右键发送与连接诊断 |
+| **桌面与 Web 界面** | GPUI 桌面与 React Web 管理，深浅主题、自定义主题、任务详情与分段可视化；桌面托盘支持关闭界面后继续提供服务 |
+| **RSS 与自动化** | 订阅过滤、无人值守下载、JavaScript 插件、受管 FFmpeg/yt-dlp 组件与任务事件 Webhook |
+| **远程设备** | 可选的 FluxCloud 账户、设置同步与远程任务管理，以及局域网设备配对和直连 |
+| **API 与 CLI** | REST/OpenAPI、aria2 兼容 JSON-RPC、含 12 个工具的 MCP，以及用于脚本或独立下载的 CLI |
+
+**隐私说明：** 本地下载不需要 FluxCloud 账号，云功能按需使用。匿名安装和每日活跃统计受 `analytics_enabled` 设置控制，可关闭，不采集下载或任务信息；本项目并非零遥测应用。
 
 ## FluxDown vs. IDM
 
@@ -69,7 +73,7 @@
 | HLS / DASH 流媒体 | 支持 | 部分支持 |
 | 动态分段 | 支持 | 支持 |
 | 浏览器扩展 | Chrome / Edge / Firefox | 支持 |
-| 广告与追踪 | **无** | — |
+| 广告 | **无** | — |
 
 ## 安装
 
@@ -91,11 +95,56 @@
 [<img src="https://img.shields.io/badge/Edge-Add--ons-0078D4?style=for-the-badge&logo=microsoftedge&logoColor=white" alt="Edge Add-ons" />](https://microsoftedge.microsoft.com/addons/detail/fluxdown/nglkkjbogjghekbhhcnccnpfedjbdhhd)
 [<img src="https://img.shields.io/badge/Firefox-Add--ons-FF7139?style=for-the-badge&logo=firefoxbrowser&logoColor=white" alt="Firefox Add-ons" />](https://addons.mozilla.org/zh-CN/firefox/addon/fluxdown)
 
+扩展通过 Native Messaging 连接桌面 agent。另有 [Tampermonkey 用户脚本](userscript/) 可用。
+
+### NAS / 服务器
+
+当前无头服务使用 **`fluxdown-agent --server` + `fluxdownd`**，内嵌 Web 管理界面。Docker 镜像仍沿用 `ghcr.io/zerx-lab/fluxdown-server` 名称。
+
+克隆仓库后，可使用自带的 [Compose 配置](docker/docker-compose.yml)：
+
+```shell
+docker compose -f docker/docker-compose.yml up -d
+```
+
+打开 `http://<服务器>:17800/`，在首次运行向导中设置访问密钥。密钥须为 8–128 个 ASCII 可见字符，同时包含字母和数字。请先在可信网络完成初始化，再对外开放服务；远程访问应使用 HTTPS 反向代理。
+
+- server 模式默认监听 `0.0.0.0:17800`，可通过 `FLUXDOWN_BIND` 修改。
+- 无人值守部署可通过部署环境或密钥管理器提供 `FLUXDOWN_TOKEN`，不要将真实密钥写进提交的文件。它仅在尚未设置密钥时初始化生效。
+- 持久化 `/data`（数据库、日志、访问密钥）与 `/root/Downloads`（下载文件）。自带 Compose 配置使用命名数据卷，下载目录映射到宿主机的 `docker/downloads/`。
+- 若下载盘需要休眠，建议把 `/data` 放在 SSD 或缓存池。
+- 原生部署须将 `fluxdown-agent` 与 `fluxdownd` 放在同一目录。旧 `native/server` crate 已冻结，不是当前部署入口。
+
+## CLI 与 HTTP API
+
+`fluxdown` CLI 默认通过 HTTP API 连接正在运行的桌面端或服务器。桌面端需先在「设置 → API 服务」启用管理 API。通过 `FLUXDOWN_TOKEN` 提供访问密钥，通过 `FLUXDOWN_URL` 或 `--url` 选择远程服务器。
+
+```shell
+fluxdown ping
+fluxdown add "https://example.com/file.zip"
+fluxdown --json list
+
+# 独立模式：直接内嵌引擎，不连接服务
+fluxdown add --local "https://example.com/file.zip"
+```
+
+独立模式不能与正在运行的引擎共用数据目录，须先停止使用该目录的服务。
+
+| 接口 | 端点 | 用途 |
+|---|---|---|
+| REST 管理 API | `/api/v1/*` | 任务、队列、RSS 等管理操作 |
+| OpenAPI | `/api/v1/openapi.json` | 机器可读的 API 规范 |
+| aria2 兼容 JSON-RPC | `/jsonrpc`（HTTP / WebSocket） | 接入 aria2 兼容客户端 |
+| MCP | `/mcp` | AI 智能体工具 |
+| 官方 UI 协议 | `/rpc`（WebSocket） | GPUI/Web 网关，与 aria2 API 不同 |
+
+桌面端默认监听 `127.0.0.1:17800`，管理 API 与 MCP 需手动开启；server 模式默认启用两者，并要求访问密钥。REST 契约见 [OpenAPI 规范](website-v2/public/openapi.json)。
+
 ## MCP 服务器（Model Context Protocol）
 
-FluxDown 内置 **MCP 服务器**，AI 智能体（Claude Desktop、Cursor、Cline 等）可通过 [Model Context Protocol](https://modelcontextprotocol.io) 管理下载。采用 **Streamable HTTP**（单一 `POST /mcp` 上的 JSON-RPC 2.0），复用本机 API 端口，无需额外进程。
+FluxDown 内置 **MCP 服务器**，AI 智能体（Claude Desktop、Cursor、Cline 等）可通过 [Model Context Protocol](https://modelcontextprotocol.io) 管理下载。实现无状态 **Streamable HTTP** 子集（`POST /mcp` 上的 JSON-RPC 2.0），复用同一 API 端口，无需单独的 MCP 进程。
 
-- **端点**：`http://127.0.0.1:17800/mcp`（默认仅本机可访问）
+- **端点**：桌面默认配置为 `http://127.0.0.1:17800/mcp`；无头部署请使用服务器地址
 - **鉴权**：Bearer token（`Authorization: Bearer <token>` 或 `X-FluxDown-Token`），与管理 API 共用
 - **开启方式**：设置 → API 服务 → 打开 *MCP 端点*（自动生成 token）；headless 服务器默认开启
 
@@ -131,64 +180,111 @@ MCP 层实现在 [`native/api/src/mcp.rs`](native/api/src/mcp.rs)，与 REST 管
 
 ## 架构
 
-Flutter 负责渲染界面，零 FFI 依赖的 Rust 引擎负责下载。两端通过 [Rinf](https://rinf.cunarist.org) 信号通信，浏览器扩展经由 Native Messaging 接入。
+**一套 Rust 下载引擎，多个宿主与客户端。** 当前桌面发行物使用 GPUI，而非 Flutter。桌面链路为 `fluxdown-desktop → fluxdown-agent → fluxdownd`；无头部署复用 agent 与 daemon，提供 React Web 管理界面。Flutter 保留为移动客户端，通过 [Rinf](https://rinf.cunarist.org) 连接 `hub` 宿主。
 
 ```mermaid
 flowchart TD
+    UI["GPUI 桌面"] -->|"WebSocket /rpc"| AGENT["fluxdown-agent — UI 网关与桌面外壳"]
+    WEB["React Web 界面"] -->|"WebSocket /rpc"| AGENT
     EXT["浏览器扩展 (WXT)"] -->|Native Messaging| NMH["fluxdown_nmh"]
-    NMH -->|Named Pipe / Unix socket| HUB
-    UI["Flutter UI (shadcn_ui)"] <-->|Rinf 信号| HUB["hub — FFI 适配层"]
+    NMH --> AGENT
+    CLI["fluxdown CLI"] -->|"HTTP API"| AGENT
+    AGENT -->|"带鉴权的 JSON-RPC"| DAEMON["fluxdownd — 下载核心"]
+    DAEMON --> ENGINE["fluxdown_engine"]
+    MOBILE["Flutter 移动端"] -->|"Rinf 信号"| HUB["hub — 移动端宿主"]
     HUB --> ENGINE["fluxdown_engine"]
-    ENGINE --> HTTP["HTTP/HTTPS"]
-    ENGINE --> FTP["FTP"]
-    ENGINE --> BT["BitTorrent"]
-    ENGINE --> ED2K["eD2K"]
-    ENGINE --> HLS["HLS / DASH"]
-    ENGINE --> DB[("SQLite")]
+    LOCAL["fluxdown add --local"] --> ENGINE
+    ENGINE --> PROTOCOLS["HTTP/HTTPS, FTP, BitTorrent, eD2K, HLS, DASH"]
+    ENGINE --> DB[("SQLite / PostgreSQL")]
 ```
+
+- **daemon 拥有下载事实：** 引擎、下载数据库、队列、RSS、插件与 Webhook。
+- **agent 负责外部集成：** UI 网关、FluxCloud 账户与同步、设备协同、浏览器捕获、桌面托盘与生命周期管理。
+- **共用协议契约：** `native/protocol` 定义传输无关的 DTO、方法与事件；`native/api` 通过 `ApiHost` 提供 REST、aria2 与 MCP，不依赖引擎。
+- **引擎独立：** 通过 `EventSink` 与 `HostSelection` 对接宿主。同一数据目录只允许一个引擎写入；图中展示可选宿主，并非多个宿主同时写同一数据库。
 
 | 层 | 技术栈 | 目录 |
 |---|---|---|
-| UI | Flutter + shadcn_ui | [`lib/`](lib) |
-| FFI 桥接 | Rinf（Dart ↔ Rust 信号） | [`native/hub/`](native/hub) |
-| 下载引擎 | Rust + Tokio（零 FFI 依赖） | [`native/engine/`](native/engine) |
-| 浏览器扩展 | WXT + TypeScript | [`fluxDown/`](fluxDown) |
-| 官网 | Astro + React | [`website/`](website) |
+| 桌面 UI | Rust + GPUI；应用组装与功能 crate | [`crates/`](crates)、[`crates/app/`](crates/app) |
+| agent / daemon | UI 网关与无头宿主 / 下载核心 | [`native/agent/`](native/agent)、[`native/daemon/`](native/daemon) |
+| 共用协议 / HTTP API | JSON-RPC DTO / REST、aria2、MCP 适配 | [`native/protocol/`](native/protocol)、[`native/api/`](native/api) |
+| 下载引擎 | Rust + Tokio，不依赖 UI 或 FFI | [`native/engine/`](native/engine) |
+| 移动 UI / 宿主 | Flutter + shadcn_ui / Rinf | [`lib/`](lib)、[`native/hub/`](native/hub) |
+| Web 管理界面 | React + TypeScript + Vite | [`web/`](web) |
+| CLI | HTTP 客户端或内嵌引擎 | [`native/cli/`](native/cli) |
+| 浏览器集成 | WXT + TypeScript、Native Messaging、用户脚本 | [`fluxDown/`](fluxDown)、[`native/nmh/`](native/nmh)、[`userscript/`](userscript) |
+| 官网 | Astro + React；`website/` 为旧站存档 | [`website-v2/`](website-v2) |
 
 ## 从源码构建
 
-**前置要求**：[Flutter SDK](https://docs.flutter.dev/get-started/install) · [Rust 工具链](https://www.rust-lang.org/tools/install) · [Rinf CLI](https://rinf.cunarist.org)
+首先安装 [Rust 工具链](https://www.rust-lang.org/tools/install) 与平台原生构建工具（Windows 使用 MSVC，macOS 使用 Xcode 命令行工具）。Linux 桌面构建还需要图形、音频与托盘开发库，维护中的 Ubuntu 依赖列表见 [CI 配置](.github/workflows/ci.yml)。Web UI 需要 [Bun](https://bun.sh)；Flutter 与 Rinf **仅移动端需要**，GPUI 桌面无需安装。
 
 ```shell
 # 克隆开发分支（main = 日常开发，stable = 稳定版本）
 git clone -b main https://github.com/zerx-lab/FluxDown.git
 cd FluxDown
+```
 
-# 检查环境
-rustc --version
-flutter doctor
+### 桌面端（GPUI）
 
-# 安装 Rinf CLI（仅首次）
+```shell
+# 构建桌面 UI、agent、daemon 与浏览器中继并启动
+cargo desktop-dev
+
+# 仅构建（macOS 还会组装并签名开发用 .app）
+cargo desktop-dev --build-only
+```
+
+启动器会复用已运行的桌面或服务实例，不会强制重启。验证运行中代码的修改前，请退出 UI 并停止对应服务。
+
+### 无头服务器与 Web UI
+
+```shell
+# 必须先构建 Web UI，再构建 agent
+cd web
+bun install --frozen-lockfile
+bun run build
+cd ..
+
+cargo build -p fluxdown_daemon
+cargo run -p fluxdown_agent --features web-ui -- --server
+```
+
+`web-ui` feature 会在编译期把 `web/dist` 内嵌到 agent 二进制。修改前端后须重新构建 Web UI，再重新编译 agent；也可通过 `FLUXDOWN_WEBROOT` 改为托管磁盘目录。
+
+前端开发时，保持服务器运行，在另一终端执行 `cd web && bun run dev`：Vite 监听 5173 端口，将后端请求代理到 17800。
+
+### CLI
+
+```shell
+cargo build -p fluxdown_cli
+cargo run -p fluxdown_cli -- ping
+```
+
+### 移动端（Flutter）
+
+安装 [Flutter SDK](https://docs.flutter.dev/get-started/install) 与 Android SDK（iOS 开发则需要 Xcode）。
+
+```shell
 cargo install rinf_cli
-
-# 拉取依赖并生成 Dart 绑定
 flutter pub get
 rinf gen
-
-# 调试运行
-flutter run
-
-# 构建发行版
-flutter build apk --release       # 或 ios
+flutter run -d "<mobile-device-id>"
+flutter build apk --release
 ```
+
+CI 发布 Android APK。仓库保留 iOS 源码，但当前没有 iOS 发布 job。Flutter 桌面 runner 已不在桌面构建链路中。
 
 <details>
 <summary><b>运行测试</b></summary>
 
 ```shell
-flutter test                          # Dart 测试
-cargo test -p fluxdown_engine        # Rust 引擎测试
-cargo test -p hub                    # FFI 适配层测试
+cargo test -p fluxdown_engine        # 引擎测试
+cargo test -p fluxdown_api           # HTTP / aria2 / MCP 契约
+cargo test -p fluxdown_agent         # 网关 / 服务器
+cargo test -p fluxdown_cli           # CLI
+cd web && bun test && cd ..          # Web UI
+flutter test                        # 移动端 Dart 测试
 ```
 
 </details>
@@ -201,8 +297,9 @@ cargo test -p hub                    # FFI 适配层测试
 欢迎提交 Pull Request！请从 `main` 拉分支并把 PR 提到 `main` —— `main` 是开发分支，`stable` 只承载稳定版本（由维护者从 `main` 合并前进）。提交前请确保通过：
 
 ```shell
-cargo fmt --check && cargo clippy -- -D warnings   # Rust
-flutter analyze                                     # Dart
+cargo fmt --check
+cargo clippy --workspace --exclude fluxdown_server --all-targets -- -D warnings
+flutter analyze                     # 修改移动端 Dart 代码时
 ```
 
 完整流程见 [CONTRIBUTING.md](CONTRIBUTING.md)。

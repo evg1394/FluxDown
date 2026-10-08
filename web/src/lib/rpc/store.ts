@@ -32,6 +32,8 @@ export interface ConnectionState {
   /** 下次重连的时间戳（ms，仅 reconnecting）。 */
   nextRetryAt: number | null
   lastError: string | null
+  /** 服务因自更新重启（关闭原因 service-restart）：保持重连，新版本就绪后刷新页面。 */
+  restarting: boolean
 }
 
 export interface RpcState {
@@ -41,7 +43,7 @@ export interface RpcState {
 }
 
 const INITIAL: RpcState = {
-  connection: { phase: 'idle', attempt: 0, nextRetryAt: null, lastError: null },
+  connection: { phase: 'idle', attempt: 0, nextRetryAt: null, lastError: null, restarting: false },
   snapshot: null,
   hello: null,
 }

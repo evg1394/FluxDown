@@ -24,10 +24,11 @@ use tokio_util::sync::CancellationToken;
 use crate::db::Db;
 use crate::downloader::{
     BUF_WRITER_CAPACITY, DB_SAVE_INTERVAL_SECS, DownloadError, DownloadParams, FileInfo,
-    ProgressUpdate, SegmentProgressInfo, TEMP_EXT, extract_from_url, sanitize_filename,
+    ProgressUpdate, SegmentProgressInfo, TEMP_EXT,
 };
 use crate::events::EventSink;
 use crate::logger::log_info;
+use crate::naming::{extract_from_url, sanitize_filename};
 use crate::output;
 use crate::proxy_config::{self, ProxyConfig};
 use crate::speed_limiter::SpeedLimiter;
@@ -189,9 +190,8 @@ fn url_decode(s: &str) -> String {
         result.push(bytes[i]);
         i += 1;
     }
-    // 优先 UTF-8，失败时回退到 GBK（老旧中文 FTP 服务器常用），
-    // 双失败才返回原始字符串。
-    crate::downloader::decode_bytes_utf8_or_gbk(&result).unwrap_or_else(|_| s.to_string())
+    // 优先 UTF-8，否则旧式字节打分解码（老旧中文 FTP 服务器常用 GBK），恒成功。
+    crate::naming::decode_legacy_bytes(&result, crate::naming::NameHints::default())
 }
 
 // ---------------------------------------------------------------------------
@@ -563,6 +563,7 @@ fn resolve_ftp_info_sync(ftp_url: &FtpUrl, proxy: &ProxyConfig) -> Result<FileIn
 
     Ok(FileInfo {
         file_name,
+        name_source: crate::naming::NameSource::UrlPath,
         total_bytes,
         supports_range,
         content_type: String::new(),
@@ -2341,11 +2342,11 @@ mod tests {
     }
 
     #[test]
-    fn url_decode_invalid_utf8_falls_back_to_original() {
-        // 0xFF 0xFE 既不是合法 UTF-8（0xFF 是保留字节）也不是合法 GBK
-        // （0xFF 不在 GBK 首字节范围）——两种解码都失败时应返回原始字符串。
+    fn url_decode_undecodable_bytes_fall_back_to_windows_1252() {
+        // 0xFF 0xFE 既不是合法 UTF-8 也不是合法 GBK/Big5/Shift_JIS 序列：旧式字节解码恒成功，
+        // 末位兜底按 windows-1252 解码，不再回退成原始 `%FF%FE` 字符串。
         let result = url_decode("%FF%FE");
-        assert_eq!(result, "%FF%FE"); // fallback to original
+        assert_eq!(result, "ÿþ");
     }
 
     #[test]

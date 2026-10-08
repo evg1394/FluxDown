@@ -9,12 +9,18 @@ use crate::error::{ApplicationErrorCode, RpcErrorData, RpcErrorObject};
 pub const JSONRPC_VERSION: &str = "2.0";
 /// 当前本机服务协议版本；v4 增加托盘驻留（`ShellChanged`）与完成后关机（`PowerChanged`）事件，
 /// v5 增加静默捕获建任务通知（`CaptureTasksStarted`），v6 增加局域网配对请求 / 发现事件
-/// （`LinkPairingRequestsChanged` / `LinkDiscoveredChanged`），v7 增加 CloudConnectionChanged。
-pub const PROTOCOL_VERSION: u32 = 7;
+/// （`LinkPairingRequestsChanged` / `LinkDiscoveredChanged`），v7 增加 CloudConnectionChanged，
+/// v8 增加应用内更新状态（`UpdateChanged` / `AgentSnapshot.update`），v9 增加「文件已存在」
+/// 交互选择（`SelectionKind::FileExists` / `SelectionOutcome::FileExists`）。
+pub const PROTOCOL_VERSION: u32 = 9;
 /// 旧客户端不能解析新增事件，必须在握手时拒绝混用而非运行中断连。
-pub const MIN_PROTOCOL_VERSION: u32 = 7;
+pub const MIN_PROTOCOL_VERSION: u32 = 9;
 /// 服务收到 `system.shutdown` 而退出时的 WebSocket 关闭原因：客户端据此停止重连与重拉。
 pub const CLOSE_REASON_SERVICE_QUIT: &str = "service-quit";
+/// headless 服务为应用更新而重启时的 WebSocket 关闭原因：浏览器客户端保持重连，
+/// 重连后服务版本变化即重新加载页面（SPA 内嵌于新二进制）。桌面形态的更新重启仍以
+/// [`CLOSE_REASON_SERVICE_QUIT`] 关闭，由 agent 退出后重新拉起桌面界面。
+pub const CLOSE_REASON_SERVICE_RESTART: &str = "service-restart";
 /// 产品版本：发布流水线经 `FLUXDOWN_APP_VERSION` 注入 tag 版本，本地构建回退到本 crate 的
 /// `CARGO_PKG_VERSION`。daemon / agent 对外自报版本、更新检查与诊断都以它为准，
 /// 各 crate 自己的 `Cargo.toml` 版本不代表产品版本。

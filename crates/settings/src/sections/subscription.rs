@@ -5,7 +5,7 @@ use std::collections::HashSet;
 use chrono::{Local, TimeZone as _};
 use fluxdown_protocol::method;
 use fluxdown_ui_components::{ButtonVariant, loading_button};
-use fluxdown_ui_theme::active_theme;
+use fluxdown_ui_theme::{CONTROL_HEIGHT, active_theme};
 use gpui::{
     App, AppContext as _, Entity, IntoElement as _, ParentElement, SharedString, Styled,
     Subscription, Window, px,
@@ -149,7 +149,8 @@ fn textarea_field(
             });
             let state = slot.read(cx).state.clone();
             Textarea::new(&state)
-                .h(px(120.))
+                // 文本区高度随行高增长：基准 120 + 6 行的行高增量（默认增量为 0）。
+                .h(px(120.) + (active_theme(cx).density().control - CONTROL_HEIGHT) * 6.)
                 .w_full()
                 .disabled(disabled)
                 .into_any_element()

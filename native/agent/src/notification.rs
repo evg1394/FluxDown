@@ -26,17 +26,17 @@ pub(crate) fn initialize() {
 pub fn handle_activation(args: &[String]) -> Option<Result<(), String>> {
     windows::handle_activation(args)
 }
-#[cfg(not(target_os = "macos"))]
+#[cfg(any(windows, target_os = "linux"))]
 use std::{path::Path, sync::OnceLock};
 
 /// 通知显示的应用名。
-#[cfg(not(target_os = "macos"))]
+#[cfg(any(windows, target_os = "linux"))]
 const APP_NAME: &str = "FluxDown";
 
 /// 通知图标（写入 agent 数据目录，供 Windows `IconUri` 与 Linux 通知图标使用）。
-#[cfg(any(windows, all(unix, not(target_os = "macos"))))]
+#[cfg(any(windows, target_os = "linux"))]
 const ICON_BYTES: &[u8] = include_bytes!("../../../assets/logo/fluxdown_logo.png");
-#[cfg(any(windows, all(unix, not(target_os = "macos"))))]
+#[cfg(any(windows, target_os = "linux"))]
 const ICON_FILE_NAME: &str = "notification_icon.png";
 
 /// Windows toast 的 AppUserModelID。刻意不与 Flutter 版（`Com.FluxDown.App`，注册表键
@@ -46,24 +46,24 @@ const ICON_FILE_NAME: &str = "notification_icon.png";
 const WINDOWS_AUMID: &str = "dev.zerx.fluxdown";
 
 /// Linux 打包安装的桌面入口 id（`packaging/linux/com.fluxdown.app.desktop`，不含后缀）。
-#[cfg(all(unix, not(target_os = "macos")))]
+#[cfg(target_os = "linux")]
 const LINUX_DESKTOP_ENTRY: &str = "com.fluxdown.app";
 
 /// 发送系统通知；平台应用身份在首次发送时一次性准备。
 pub struct Notifier {
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(any(windows, target_os = "linux"))]
     data_dir: PathBuf,
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(any(windows, target_os = "linux"))]
     prepared: OnceLock<Prepared>,
 }
 
 /// 首次发送前准备好的平台身份。
-#[cfg(not(target_os = "macos"))]
+#[cfg(any(windows, target_os = "linux"))]
 struct Prepared {
     #[cfg(windows)]
     identity: Result<(), String>,
     /// 已落盘的通知图标（写入失败为 `None`，此时退回主题图标名）。
-    #[cfg(all(unix, not(target_os = "macos")))]
+    #[cfg(target_os = "linux")]
     icon: Option<PathBuf>,
 }
 
@@ -71,12 +71,12 @@ impl Notifier {
     /// `data_dir`：Windows / Linux 的通知身份资源与操作令牌目录。
     #[must_use]
     pub fn new(data_dir: PathBuf) -> Self {
-        #[cfg(target_os = "macos")]
+        #[cfg(not(any(windows, target_os = "linux")))]
         let _ = data_dir;
         Self {
-            #[cfg(not(target_os = "macos"))]
+            #[cfg(any(windows, target_os = "linux"))]
             data_dir,
-            #[cfg(not(target_os = "macos"))]
+            #[cfg(any(windows, target_os = "linux"))]
             prepared: OnceLock::new(),
         }
     }
@@ -133,7 +133,7 @@ impl Notifier {
         windows::show(&self.data_dir, title, body, actions)
     }
 
-    #[cfg(all(unix, not(target_os = "macos")))]
+    #[cfg(target_os = "linux")]
     fn send(
         &self,
         title: &str,
@@ -148,6 +148,18 @@ impl Notifier {
             .show()
             .map(|_| ())
             .map_err(|error| error.to_string())
+    }
+
+    /// Android / iOS：通知由宿主应用经平台 API 发送（前台服务通知 / UserNotifications），
+    /// agent 进程内没有可用的系统通知后端。
+    #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
+    fn send(
+        &self,
+        _title: &str,
+        _body: &str,
+        _actions: Option<&CompletionActions>,
+    ) -> Result<(), String> {
+        Err("system notifications are managed by the host application on this platform".to_owned())
     }
 }
 
@@ -201,7 +213,7 @@ pub fn availability() -> NotificationAvailability {
 }
 
 /// 询问会话总线上的通知服务（阻塞；调用方放进 `spawn_blocking`）。
-#[cfg(all(unix, not(target_os = "macos")))]
+#[cfg(target_os = "linux")]
 #[must_use]
 pub fn availability() -> NotificationAvailability {
     match notify_rust::get_server_information() {
@@ -211,6 +223,13 @@ pub fn availability() -> NotificationAvailability {
         )),
         Err(error) => NotificationAvailability::Unavailable(error.to_string()),
     }
+}
+
+/// 移动平台的通知授权由宿主应用管理，agent 无法探测。
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
+#[must_use]
+pub fn availability() -> NotificationAvailability {
+    NotificationAvailability::Unverifiable
 }
 
 /// 只读查询 FluxDown helper 的 macOS 通知授权，不触发权限弹窗。
@@ -233,14 +252,14 @@ fn prepare(data_dir: &Path) -> Prepared {
     }
 }
 
-#[cfg(all(unix, not(target_os = "macos")))]
+#[cfg(target_os = "linux")]
 fn prepare(data_dir: &Path) -> Prepared {
     Prepared {
         icon: write_icon(data_dir),
     }
 }
 
-#[cfg(all(unix, not(target_os = "macos")))]
+#[cfg(target_os = "linux")]
 fn apply_platform_identity(notification: &mut notify_rust::Notification, prepared: &Prepared) {
     let icon = prepared.icon.as_deref().map_or_else(
         || LINUX_DESKTOP_ENTRY.to_owned(),
@@ -254,7 +273,7 @@ fn apply_platform_identity(notification: &mut notify_rust::Notification, prepare
 }
 
 /// 把内嵌图标写到数据目录（内容相同则不重写）；失败返回 `None`。
-#[cfg(any(windows, all(unix, not(target_os = "macos"))))]
+#[cfg(any(windows, target_os = "linux"))]
 fn write_icon(data_dir: &Path) -> Option<PathBuf> {
     let path = data_dir.join(ICON_FILE_NAME);
     if std::fs::read(&path).is_ok_and(|existing| existing == ICON_BYTES) {

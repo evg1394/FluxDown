@@ -1,26 +1,13 @@
-// 任务表 / 卡片共用的文案与映射（状态文案、并发详情、类型图标）。
+// 任务表 / 卡片共用的文案与映射（状态文案、并发详情、类别名）。
 
-import { AppWindow, Disc3, File, FileArchive, FileImage, FileMusic, FilePlay, FileText, Smartphone } from 'lucide-react'
-import type { LucideIcon } from 'lucide-react'
-import { activeTransfers, formatBytes, MAX_ETA_SECS } from '../model/task'
-import type { DownloadTaskView, TaskKind, TaskState } from '../model/task'
+import type { FileKind } from '../../../lib/icon-pack'
+import { activeTransfers, formatBytes, MAX_ETA_SECS, percentLabel, sourceSite } from '../model/task'
+import type { DownloadTaskView, TaskState } from '../model/task'
 import { stateLabel } from '../state'
 
 export type Translate = (key: string, params?: Record<string, string | number>) => string
 
-export const KIND_ICON: Record<TaskKind, LucideIcon> = {
-  video: FilePlay,
-  audio: FileMusic,
-  document: FileText,
-  image: FileImage,
-  archive: FileArchive,
-  diskImage: Disc3,
-  application: AppWindow,
-  mobile: Smartphone,
-  other: File,
-}
-
-const KIND_LABEL_KEY: Record<TaskKind, string> = {
+const KIND_LABEL_KEY: Record<FileKind, string> = {
   video: 'categoryVideo',
   audio: 'categoryAudio',
   document: 'categoryDocument',
@@ -32,7 +19,7 @@ const KIND_LABEL_KEY: Record<TaskKind, string> = {
   other: 'categoryOther',
 }
 
-export const kindLabel = (t: Translate, kind: TaskKind): string => t(KIND_LABEL_KEY[kind])
+export const kindLabel = (t: Translate, kind: FileKind): string => t(KIND_LABEL_KEY[kind])
 
 export const STATUS_TEXT: Record<TaskState, string> = {
   downloading: 'text-status-downloading',
@@ -89,6 +76,40 @@ export function statusDetail(t: Translate, view: DownloadTaskView): string | nul
       const line = view.errorMessage.split('\n', 1)[0]?.trim() ?? ''
       return line === '' ? null : line
     }
+    default:
+      return null
+  }
+}
+
+/**
+ * 宽松密度主列元信息行（移植 task_table.rs 的 `relaxed_meta`）：未完成为「已下 / 总量 · 百分比
+ * [· 速度 · 剩余]」，完成为「大小 · 类别」，末尾接来源域名；未知字段直接省略。
+ */
+export function relaxedMeta(t: Translate, view: DownloadTaskView): string {
+  const parts: string[] = []
+  if (view.state === 'completed') {
+    if (view.sizeBytes > 0) parts.push(formatBytes(view.sizeBytes))
+    parts.push(kindLabel(t, view.kind))
+  } else {
+    parts.push(bytesProgress(view), percentLabel(view.progress))
+    if (view.state === 'downloading') {
+      if (view.speed !== null && view.speed > 0) parts.push(`${formatBytes(view.speed)}/s`)
+      if (view.etaSeconds !== null && view.etaSeconds <= MAX_ETA_SECS) parts.push(formatEta(t, view.etaSeconds))
+    }
+  }
+  const site = sourceSite(view)
+  if (site !== '') parts.push(site)
+  return parts.join(' · ')
+}
+
+/** 宽松密度状态列第二行：只给主列没有的信息（并发 / 排队 / 失败原因）；主文案只用状态名。 */
+export function relaxedStatusDetail(t: Translate, view: DownloadTaskView): string | null {
+  switch (view.state) {
+    case 'downloading':
+      return transferDetail(t, view)
+    case 'failed':
+    case 'pending':
+      return statusDetail(t, view)
     default:
       return null
   }

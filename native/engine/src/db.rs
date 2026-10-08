@@ -98,6 +98,9 @@ CREATE TABLE IF NOT EXISTS tasks (
     audio_url TEXT NOT NULL DEFAULT '',
     file_missing INTEGER NOT NULL DEFAULT 0,
     range_verified INTEGER NOT NULL DEFAULT 1,
+    name_inferred INTEGER NOT NULL DEFAULT 0,
+    resp_name TEXT NOT NULL DEFAULT '',
+    resp_mime TEXT NOT NULL DEFAULT '',
     queue_order INTEGER NOT NULL DEFAULT 0,
     uploaded_bytes BIGINT NOT NULL DEFAULT 0,
     uploaded_at_completion BIGINT NOT NULL DEFAULT 0,
@@ -298,6 +301,9 @@ CREATE TABLE IF NOT EXISTS tasks (
     audio_url TEXT NOT NULL DEFAULT '',
     file_missing INTEGER NOT NULL DEFAULT 0,
     range_verified INTEGER NOT NULL DEFAULT 1,
+    name_inferred INTEGER NOT NULL DEFAULT 0,
+    resp_name TEXT NOT NULL DEFAULT '',
+    resp_mime TEXT NOT NULL DEFAULT '',
     queue_order INTEGER NOT NULL DEFAULT 0,
     uploaded_bytes BIGINT NOT NULL DEFAULT 0,
     uploaded_at_completion BIGINT NOT NULL DEFAULT 0,
@@ -994,6 +1000,15 @@ impl Db {
         // 默认 1 = 旧任务/probe 任务行为完全不变。
         self.add_column_if_missing("tasks", "range_verified", "INTEGER NOT NULL DEFAULT 1")
             .await?;
+        // 文件名来源：1 = 引擎自行推断（探测所得但非 Content-Disposition、URL 兜底），
+        // HTTP 完成期可按实际响应证据精修；0 = 显式名 / CD 名 / 用户改名，永不改写。
+        self.add_column_if_missing("tasks", "name_inferred", "INTEGER NOT NULL DEFAULT 0")
+            .await?;
+        // 实际 GET 响应观察到的命名证据（CD 解出的名字 / Content-Type），先写者胜。
+        self.add_column_if_missing("tasks", "resp_name", "TEXT NOT NULL DEFAULT ''")
+            .await?;
+        self.add_column_if_missing("tasks", "resp_mime", "TEXT NOT NULL DEFAULT ''")
+            .await?;
         // 插件惰性解析：仅存 resolver 插件 ID（不存解析结果，见 plugin 系统设计）。
         self.add_column_if_missing("tasks", "resolver_plugin_id", "TEXT NOT NULL DEFAULT ''")
             .await?;
@@ -1051,6 +1066,10 @@ impl Db {
         // 跳过 HostSelection 弹窗、直接取默认值。BT 文件选择不读此列——建任务
         // 时已按「全部文件」写 bt_selected_files（既有三态语义，见 create_task）。
         self.add_column_if_missing("tasks", "unattended", "INTEGER NOT NULL DEFAULT 0")
+            .await?;
+        // 文件已存在询问的逐任务决定（'' / rename / overwrite / skip）：
+        // 绑定「询问时的文件名」语义由 manager 保证；重命名/改目录/重新下载时清空。
+        self.add_column_if_missing("tasks", "exists_decision", "TEXT NOT NULL DEFAULT ''")
             .await?;
         // BT 做种：上传量累计 / 完成时基线 / 做种状态机 / 起始时间
         // （见 bt_seeding.rs）。旧库缺列时所有做种写库与 TASK_COLUMNS
@@ -1699,16 +1718,6 @@ impl Db {
         Ok(uploaded)
     }
 
-    /// 读取任务已下载字节数。
-    pub async fn get_task_downloaded_bytes(&self, task_id: &str) -> Result<i64, DbError> {
-        let downloaded: i64 =
-            sqlx::query_scalar("SELECT downloaded_bytes FROM tasks WHERE id = $1")
-                .bind(task_id)
-                .fetch_one(&self.pool)
-                .await?;
-        Ok(downloaded)
-    }
-
     pub async fn update_task_file_info(
         &self,
         id: &str,
@@ -1825,24 +1834,45 @@ impl Db {
         Ok((effective_total, size_changed))
     }
 
-    /// 更新任务文件名（仅当任务文件名为空时，防止覆盖用户自定义名称）
+    /// 更新任务文件名（仅当任务文件名为空时，防止覆盖用户自定义名称），同时记录名字
+    /// 来源 `name_inferred`（见 schema migration 注释）。
     pub async fn update_task_file_name(
         &self,
         task_id: &str,
         file_name: &str,
+        inferred: bool,
     ) -> Result<(), DbError> {
         sqlx::query(
-            "UPDATE tasks SET file_name = $1 WHERE id = $2 AND (file_name = '' OR file_name IS NULL)",
+            "UPDATE tasks SET file_name = $1, name_inferred = $2 \
+             WHERE id = $3 AND (file_name = '' OR file_name IS NULL)",
         )
         .bind(file_name)
+        .bind(if inferred { 1i32 } else { 0i32 })
         .bind(task_id)
         .execute(&self.pool)
         .await?;
         Ok(())
     }
 
-    /// 无条件改写任务文件名（用户显式重命名）。与 [`Self::update_task_file_name`]
-    /// 不同：后者仅在名为空时补写（探测路径），本方法用于用户重命名，直接覆盖。
+    /// 改写文件名并同时记录来源 `name_inferred`（单条 UPDATE，二者不会分离）。用户
+    /// 显式改名传 `false`：完成期不再按响应证据精修。
+    pub async fn set_task_file_name_with_source(
+        &self,
+        task_id: &str,
+        file_name: &str,
+        inferred: bool,
+    ) -> Result<(), DbError> {
+        sqlx::query("UPDATE tasks SET file_name = $1, name_inferred = $2 WHERE id = $3")
+            .bind(file_name)
+            .bind(if inferred { 1i32 } else { 0i32 })
+            .bind(task_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// 无条件改写任务文件名，保留 `name_inferred`（引擎侧改名：启动序幕的 dedup、
+    /// HLS/DASH 扩展名归一化）。来源随名字一起变时用 [`Self::set_task_file_name_with_source`]。
     pub async fn set_task_file_name(&self, task_id: &str, file_name: &str) -> Result<(), DbError> {
         sqlx::query("UPDATE tasks SET file_name = $1 WHERE id = $2")
             .bind(file_name)
@@ -2716,6 +2746,7 @@ impl Db {
             ("auto_check_update", "true"),
             // 匿名使用统计（每日活跃事件）；首装事件由 Dart 侧一次性上报，不受此开关控制。
             ("analytics_enabled", "true"),
+            ("bt_enabled", "true"),
             ("bt_enable_dht", "true"),
             ("bt_enable_upnp", "true"),
             ("bt_port_start", "6881"),
@@ -3044,29 +3075,6 @@ impl Db {
         Ok(())
     }
 
-    /// Update only the end_byte of a segment (used when a segment is shrunk by a split).
-    ///
-    /// NOTE: Currently unused — `persist_split` handles both child upsert and
-    /// parent shrink atomically. Kept for potential future use.
-    #[allow(dead_code)]
-    pub async fn update_segment_end_byte(
-        &self,
-        task_id: &str,
-        segment_index: i32,
-        end_byte: i64,
-    ) -> Result<(), DbError> {
-        sqlx::query(
-            "UPDATE task_segments SET end_byte = $1
-             WHERE task_id = $2 AND segment_index = $3",
-        )
-        .bind(end_byte)
-        .bind(task_id)
-        .bind(segment_index)
-        .execute(&self.pool)
-        .await?;
-        Ok(())
-    }
-
     /// Atomically persist a segment split: upsert the new child segment **and**
     /// shrink the parent's `end_byte` in a single transaction.
     ///
@@ -3210,6 +3218,59 @@ impl Db {
         Ok(row
             .map(|r| r.try_get::<i32, _>("range_verified").unwrap_or(1) != 0)
             .unwrap_or(true))
+    }
+
+    /// 记录实际响应的命名证据：`name` = Content-Disposition 解出的名字（空 = 无），
+    /// `mime` = Content-Type。逐字段先写者胜——多段下载每段首响应都会调用，只有
+    /// 第一次写入的非空值生效。
+    pub async fn record_task_response_naming(
+        &self,
+        id: &str,
+        name: &str,
+        mime: &str,
+    ) -> Result<(), DbError> {
+        if name.is_empty() && mime.is_empty() {
+            return Ok(());
+        }
+        sqlx::query(
+            "UPDATE tasks SET \
+             resp_name = CASE WHEN resp_name = '' THEN $1 ELSE resp_name END, \
+             resp_mime = CASE WHEN resp_mime = '' THEN $2 ELSE resp_mime END \
+             WHERE id = $3",
+        )
+        .bind(name)
+        .bind(mime)
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// 清空响应命名证据（换下载地址后旧响应不再代表新资源）。
+    pub async fn clear_task_response_naming(&self, id: &str) -> Result<(), DbError> {
+        sqlx::query("UPDATE tasks SET resp_name = '', resp_mime = '' WHERE id = $1")
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// 读取 `(name_inferred, resp_name, resp_mime)`；任务不存在时为「显式、无证据」，
+    /// 完成期据此不做任何改名。
+    pub async fn get_task_naming_state(&self, id: &str) -> Result<(bool, String, String), DbError> {
+        let row =
+            sqlx::query("SELECT name_inferred, resp_name, resp_mime FROM tasks WHERE id = $1")
+                .bind(id)
+                .fetch_optional(&self.pool)
+                .await?;
+        match row {
+            Some(row) => Ok((
+                row.try_get::<i32, _>("name_inferred")? != 0,
+                row.try_get("resp_name")?,
+                row.try_get("resp_mime")?,
+            )),
+            None => Ok((false, String::new(), String::new())),
+        }
     }
 
     /// 设置任务的 resolver 插件 ID（空串 = 清除，供「忽略插件重试」逃生舱）。
@@ -3689,6 +3750,28 @@ impl Db {
         Ok(row
             .map(|r| r.try_get::<i32, _>("unattended").unwrap_or(0) != 0)
             .unwrap_or(false))
+    }
+
+    /// 读取逐任务「文件已存在」决定（'' / rename / overwrite / skip）；任务不存在按 '' 处理。
+    pub async fn get_exists_decision(&self, task_id: &str) -> Result<String, DbError> {
+        let row = sqlx::query("SELECT exists_decision FROM tasks WHERE id = $1")
+            .bind(task_id)
+            .fetch_optional(&self.pool)
+            .await?;
+        match row {
+            Some(r) => Ok(r.try_get::<String, _>("exists_decision")?),
+            None => Ok(String::new()),
+        }
+    }
+
+    /// 写入逐任务「文件已存在」决定；空串 = 清除。
+    pub async fn set_exists_decision(&self, task_id: &str, decision: &str) -> Result<(), DbError> {
+        sqlx::query("UPDATE tasks SET exists_decision = $1 WHERE id = $2")
+            .bind(decision)
+            .bind(task_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
     }
 
     /// 组内成员任务 ID，按启动顺序排列（`queue_order` → `created_at`）。
@@ -4463,15 +4546,6 @@ impl Db {
             .execute(&self.pool)
             .await?;
         Ok(())
-    }
-
-    /// 读任务的 RSS 溯源指针（空 = 非 RSS 来源）。
-    pub async fn task_rss_source(&self, task_id: &str) -> Result<String, DbError> {
-        let v: Option<String> = sqlx::query_scalar("SELECT rss_source_id FROM tasks WHERE id = $1")
-            .bind(task_id)
-            .fetch_optional(&self.pool)
-            .await?;
-        Ok(v.unwrap_or_default())
     }
 
     /// 写入展示用的原始来源链接（`url` 被换成本地哨兵时的补偿）。

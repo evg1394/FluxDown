@@ -1,9 +1,10 @@
 // 下载页对话框宿主：由 DownloadsPage 挂载一次，渲染 store 里所有对话框，
-// 并根据快照自动弹出：daemon 的交互选择请求（HLS / BT / 变体）与 agent 的待确认外部捕获。
+// 并根据快照自动弹出：daemon 的交互选择请求（HLS / BT / 变体 / 文件已存在聚合）与 agent 的待确认外部捕获。
 
 import { useEffect } from 'react'
 import { useAgent, useDaemon } from '../../../lib/rpc'
 import type { PendingCaptureDto, SelectionRequestDto } from '../../../lib/rpc'
+import { FileConflictDialog } from './FileConflictDialog'
 import { GroupDetailDialog } from './GroupDetailDialog'
 import { NewDownloadDialog } from './NewDownloadDialog'
 import { QueueManagerDialog } from './QueueManagerDialog'
@@ -33,6 +34,7 @@ export function DownloadDialogsHost() {
       {state.rename ? <RenameDialog key={state.rename} taskId={state.rename} /> : null}
       {state.changeUrl ? <ChangeUrlDialog key={state.changeUrl} taskId={state.changeUrl} /> : null}
       <SelectionHost requests={selections} />
+      <FileConflictDialog />
     </>
   )
 }

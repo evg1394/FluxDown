@@ -16,6 +16,7 @@ mod command_palette;
 mod downloads_port;
 mod instance_ipc;
 mod launch;
+mod legacy_themes;
 mod lifecycle;
 mod logging;
 mod menus;
@@ -26,7 +27,7 @@ mod progress_windows;
 mod service_bootstrap;
 mod session;
 mod settings_port;
-mod theme_library;
+mod update_notices;
 mod windows;
 
 use std::process::ExitCode;

@@ -14,6 +14,7 @@ pub(crate) mod download;
 pub(crate) mod ed2k;
 mod font_family;
 pub(crate) mod general;
+mod icon_pack;
 pub(crate) mod notify;
 pub(crate) mod proxy;
 pub(crate) mod rate_limit;

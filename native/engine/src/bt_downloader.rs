@@ -96,17 +96,6 @@ impl TorrentSource {
         }
     }
 
-    /// URL string for DB storage.  Magnet links store the URI directly.
-    /// Torrent file sources store a sentinel `torrent-file://` URL since the
-    /// actual content is persisted separately in the `torrent_file_bytes` column.
-    #[allow(dead_code)]
-    pub fn url_for_db(&self) -> &str {
-        match self {
-            TorrentSource::Magnet(url) => url,
-            TorrentSource::TorrentFileBytes(_) => "torrent-file://local",
-        }
-    }
-
     /// Lowercase hex info-hash of this source, if derivable.
     ///
     /// Magnet links carry it in `xt=urn:btih:`; .torrent bytes are parsed
@@ -127,7 +116,7 @@ impl TorrentSource {
 
 /// Extract the `dn=` (display name) parameter from a magnet URI, if present.
 ///
-/// The decoded value is sanitized via `crate::downloader::sanitize_filename`
+/// The decoded value is sanitized via `crate::naming::sanitize_filename`
 /// to strip path separators and other illegal characters (`/`, `\`, `:`, …),
 /// matching `meta_prober::extract_dn_from_magnet`.  Without this, an illegal
 /// `dn=` would flow into the DB display name and the metadata-failure fallback
@@ -145,7 +134,7 @@ pub(crate) fn magnet_display_name(url: &str) -> Option<String> {
             if decoded.is_empty() {
                 None
             } else {
-                Some(crate::downloader::sanitize_filename(&decoded))
+                Some(crate::naming::sanitize_filename(&decoded))
             }
         })
 }
@@ -170,17 +159,15 @@ fn urlencoding_decode(input: &str) -> String {
     let len = bytes.len();
     let mut i = 0;
 
-    // Flush accumulated percent-encoded bytes as UTF-8 into `out`.
-    // 优先 UTF-8，失败时回退到 GBK（应对老旧中文资源库 magnet 中
-    // 的 GBK 编码 dn=），双失败才使用 replacement char。
+    // Flush accumulated percent-encoded bytes into `out`.
+    // 优先 UTF-8，否则旧式字节打分解码（应对老旧中文资源库 magnet 中的 GBK 编码
+    // dn=），恒成功。
     let flush = |buf: &mut Vec<u8>, out: &mut String| {
         if !buf.is_empty() {
-            match crate::downloader::decode_bytes_utf8_or_gbk(buf) {
-                Ok(s) => out.push_str(&s),
-                Err(_) => {
-                    out.push(char::REPLACEMENT_CHARACTER);
-                }
-            }
+            out.push_str(&crate::naming::decode_legacy_bytes(
+                buf,
+                crate::naming::NameHints::default(),
+            ));
             buf.clear();
         }
     };
@@ -215,7 +202,7 @@ fn urlencoding_decode(input: &str) -> String {
                 // mangle multi-byte UTF-8 by re-interpreting each byte as a
                 // Latin-1 code point) so the trailing sequence is decoded
                 // together with surrounding literal bytes by
-                // `decode_bytes_utf8_or_gbk`.  0x25 ('%') is valid ASCII and
+                // `decode_legacy_bytes`.  0x25 ('%') is valid ASCII and
                 // safely passes through UTF-8 decoding unchanged.
                 while i < len {
                     bytes_buf.push(bytes[i]);
@@ -404,6 +391,7 @@ fn probe_listener_port(port: u16) -> std::io::Result<()> {
 /// User-configurable BT session settings, loaded from the DB config table.
 #[derive(Debug, Clone)]
 pub struct BtConfig {
+    pub enabled: bool,
     pub enable_dht: bool,
     pub enable_upnp: bool,
     pub port_start: u16,
@@ -439,6 +427,7 @@ pub struct BtConfig {
 impl Default for BtConfig {
     fn default() -> Self {
         Self {
+            enabled: true,
             enable_dht: true,
             enable_upnp: true,
             port_start: 6881,
@@ -2400,7 +2389,7 @@ fn compute_completion_layout(
         return Ok(None);
     }
 
-    let torrent_root = crate::downloader::sanitize_filename(torrent_root_name);
+    let torrent_root = crate::naming::sanitize_filename(torrent_root_name);
     let desired_container = if custom_name.is_empty() {
         torrent_root.as_str()
     } else {

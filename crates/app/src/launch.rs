@@ -26,6 +26,9 @@ pub struct LaunchOptions {
     pub torrent_files: Vec<PathBuf>,
     /// agent 静默建成单个任务后拉起界面时携带：该任务按用户开始处理（弹进度窗口）。
     pub progress_task: Option<String>,
+    /// 应用内更新完成后由 agent / 安装器拉起：旧桌面进程仍在退出，需等其释放单实例锁，
+    /// 且就绪后提示已更新（不影响「普通启动」判定）。
+    pub after_update: bool,
 }
 
 impl LaunchOptions {
@@ -39,6 +42,7 @@ impl LaunchOptions {
                 "--capture" => options.capture_only = true,
                 "--settings" => options.settings = true,
                 "--activate-existing" => options.activate_existing = true,
+                "--after-update" => options.after_update = true,
                 "--progress-task" => {
                     options.progress_task = args.next().filter(|task_id| !task_id.is_empty());
                 }
@@ -144,6 +148,9 @@ mod tests {
         assert!(options.capture_only);
         assert_eq!(options.progress_task.as_deref(), Some("task-1"));
         assert!(options.torrent_files.is_empty());
+        let options = LaunchOptions::from_args(["--after-update"].map(str::to_owned));
+        assert!(options.after_update);
+        assert!(options.is_plain(), "after-update stays a plain launch");
         let file = std::env::temp_dir().join(format!("fluxdown-{}.torrent", std::process::id()));
         std::fs::write(&file, b"d8:announce0:e").expect("write");
         let options = LaunchOptions::from_args([file.display().to_string()]);

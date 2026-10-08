@@ -8,7 +8,8 @@
     // 仅供 `bun test` 解析别名（bun 不跟随 references）；与 tsconfig.app.json 保持一致。
     "paths": {
       "@i18n-assets/*": ["../assets/i18n/*"],
-      "@gpui-theme/*": ["../website-v2/src/lib/gpui-theme/*"]
+      "@gpui-theme/*": ["../website-v2/src/lib/gpui-theme/*"],
+      "@icon-packs/*": ["../assets/icon-packs/*"]
     }
   }
 }
