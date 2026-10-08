@@ -2811,5 +2811,15 @@
   "mobileBadgeCompletedCount": "Завершены: {count}",
   "mobileBadgeErrorCount": "Ошибки: {count}",
   "mobileBadgeRemoteTasksCount": "Удалённые задачи: {count}",
-  "mobileSpeedPresets": "Предустановки скорости"
+  "mobileSpeedPresets": "Предустановки скорости",
+  "mobileTaskGoneSub": "Возможно, она была удалена. Вернитесь к списку.",
+  "mobileUploadChip": "Отдача",
+  "mobileSettingsSwitchHost": "Сменить хост: {name}",
+  "mobileRssSwitchHostDesc": "Сменить хост: {name}",
+  "mobileDevicesSwitchHost": "Сменить хост",
+  "mobileRssSelect": "Выбрать",
+  "mobileRssKeepEditing": "Продолжить редактирование",
+  "mobilePickThisFolder": "Выбрать",
+  "mobileNotifSelection": "Запросы выбора",
+  "mobileDiagLinkMissing": "Не заявлено"
 }
