@@ -1,6 +1,4 @@
-//! 「新建下载」表单：字段、顺序与提交语义与
-//! `lib/src/widgets/new_download_dialog.dart` 逐条对齐；纯规则见
-//! [`crate::model::new_download`]。
+//! 「新建下载」表单：字段、校验与提交；纯规则见 [`crate::model::new_download`]。
 //!
 //! 浏览器扩展 / NMH 的外部捕获也在本表单确认：捕获条目以链接行呈现（可与手填链接混合），
 //! 提交时经 `agent.capture.resolve` 确认，Cookie / 请求头 / 请求体等上下文由 agent 合并；
@@ -16,6 +14,7 @@ use std::{
 };
 
 use crate::{
+    components::threads_risk::threads_risk_callout,
     controller::{
         DownloadsCommand, DownloadsPort, DownloadsResult, LAST_DOWNLOAD_TARGET_PREF,
         LAST_SAVE_DIR_PREF, REMEMBER_LAST_SAVE_DIR_PREF,
@@ -62,8 +61,8 @@ use gpui_component::{
     v_flex,
 };
 
-/// 「自定义线程数」数字输入宽度。
-const CUSTOM_THREADS_WIDTH: f32 = 96.;
+/// 线程数选「自定义」时下拉收窄到的定宽（只需容纳「自定义」），右侧输入框吃满剩余宽度。
+const CUSTOM_THREADS_DROPDOWN_WIDTH: f32 = 104.;
 /// 预设下拉（UA、校验算法）定宽，右侧输入框吃满剩余宽度。
 const PRESET_DROPDOWN_WIDTH: f32 = 140.;
 /// 请求头名称列宽。
@@ -129,7 +128,7 @@ pub fn new_download_targets(
     other_devices(cloud, linked, cloud_current, service_current)
 }
 
-/// 与 Dart 一致：偏好 `remember_last_save_dir` 开启且有记录时沿用上次目录，否则用全局
+/// 偏好 `remember_last_save_dir` 开启且有记录时沿用上次目录，否则用全局
 /// 默认（`default_save_dir`，空则 daemon 运行时目录）；队列优先 `selected_queue`，其次配置
 /// `default_queue_id`，最后主队列；线程数优先队列 `default_segments`，其次全局配置。
 pub(crate) fn build_new_download_context(
@@ -197,6 +196,15 @@ pub(crate) fn build_new_download_context(
     }
 }
 
+/// 「自定义线程数」输入框的初值：默认分段数大于 0 时预填，否则留空。
+fn custom_threads_text(segments: i32) -> String {
+    if segments > 0 {
+        segments.to_string()
+    } else {
+        String::new()
+    }
+}
+
 /// 新建下载对话框的提交回调。
 pub type NewDownloadSubmit = Rc<dyn Fn(NewDownloadSubmission, &mut Window, &mut App)>;
 
@@ -206,7 +214,7 @@ struct HeaderRow {
     value: Entity<InputState>,
 }
 
-/// HTTP 认证框的站点凭据自动回填状态（规则同 Dart `_maybeAutofillSiteAuth`）。
+/// HTTP 认证框的站点凭据自动回填状态。
 #[derive(Default)]
 struct AuthAutofill {
     /// 两框当前值来自站点凭据自动回填（链接换站点时可被更新 / 清空）。
@@ -286,11 +294,7 @@ impl NewDownloadView {
         });
         let custom_threads = cx.new(|cx| {
             InputState::new(window, cx)
-                .default_value(if context.segments > 0 {
-                    context.segments.to_string()
-                } else {
-                    String::new()
-                })
+                .default_value(custom_threads_text(context.segments))
                 .placeholder(strings.threads_custom_hint.clone())
                 .validate(|text, _| text.chars().all(|c| c.is_ascii_digit()))
         });
@@ -373,16 +377,18 @@ impl NewDownloadView {
         cx.new(|cx| InputState::new(window, cx).placeholder(placeholder))
     }
 
-    /// 文案随语言切换；链接文本每次变化重新解析（驱动计数 / 批量态 / 按钮
-    /// 可用性），⌘/Ctrl+Enter 提交；单行输入框 Enter 提交；UA 手动编辑时反推预设。
+    /// 文案随语言切换（含输入框占位：它们只在创建时取一次文案）；链接文本每次变化重新解析
+    /// （驱动计数 / 批量态 / 按钮可用性），⌘/Ctrl+Enter 提交；单行输入框 Enter 提交；UA 手动
+    /// 编辑时反推预设。
     fn subscribe_inputs(
         &self,
         translator: &Entity<Translator>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        cx.observe(translator, |this, translator, cx| {
+        cx.observe_in(translator, window, |this, translator, window, cx| {
             this.strings = NewDownloadStrings::from_translator(translator.read(cx));
+            this.refresh_placeholders(window, cx);
             cx.notify();
         })
         .detach();
@@ -437,6 +443,42 @@ impl NewDownloadView {
             })
             .detach();
         }
+    }
+
+    /// 按当前语言重设全部输入框占位（打开表单时语言可能尚未从偏好恢复）。
+    fn refresh_placeholders(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let strings = &self.strings;
+        let inputs = [
+            (&self.save_dir, &strings.save_dir_placeholder),
+            (&self.custom_threads, &strings.threads_custom_hint),
+            (&self.rename, &strings.rename_placeholder),
+            (&self.http_user, &strings.http_auth_user),
+            (&self.http_password, &strings.http_auth_password),
+            (&self.custom_proxy, &strings.proxy_placeholder),
+            (&self.user_agent, &strings.user_agent_desc),
+            (&self.checksum, &strings.checksum_placeholder),
+        ]
+        .into_iter()
+        .chain(self.headers.iter().flat_map(|row| {
+            [
+                (&row.key, &strings.header_name),
+                (&row.value, &strings.header_value),
+            ]
+        }));
+        for (input, placeholder) in inputs {
+            input.update(cx, |input, cx| {
+                input.set_placeholder(placeholder.clone(), window, cx)
+            });
+        }
+        for (textarea, placeholder) in [
+            (&self.urls, &strings.url_placeholder),
+            (&self.cookie, &strings.cookie_placeholder),
+        ] {
+            textarea.update(cx, |textarea, cx| {
+                textarea.set_placeholder(placeholder.clone(), window, cx)
+            });
+        }
+        self.refresh_remote_placeholder(window, cx);
     }
 
     fn refresh_entries(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -734,6 +776,52 @@ impl NewDownloadView {
         cx.notify();
     }
 
+    /// 宿主拿到 daemon 数据后重投影的环境（冷启动由浏览器扩展唤起时，首个快照尚不带 daemon
+    /// 配置 / 队列 / 运行时目录，表单按空环境打开）：队列、手动代理等候选整体替换；保存目录与
+    /// 线程数只替换仍停在旧初值的（用户已改、捕获已指定的保持不动）。「下载到」名册与目标
+    /// 由 [`Self::set_targets`] 维护，这里不动。
+    pub fn refresh_context(
+        &mut self,
+        context: NewDownloadContext,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let NewDownloadContext {
+            save_dir,
+            queue_id,
+            segments,
+            queues,
+            manual_proxy_url,
+            ..
+        } = context;
+        if save_dir != self.context.save_dir
+            && *self.save_dir.read(cx).value() == *self.context.save_dir
+        {
+            let value = save_dir.clone();
+            self.save_dir
+                .update(cx, |input, cx| input.set_value(value, window, cx));
+        }
+        let previous_segments = self.context.segments;
+        if segments != previous_segments
+            && self.threads == ThreadChoice::from_segments(previous_segments)
+            && *self.custom_threads.read(cx).value() == *custom_threads_text(previous_segments)
+        {
+            self.threads = ThreadChoice::from_segments(segments);
+            self.custom_threads.update(cx, |input, cx| {
+                input.set_value(custom_threads_text(segments), window, cx)
+            });
+        }
+        if manual_proxy_url.is_empty() && self.proxy_choice == ProxyChoice::GlobalManual {
+            self.proxy_choice = ProxyChoice::FollowGlobal;
+        }
+        self.context.save_dir = save_dir;
+        self.context.queue_id = queue_id;
+        self.context.segments = segments;
+        self.context.queues = queues;
+        self.context.manual_proxy_url = manual_proxy_url;
+        cx.notify();
+    }
+
     fn segments(&self, cx: &App) -> i32 {
         match self.threads {
             ThreadChoice::Auto => 0,
@@ -754,7 +842,7 @@ impl NewDownloadView {
         map
     }
 
-    /// 草稿 → 请求（与 Dart `_startDownloadInner` 同序同规则）。
+    /// 草稿 → 请求选项。
     fn draft_options(&self, later: bool, queue_override: Option<String>, cx: &App) -> DraftOptions {
         let queue_id = queue_override.unwrap_or_else(|| {
             if later {
@@ -1402,7 +1490,7 @@ impl NewDownloadView {
         )
     }
 
-    /// 线程数：下拉铺满字段；选「自定义」时右侧追加数字输入。
+    /// 线程数：下拉铺满字段；选「自定义」时下拉收窄定宽，右侧数字输入吃满剩余宽度。
     fn render_threads(&self, cx: &mut Context<Self>) -> Div {
         let spacing = active_theme(cx).tokens().spacing;
         let mut options = vec![(ThreadChoice::Auto, self.strings.threads_auto.clone(), false)];
@@ -1426,22 +1514,30 @@ impl NewDownloadView {
             |this, choice, window, cx| this.set_threads(choice, window, cx),
             cx,
         );
+        let custom = self.threads == ThreadChoice::Custom;
+        let dropdown_slot = if custom {
+            div()
+                .flex_none()
+                .w(active_theme(cx).text_extent(CUSTOM_THREADS_DROPDOWN_WIDTH))
+        } else {
+            div().flex_1().min_w_0()
+        };
         let control = h_flex()
             .w_full()
             .gap(spacing.sm)
-            .child(div().flex_1().min_w_0().child(dropdown))
-            .when(self.threads == ThreadChoice::Custom, |this| {
+            .child(dropdown_slot.child(dropdown))
+            .when(custom, |this| {
                 this.child(
                     Input::new(&self.custom_threads)
                         .control(cx)
-                        .flex_none()
-                        .w(active_theme(cx).text_extent(CUSTOM_THREADS_WIDTH)),
+                        .flex_1()
+                        .min_w_0(),
                 )
             });
         form_field(self.strings.threads.clone(), control, None, cx)
     }
 
-    /// 文件名 | 线程数并排；批量隐藏文件名，全磁力隐藏线程数。
+    /// 文件名 | 线程数并排；批量隐藏文件名，全磁力隐藏线程数。线程数过高时下方展开风险提示。
     fn render_name_threads(&self, cx: &mut Context<Self>) -> Option<Div> {
         let mut fields = Vec::with_capacity(2);
         if !self.is_batch() {
@@ -1456,10 +1552,23 @@ impl NewDownloadView {
             );
         }
         // 分段数只对本机下载有意义；下发只带链接 / 文件名 / 保存目录。
-        if !self.all_magnet() && !self.is_remote() {
+        let show_threads = !self.all_magnet() && !self.is_remote();
+        if show_threads {
             fields.push(self.render_threads(cx).into_any_element());
         }
-        (!fields.is_empty()).then(|| form_row(fields, cx))
+        if fields.is_empty() {
+            return None;
+        }
+        let row = form_row(fields, cx);
+        if !show_threads {
+            return Some(row);
+        }
+        let risk = threads_risk_callout(
+            "new-download-threads-risk",
+            i64::from(self.segments(cx)),
+            self.translator.read(cx),
+        );
+        Some(v_flex().w_full().child(row).child(risk))
     }
 
     fn render_http_auth(&self, cx: &mut Context<Self>) -> Div {

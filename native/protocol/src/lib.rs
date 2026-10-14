@@ -4,6 +4,7 @@
 
 pub mod agent;
 pub mod capture_link;
+pub mod cloud_notify;
 pub mod daemon;
 pub mod daemon_config;
 mod digest;
@@ -13,6 +14,7 @@ pub mod handshake;
 pub mod method;
 pub mod rpc;
 pub mod settings;
+pub mod shell_open;
 pub mod task_activity;
 pub use task_activity::{
     TaskActivityDto, TaskActivityPage, TaskActivityQuery, TaskRuntimeDto, TaskSegmentDto,
@@ -40,6 +42,17 @@ pub use agent::{
     UpdateCheckParams, UpdateFailure, UpdateInstallKind, UpdateManualReason, UpdatePhase,
     UpdateStatusDto,
 };
+pub use cloud_notify::{
+    CLOUD_NOTIFY_EMAIL_MAX_ADDRESSES, CLOUD_NOTIFY_RECENT_DELIVERIES,
+    CloudNotifyChannelCreateParams, CloudNotifyChannelDto, CloudNotifyChannelIdParams,
+    CloudNotifyChannelUpdateParams, CloudNotifyDeliveriesPage, CloudNotifyDeliveriesParams,
+    CloudNotifyDeliveryDto, CloudNotifyEmailCodeParams, CloudNotifyEmailCodeResult,
+    CloudNotifyEmailVerifyParams, CloudNotifyKindDto, CloudNotifyOverviewDto,
+    CloudNotifyPrivacyParams, CloudNotifyReportingParams, CloudNotifyStateDto,
+    CloudNotifyTelegramBindDto, CloudNotifyTelegramBindStatusDto,
+    CloudNotifyTelegramBindStatusParams, CloudNotifyTestResult, CloudNotifyUsageDto, TaskNoticeDto,
+    TaskNoticeTaskDto,
+};
 pub use daemon::{
     ApiInfo, BtFileDto, CdnConfigApplyParams, CdnNodeDto, CdnReportAckParams, CdnReportLeaseDto,
     ChangeTaskUrlParams, ComponentFfmpegStatus, ComponentInstallParams, ComponentKind,
@@ -56,25 +69,27 @@ pub use daemon::{
     LinkPairApproveRequest, LinkPairBeginRequest, LinkPairBeginResponse, LinkPairConfirmOutcome,
     LinkPairConfirmRequest, LinkPairFinishRequest, LinkPairFinishResponse, LinkPairHelloRequest,
     LinkPairHelloResponse, LinkPairRevealRequest, LinkPairRevealResponse, LinkPingInfo,
-    LinkProbeRequest, LinkTaskRequest, LogFileDto, LogsResponse, MAIN_QUEUE_ID, MarketEntryDto,
-    MarketInstallRequest, MigrationAckParams, MoveQueueRequest, PluginAuthRequest,
-    PluginAuthResponse, PluginDto, PreviewItemDto, PreviewVariantDto, ProxyTestRequest,
-    ProxyTestResponse, QueueDto, QueuePositionDto, QueueScheduleRequest, RenameTaskRequest,
-    ReorderQueueRequest, RequestBody, ResolvePreviewRequest, ResolvePreviewResponse,
-    ResolveVariantOptionDto, ResultMessage, RssItemActionRequest, RssItemDto, RssSourceDto,
-    RssValidateRequest, RssValidateResponse, SegmentDetailDto, SelectionKind, SelectionOutcome,
-    SelectionRequestDto, SelectionResolutionDto, SetPluginEnabledRequest, SettingFieldDto,
-    SettingOptionDto, SetupRequest, SetupStatusResponse, SiteAuthCredentialDto,
-    SiteAuthDeleteParams, SiteAuthEntryDto, SiteAuthGetParams, SiteAuthMatchParams,
-    SiteAuthSaveRequest, StatsResponse, StorageProbeDto, StorageProbeFailure, StorageProbeRole,
-    StorageProbeTarget, SystemProxyDto, TaskDto, TokenResponse, TrackerSubRefreshResponse,
-    UpdateQueueRequest, WebhookDeliveriesResponse, WebhookDeliveryDto, WebhookPresetDto,
-    WebhookSimulateResponse, WebhookTestRequest, WebhookTestResponse, WsClientMsg, WsServerMsg,
+    LinkProbeParams, LinkProbeRequest, LinkProbeResult, LinkProbeVerdict, LinkTaskRequest,
+    LogFileDto, LogsResponse, MAIN_QUEUE_ID, MarketEntryDto, MarketInstallRequest,
+    MigrationAckParams, MoveQueueRequest, PluginAuthRequest, PluginAuthResponse, PluginDto,
+    PreviewItemDto, PreviewVariantDto, ProxyTestRequest, ProxyTestResponse, QueueDto,
+    QueuePositionDto, QueueScheduleRequest, RenameTaskRequest, ReorderQueueRequest, RequestBody,
+    ResolvePreviewRequest, ResolvePreviewResponse, ResolveVariantOptionDto, ResultMessage,
+    RssItemActionRequest, RssItemDto, RssSourceDto, RssValidateRequest, RssValidateResponse,
+    SegmentDetailDto, SelectionKind, SelectionOutcome, SelectionRequestDto, SelectionResolutionDto,
+    SetPluginEnabledRequest, SettingFieldDto, SettingOptionDto, SetupRequest, SetupStatusResponse,
+    SiteAuthCredentialDto, SiteAuthDeleteParams, SiteAuthEntryDto, SiteAuthGetParams,
+    SiteAuthMatchParams, SiteAuthSaveRequest, StatsResponse, StorageProbeDto, StorageProbeFailure,
+    StorageProbeRole, StorageProbeTarget, SystemProxyDto, TaskDto, TokenResponse,
+    TrackerSubRefreshResponse, UpdateQueueRequest, WebhookDeliveriesResponse, WebhookDeliveryDto,
+    WebhookPresetDto, WebhookSimulateResponse, WebhookTestRequest, WebhookTestResponse,
+    WsClientMsg, WsServerMsg,
 };
 pub use daemon_config::{
     BT_MSE_MODES, BT_SEED_LIMIT_OPERATORS, BT_SEED_THEN_ACTIONS, BT_SEED_TIME_UNITS,
     DAEMON_CONFIG_FIELDS, DaemonConfigError, DaemonConfigField, DaemonConfigKind,
-    FILE_EXISTS_BEHAVIORS, FILE_MISSING_ACTIONS, PROXY_MODES, PROXY_TYPES, daemon_config_default,
+    FILE_EXISTS_BEHAVIORS, FILE_MISSING_ACTIONS, HIGH_SEGMENTS_WARN_ABOVE, MAX_TASK_SEGMENTS,
+    PROXY_MODES, PROXY_TYPES, SEVERE_SEGMENTS_WARN_ABOVE, daemon_config_default,
     daemon_config_field, is_public_daemon_config_key, normalize_daemon_config_patch,
     normalize_daemon_config_value,
 };

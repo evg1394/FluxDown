@@ -76,7 +76,7 @@ object SettingsCatalog {
     val daemonFields: List<SettingField> = listOf(
         // 下载
         daemon("default_save_dir", text, ""),
-        daemon("default_segments", int(0, 64), "0"),
+        daemon("default_segments", int(0, 512), "0"),
         daemon("auto_max_connections", int(0, 128), "16"),
         daemon("cdn_multi_enabled", bool, "false"),
         daemon("cdn_max_nodes", int(0, 8), "0"),
@@ -99,6 +99,7 @@ object SettingsCatalog {
         daemon("bt_enabled", bool, "true"),
         daemon("bt_enable_dht", bool, "true"),
         daemon("bt_enable_upnp", bool, "true"),
+        daemon("bt_enable_utp", bool, "true"),
         daemon("bt_port_start", int(1, 65_535), "6881"),
         daemon("bt_port_end", int(1, 65_535), "6891"),
         daemon("bt_mse_mode", choice(btMseModes), "enabled"),
@@ -214,6 +215,7 @@ object SettingsCatalog {
         "bt_enabled" to "bt.enabled",
         "bt_enable_dht" to "bt.enable_dht",
         "bt_enable_upnp" to "bt.enable_upnp",
+        "bt_enable_utp" to "bt.enable_utp",
         "bt_custom_trackers" to "bt.custom_trackers",
         "bt_tracker_sub_enabled" to "bt.tracker_sub_enabled",
         "bt_tracker_sub_urls" to "bt.tracker_sub_urls",

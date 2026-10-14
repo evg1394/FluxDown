@@ -332,7 +332,7 @@ final class NotificationService: NSObject {
     @ObservationIgnored private var flushTask: Task<Void, Never>?
     @ObservationIgnored private var observers: [any NSObjectProtocol] = []
     @ObservationIgnored private var pendingIntent: NotificationIntent?
-    @ObservationIgnored private let log = Logger(subsystem: "com.fluxdown.FluxDown", category: "notifications")
+    @ObservationIgnored private let log = Logger(subsystem: "com.fluxdown.app", category: "notifications")
 
     private var center: UNUserNotificationCenter { .current() }
 

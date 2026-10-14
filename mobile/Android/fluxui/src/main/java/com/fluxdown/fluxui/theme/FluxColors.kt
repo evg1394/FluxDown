@@ -76,9 +76,13 @@ class FluxColors(
             0xFF07080A, 0xFF0B0D10, 0xFF101216, 0xFF15181D, 0xFF1B1E25, 0xFF232730,
             0xFF2F3440, 0xFF424857, 0xFF6B7183, 0xFF9298A8, 0xFFC3C7D2, 0xFFF1F2F5,
         ).map(::Color)
+        /**
+         * 纸面：带一丝冷调（OKLab 色相与品牌蓝同向、彩度 ≤ .02）的中性灰。暖黄纸面与蓝色强调色互相打架，
+         * 整屏发旧发灰；冷中性让白色玻璃面更干净、强调色更通透。各阶对 n1 的对比度与旧纸面逐阶持平（±0.1）。
+         */
         private val PaperRamp = longArrayOf(
-            0xFFF4F4F1, 0xFFEDEDE9, 0xFFE5E5E0, 0xFFDCDCD6, 0xFFD1D1CA, 0xFFC2C2BB,
-            0xFFA9A9A1, 0xFF8B8B83, 0xFF6B6B64, 0xFF4D4D47, 0xFF2E2E2A, 0xFF0F0F0D,
+            0xFFF4F5F7, 0xFFEDEEF1, 0xFFE5E7EB, 0xFFDCDFE4, 0xFFD0D4DA, 0xFFC1C5CD,
+            0xFFA6ABB5, 0xFF878D99, 0xFF676D79, 0xFF4A4F5A, 0xFF2B2F37, 0xFF0E1116,
         ).map(::Color)
         private val CategoryDark = longArrayOf(
             0xFFB28CFF, 0xFFFF8AD0, 0xFF6FB4FF, 0xFF5FE3A8, 0xFFFFB064, 0xFFE6D36A, 0xFF5CD6D6, 0xFF8E94A4,
@@ -89,17 +93,17 @@ class FluxColors(
             val canvas = ramp[0]
             val acc = resolveAccent(seed, dark, canvas)
             val w = Color.White
-            val inkRaw = if (dark) Color(0xFFF1F2F5) else Color(0xFF0F0F0D)
+            val inkRaw = if (dark) Color(0xFFF1F2F5) else Color(0xFF0E1116)
             val g = if (dark) floatArrayOf(.04f, .07f, .10f, .14f) else floatArrayOf(.46f, .66f, .82f, .94f)
-            val line = if (dark) w else Color(0xFF0F0F0D)
+            val line = if (dark) w else Color(0xFF0E1116)
             val coral = Color(if (dark) 0xFFFF5A5F else 0xFFD93A41)
             return FluxColors(
                 dark = dark,
                 ramp = ramp,
                 canvas = canvas,
                 ink = ramp[11],
-                inkMuted = if (dark || imported != null) ramp[9] else Color(0xFF55554F),
-                inkFaint = if (dark || imported != null) ramp[8] else Color(0xFF77776F),
+                inkMuted = if (dark || imported != null) ramp[9] else Color(0xFF525866),
+                inkFaint = if (dark || imported != null) ramp[8] else Color(0xFF707683),
                 glass1 = w.copy(alpha = g[0]),
                 glass2 = w.copy(alpha = g[1]),
                 glass3 = w.copy(alpha = g[2]),
@@ -111,14 +115,16 @@ class FluxColors(
                 hairline = line.copy(alpha = if (dark) .08f else .09f),
                 hairlineStrong = line.copy(alpha = if (dark) .16f else .18f),
                 highlight = w.copy(alpha = if (dark) .13f else .90f),
-                sheetBg = if (dark) Color(20, 22, 28).copy(alpha = .74f) else Color(250, 250, 247).copy(alpha = .80f),
-                menuBg = if (dark) Color(26, 29, 36).copy(alpha = .78f) else Color(252, 252, 249).copy(alpha = .84f),
-                dim = if (dark) Color(2, 3, 5).copy(alpha = .55f) else Color(244, 244, 241).copy(alpha = .55f),
+                sheetBg = if (dark) Color(20, 22, 28).copy(alpha = .74f) else Color(250, 251, 253).copy(alpha = .82f),
+                menuBg = if (dark) Color(26, 29, 36).copy(alpha = .78f) else Color(252, 253, 254).copy(alpha = .86f),
+                // 浅色模式压暗而非提亮：白雾遮罩会让浅色对话框 / Sheet 与背景糊成一片，失去层次
+                dim = if (dark) Color(2, 3, 5).copy(alpha = .55f) else Color(14, 17, 22).copy(alpha = .24f),
                 scrimTopFrom = canvas.copy(alpha = if (dark) .85f else .90f),
                 accent = seed,
                 accentHi = acc.hi,
-                accentLo = seed.copy(alpha = .16f),
-                accentMid = seed.copy(alpha = .34f),
+                // 浅色用压暗后的实色填充着色：亮种子色叠在纸面上偏淡、发雾；填充色更饱满，同样透明度下选中底更干净
+                accentLo = if (dark) seed.copy(alpha = .16f) else acc.fill.copy(alpha = .11f),
+                accentMid = if (dark) seed.copy(alpha = .34f) else acc.fill.copy(alpha = .24f),
                 accentGlow = acc.hi.copy(alpha = .55f),
                 accentFill = acc.fill,
                 onAccent = acc.on,
@@ -134,9 +140,10 @@ class FluxColors(
                 flowRemain = inkRaw.copy(alpha = .08f),
                 flowFail = coral.copy(alpha = if (dark) .70f else .75f),
                 categoryColors = Array(CategoryDark.size) { i ->
-                    Color(CategoryDark[i]).let { if (dark) it else lerp(it, Color.Black, .26f) }
+                    // 浅色只沿 OKLab 明度压到 ≤ .60（对纸面 ≥ 3:1），保留彩度；混黑会让色点发脏
+                    Color(CategoryDark[i]).let { if (dark) it else it.withOklabLightness(min(it.oklabLightness(), .60f)) }
                 },
-                grainAlpha = if (dark) .035f else .05f,
+                grainAlpha = if (dark) .035f else .03f,
                 grainBlend = if (dark) BlendMode.Softlight else BlendMode.Multiply,
             )
         }

@@ -120,6 +120,8 @@ pub(crate) fn open(
             .close_button(!busy)
             .overlay_closable(!busy)
             .keyboard(!busy)
+            // 回车由输入框 `PressEnter` 提交；默认 Confirm 会抢先关窗。
+            .on_ok(|_, _, _| false)
             .content(move |body, _, _| body.child(content.clone()))
             .on_close(move |_, _, cx| closing.update(cx, |this, _| this.lifetime.closed = true))
     });

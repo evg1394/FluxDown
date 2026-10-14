@@ -1,4 +1,4 @@
-//! 进程生成的跨平台辅助。
+//! 进程级跨平台辅助：子进程生成与文件描述符软限制。
 //!
 //! 引擎会拉起若干**控制台子进程**（ffmpeg / ffprobe / yt-dlp / tar，以及组件
 //! 版本探测 `-version` / `--version`）。在 Windows 上，若不显式设置
@@ -7,6 +7,21 @@
 //!
 //! 因此引擎内所有经 [`tokio::process::Command`] 拉起控制台程序的调用点都
 //! **必须**先经 [`no_console_window`] 处理，切勿直接 `.spawn()` / `.output()`。
+
+use crate::logger::log_info;
+
+/// 进程级只提升一次 `RLIMIT_NOFILE` 软限制（至硬限制）。
+///
+/// BT（每文件 / 每 peer 常驻 FD）与高线程 HTTP 任务（单任务最多 512 条连接）
+/// 都会撞 Linux 默认 1024 / macOS GUI 默认 256 的软限制，EMFILE 会连带拖垮同进程
+/// 的 SQLite 与其他下载。失败（硬限制更低等）只记日志，不影响下载继续。
+pub(crate) fn raise_nofile_limit_once() {
+    static NOFILE_LIMIT_ONCE: std::sync::Once = std::sync::Once::new();
+    NOFILE_LIMIT_ONCE.call_once(|| match librqbit::try_increase_nofile_limit() {
+        Ok(limit) => log_info!("[proc] RLIMIT_NOFILE soft limit raised to {limit}"),
+        Err(e) => log_info!("[proc] failed to raise RLIMIT_NOFILE: {e:#}"),
+    });
+}
 
 /// 为控制台子进程设置 Windows `CREATE_NO_WINDOW`，避免闪现黑色控制台窗口。
 ///

@@ -12,6 +12,7 @@ pub mod cdn_worker;
 #[cfg(feature = "desktop")]
 pub mod clipboard_watch;
 pub mod cloud;
+pub mod cloud_notify;
 pub mod daemon_client;
 mod demo;
 mod device_identity;

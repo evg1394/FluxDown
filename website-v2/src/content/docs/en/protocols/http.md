@@ -18,7 +18,7 @@ When you start an HTTP(S) download, FluxDown first probes the server (a `HEAD` r
 
 As an illustration, on an 8-core machine with a fast connection, segment count roughly follows file size: ≤2 MB → 1, ~4 MB → 4, ~8 MB → 8, ~16 MB → 16, ≥32 MB → 32 (the ceiling on an 8-core machine; it only grows further on machines with more cores, up to the hard limit of 64).
 
-You don't have to rely on the automatic choice — the **Threads** selector in the New Download dialog and in *Settings → Download → Default Threads* lets you pick Auto, a preset (4/8/16/32/64), or a custom value from 1–256.
+You don't have to rely on the automatic choice — the **Threads** selector in the New Download dialog and in *Settings → Download → Default Threads* lets you pick Auto, a preset (4/8/16/32/64), or a custom value from 1–512. Above 64 connections FluxDown shows a warning: many servers throttle or refuse that many concurrent connections from one IP, and security protection (WAF / CDN) may ban your IP; above 256 the warning escalates.
 
 <!-- TODO(screenshot): New Download dialog with the Threads selector open, showing Auto / 4 / 8 / 16 / 32 / 64 / Custom -->
 

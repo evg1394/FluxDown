@@ -113,6 +113,7 @@ flux_icons! {
     Subtitles => "subtitles",
     SquareTerminal => "square-terminal",
     Sun => "sun",
+    TriangleAlert => "triangle-alert",
     Trash2 => "trash-2",
     Type => "type",
     User => "user",

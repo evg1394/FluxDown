@@ -200,6 +200,8 @@ export interface DaemonCreateTaskParams {
   unattended?: boolean;
   /** 已知文件大小（字节，>0 才生效）。 */
   hintFileSize?: number | null;
+  /** 参照文件名（浏览器捕获的原始名）：显式名缺扩展名时借它的扩展名补全。 */
+  nameHint?: string | null;
 }
 
 /** `daemon.task.create` 结果。 */

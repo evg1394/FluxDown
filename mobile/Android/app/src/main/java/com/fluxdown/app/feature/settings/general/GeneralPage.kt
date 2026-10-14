@@ -21,6 +21,7 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleEventEffect
+import com.fluxdown.app.FeatureFlags
 import com.fluxdown.app.R
 import com.fluxdown.app.feature.settings.SettingRowBox
 import com.fluxdown.app.feature.settings.SettingsCtx
@@ -178,7 +179,7 @@ internal fun GeneralPage() {
                     footer = str(R.string.mobileGeneralEntriesFooter),
                 ) {
                     toggleRow(ctx, GeneralRow.ActivityRss)
-                    toggleRow(ctx, GeneralRow.ActivityWebhooks)
+                    if (FeatureFlags.WEBHOOKS) toggleRow(ctx, GeneralRow.ActivityWebhooks)
                     toggleRow(ctx, GeneralRow.ActivityTheme)
                 }
             }
@@ -332,7 +333,7 @@ private fun GlassSectionScope.linkHandlingRows(ctx: SettingsCtx) {
 
 /** 设置搜索索引：本页所有行（偏好键恒可用，没有条件隐藏的行，与页面渲染一致）。 */
 internal fun generalSearchEntries(ctx: SettingsSearchContext): List<SettingsEntry> =
-    GeneralRow.entries.map { row ->
+    GeneralRow.entries.filter { FeatureFlags.WEBHOOKS || it != GeneralRow.ActivityWebhooks }.map { row ->
         ctx.entry(
             id = row.id,
             page = SettingsPage.General,

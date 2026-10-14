@@ -1,6 +1,7 @@
 package com.fluxdown.fluxui.data
 
 import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
@@ -22,6 +23,8 @@ import androidx.compose.foundation.text.BasicText
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.State
+import androidx.compose.runtime.derivedStateOf
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -33,8 +36,9 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.translate
 import androidx.compose.ui.layout.layout
-import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.AnnotatedString
@@ -51,6 +55,10 @@ import com.fluxdown.fluxui.material.fluxGlass
 import com.fluxdown.fluxui.theme.FluxScaleGroup
 import com.fluxdown.fluxui.theme.FluxTheme
 import com.fluxdown.fluxui.theme.fluxPressable
+import kotlin.math.roundToInt
+
+/** 波形收起后数字与统计行之间保留的间距。 */
+private val CollapsedWaveGap = 8.dp
 
 /** 速度读数：数字与单位分开显示（display 56 + 单位 20），如 `("12.4", "MB/s")`；空闲为 `("0", "B/s")`。 */
 @Immutable
@@ -70,6 +78,8 @@ data class InstrumentStat(val label: String, val value: String)
  * @param pausedAll 右上按钮显示“全部恢复”（播放）而非“全部暂停”（暂停）。
  * @param title 左上标签（如“实时吞吐”，自动大写）。
  * @param compact Rail 底部紧凑变体：r24 · padding 14/16/12 · 波形 56 · 数字上距 4。
+ * @param showWaveform false 时波形区收起（高度与透明度以 `fluid` 弹簧过渡）：空闲（无活跃任务）时卡片更紧凑，
+ *   有任务开始传输再展开。
  * @param contentDescription 整卡朗读文案（“实时吞吐 {值}，上传 {值}，活跃 {n} 个任务，剩余空间 {值}”）；缺省拼接 title / speed / stats。
  *
  * 整卡点击 = [onClick]（→ 活动面板）；右上圆钮 = [onToggleAll]（SEGMENT_TICK）。波形装饰，不进无障碍树。
@@ -89,6 +99,7 @@ fun SpeedInstrument(
     resumeAllLabel: String,
     modifier: Modifier = Modifier,
     compact: Boolean = false,
+    showWaveform: Boolean = true,
     contentDescription: String? = null,
 ) {
     val colors = FluxTheme.colors
@@ -114,6 +125,8 @@ fun SpeedInstrument(
         }
     }
     val toggleLabel = if (pausedAll) resumeAllLabel else pauseAllLabel
+    val waveP = animateFloatAsState(if (showWaveform) 1f else 0f, FluxTheme.motion.of(FluxTheme.motion.fluid), label = "wave")
+    val waveGone by remember { derivedStateOf { waveP.value <= 0f } }
 
     Column(
         modifier
@@ -165,14 +178,25 @@ fun SpeedInstrument(
             BasicText(speed.unit, Modifier.alignByBaseline(), unitStyle, maxLines = 1, softWrap = false)
         }
 
-        // 波形：左右 −pad 全幅出血
-        Waveform(
-            samples = waveform,
-            modifier = Modifier
-                .padding(top = 6.dp, bottom = 4.dp)
-                .bleedHorizontal(pad)
-                .height(if (compact) 56.dp else 92.dp),
-        )
+        // 波形：左右 −pad 全幅出血；收起时占位高度按进度插值到 8dp 间距并淡出（内容从顶部裁出，卡片 clip 兜底）
+        if (!waveGone) {
+            Waveform(
+                samples = waveform,
+                modifier = Modifier
+                    .layout { measurable, c ->
+                        val p = measurable.measure(c)
+                        val k = waveP.value.coerceIn(0f, 1f)
+                        val gap = CollapsedWaveGap.roundToPx()
+                        layout(p.width, (gap + (p.height - gap) * k).roundToInt()) { p.place(0, 0) }
+                    }
+                    .graphicsLayer { alpha = waveP.value.coerceIn(0f, 1f).let { it * it } }
+                    .padding(top = 6.dp, bottom = 4.dp)
+                    .bleedHorizontal(pad)
+                    .height(if (compact) 56.dp else 92.dp),
+            )
+        } else {
+            Box(Modifier.height(CollapsedWaveGap))
+        }
 
         // 统计行
         if (stats.isNotEmpty()) {

@@ -6,7 +6,7 @@ use fluxdown_ui_account::AccountRailButton;
 use fluxdown_ui_components::FluxIcon;
 use fluxdown_ui_downloads::{DownloadHostActions, DownloadView};
 use fluxdown_ui_rss::RssView;
-use fluxdown_ui_settings::WebhookView;
+use fluxdown_ui_settings::{PushHost, PushView};
 use fluxdown_ui_shell::{ShellAction, ShellRoute, ShellView, main_window_options};
 use gpui::{App, AppContext as _, Window, WindowHandle, px, size};
 use gpui_component::{Icon, Root};
@@ -45,13 +45,21 @@ pub fn open(cx: &mut App) -> Option<WindowHandle<Root>> {
             cx.new(|cx| DownloadView::new(translator.clone(), downloads_port, window, cx));
         let rss_port = Arc::new(AgentRssPort::new(client.clone()));
         let rss = cx.new(|cx| RssView::new(translator.clone(), rss_port, window, cx));
-        let webhooks =
-            cx.new(|cx| WebhookView::new(translator.clone(), settings_store.clone(), cx));
+        let push = cx.new(|cx| {
+            PushView::new(
+                translator.clone(),
+                settings_store.clone(),
+                PushHost {
+                    open_account: Rc::new(|_, cx| activity::open_account(cx)),
+                },
+                cx,
+            )
+        });
         let downloads_title_bar = downloads.update(cx, |downloads, cx| downloads.new_title_bar(cx));
 
         let downloads_sidebar = downloads.read(cx).sidebar_state();
         let rss_sidebar = rss.read(cx).sidebar_state();
-        // Webhook 没有侧边菜单，不登记侧栏；RSS 的切换按钮由 shell 提供。
+        // 推送通知页没有侧边菜单，不登记侧栏；RSS 的切换按钮由 shell 提供。
         let mut routes = Vec::new();
         let mut actions = Vec::new();
         for entry in ActivityEntry::ALL {
@@ -90,7 +98,7 @@ pub fn open(cx: &mut App) -> Option<WindowHandle<Root>> {
                         "activity-webhooks-tooltip",
                         entry.label_key(),
                         Icon::new(FluxIcon::Webhook),
-                        webhooks.clone().into(),
+                        push.clone().into(),
                     )
                     .optional(optional),
                 ),

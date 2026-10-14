@@ -511,7 +511,7 @@ private class EditorForm(seed: WebhookEndpoint, val isNew: Boolean) {
         headers += HeaderRow(headerSeq++, "", "")
     }
 
-    /** 草稿 → 模型（与 Dart `_draft` 同序同规则）。 */
+    /** 草稿 → 模型。 */
     fun buildDraft(): WebhookEndpoint {
         val map = LinkedHashMap<String, String>()
         for (row in headers) {
@@ -688,7 +688,13 @@ private fun EditorSheetImpl(
                 onValueChange = { form.url = it },
                 label = str(R.string.webhookFieldUrl),
                 placeholder = preset?.urlPlaceholder,
-                hint = str(if (form.preset == "ntfy") R.string.webhookUrlHintNtfy else R.string.webhookUrlHint),
+                hint = str(
+                    when (form.preset) {
+                        "ntfy" -> R.string.webhookUrlHintNtfy
+                        "dingtalk" -> R.string.webhookUrlHintDingtalk
+                        else -> R.string.webhookUrlHint
+                    },
+                ),
                 error = if (form.urlTouched) {
                     when (form.urlError) {
                         WebhookTemplate.UrlError.Invalid -> str(R.string.webhookUrlInvalid)

@@ -90,7 +90,7 @@ struct GeneralPage: View {
 
     private func entriesSection(readOnly: Bool) -> some View {
         Section {
-            ForEach([GeneralRow.activityRss, .activityWebhooks, .activityTheme], id: \.id) { row in
+            ForEach(GeneralRow.entriesRows, id: \.id) { row in
                 if let item = row.item { ConfigToggleRow(item: item) }
             }
         } header: {
@@ -139,7 +139,7 @@ extension GeneralPage {
     /// 设置搜索索引：本页所有行（偏好键恒可用，没有条件隐藏的行）。
     static func searchEntries(_ ctx: SettingsSearchContext) -> [SettingsEntry] {
         let name = L("settingsCatGeneral")
-        return GeneralRow.allCases.map { row in
+        return GeneralRow.allCases.filter { FeatureFlags.webhooks || $0 != .activityWebhooks }.map { row in
             SettingsEntry(
                 id: row.id, route: .general, title: L(row.titleKey), detail: row.detailKey.map { L($0) } ?? "",
                 breadcrumb: "\(name) › \(L(row.group.titleKey))", symbol: row.symbol

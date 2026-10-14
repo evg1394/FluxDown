@@ -217,6 +217,7 @@ impl HostSession {
             // 交互式：声明了 client.selections，需要选择时请求会推到本 UI。
             unattended: false,
             hint_file_size: None,
+            name_hint: None,
         };
         let value = self
             .rpc(DAEMON_TASK_CREATE, encode(&params, "create task")?)

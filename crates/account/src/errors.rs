@@ -110,7 +110,7 @@ pub(crate) fn reason_key(reason: ErrorReason, context: ErrorContext) -> Option<&
         ErrorReason::TaskStateConflict => "errReasonTaskStateConflict",
         ErrorReason::TaskDeviceMismatch => "errReasonTaskDeviceMismatch",
         ErrorReason::SaveDirUnavailable => "errReasonSaveDirUnavailable",
-        // 插件市场、Doctor 与 API 服务切换由各自页面展示；这里退回按 code 的通用文案。
+        // 插件市场、Doctor、API 服务切换与云端推送由各自页面展示；这里退回按 code 的通用文案。
         ErrorReason::MarketUnreachable
         | ErrorReason::MarketIndexInvalid
         | ErrorReason::MarketIndexRollback
@@ -127,6 +127,9 @@ pub(crate) fn reason_key(reason: ErrorReason, context: ErrorContext) -> Option<&
         | ErrorReason::RepairNotApplicable
         | ErrorReason::GatewayPortInUse
         | ErrorReason::GatewayRestartFailed
+        | ErrorReason::NotifyChannelLimit
+        | ErrorReason::NotifyDisabled
+        | ErrorReason::NotifyTargetInvalid
         | ErrorReason::Unknown => return None,
     })
 }

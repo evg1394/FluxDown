@@ -287,18 +287,27 @@ pub(crate) fn test_result_text(
     )
 }
 
-pub(crate) fn endpoints_group(ctx: &SectionContext, _cx: &mut App) -> SettingsSection {
+/// 自托管标签下的端点列表。页头分段标签已标明「自托管」，分区不再重复标题；
+/// 空状态的「改用云端推送」链接经 `try_cloud` 切到云端标签（`None` = 云端未开放，不显示）。
+pub(crate) fn endpoints_group(
+    ctx: &SectionContext,
+    try_cloud: Option<crate::push_view::WindowAction>,
+    _cx: &mut App,
+) -> SettingsSection {
     SettingsSection::new()
-        .title(ctx.t("notifyGroupWebhook"))
         .subtitle(ctx.t("webhookSemantics"))
-        .row(endpoints_item(ctx))
+        .row(endpoints_item(ctx, try_cloud))
 }
 
-fn endpoints_item(ctx: &SectionContext) -> SettingsRow {
+fn endpoints_item(
+    ctx: &SectionContext,
+    try_cloud: Option<crate::push_view::WindowAction>,
+) -> SettingsRow {
     let store = ctx.store();
     let translator = ctx.translator.clone();
     let empty_title = ctx.t("webhookEmptyTitle");
-    let empty_desc = ctx.t("webhookEmptyDesc");
+    let empty_desc = ctx.t("webhookEmptyDescSelfHosted");
+    let try_cloud_label = ctx.t("webhookTryCloud");
     let add = ctx.t("webhookAddEndpoint");
     let edit = ctx.t("webhookRowEdit");
     let test = ctx.t("webhookRowTest");
@@ -319,6 +328,23 @@ fn endpoints_item(ctx: &SectionContext) -> SettingsRow {
                 empty_desc.clone(),
                 cx,
             ));
+            if let Some(try_cloud) = try_cloud.clone() {
+                column = column.child(
+                    h_flex()
+                        .w_full()
+                        .justify_center()
+                        .pb(tokens.spacing.sm)
+                        .child(
+                            button(
+                                "webhook-try-cloud",
+                                try_cloud_label.clone(),
+                                ButtonVariant::Link,
+                                cx,
+                            )
+                            .on_click(move |_, window, cx| try_cloud(window, cx)),
+                        ),
+                );
+            }
         }
         for endpoint in &endpoints {
             let health = deliveries

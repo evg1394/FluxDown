@@ -80,7 +80,7 @@ public enum SettingsCatalog {
     public static let daemonFields: [SettingField] = [
         // 下载
         daemon("default_save_dir", .text, ""),
-        daemon("default_segments", .integer(min: 0, max: 64), "0"),
+        daemon("default_segments", .integer(min: 0, max: 512), "0"),
         daemon("auto_max_connections", .integer(min: 0, max: 128), "16"),
         daemon("cdn_multi_enabled", .bool, "false"),
         daemon("cdn_max_nodes", .integer(min: 0, max: 8), "0"),
@@ -103,6 +103,7 @@ public enum SettingsCatalog {
         daemon("bt_enabled", .bool, "true"),
         daemon("bt_enable_dht", .bool, "true"),
         daemon("bt_enable_upnp", .bool, "true"),
+        daemon("bt_enable_utp", .bool, "true"),
         daemon("bt_port_start", .integer(min: 1, max: 65_535), "6881"),
         daemon("bt_port_end", .integer(min: 1, max: 65_535), "6891"),
         daemon("bt_mse_mode", .choice(btMseModes), "enabled"),
@@ -222,6 +223,7 @@ public enum SettingsCatalog {
         "bt_enabled": "bt.enabled",
         "bt_enable_dht": "bt.enable_dht",
         "bt_enable_upnp": "bt.enable_upnp",
+        "bt_enable_utp": "bt.enable_utp",
         "bt_custom_trackers": "bt.custom_trackers",
         "bt_tracker_sub_enabled": "bt.tracker_sub_enabled",
         "bt_tracker_sub_urls": "bt.tracker_sub_urls",

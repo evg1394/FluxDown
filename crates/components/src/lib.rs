@@ -3,11 +3,14 @@
 //! gpui-base 提供交互、键盘与无障碍语义；本 crate 只负责从完整主题 token
 //! 组装稳定的 shadcn 风格。业务组件依赖这里，不直接散落颜色和尺寸字面量。
 
+mod callout;
 mod icons;
 mod kit;
 mod motion;
+mod qr;
 mod sidebar;
 
+pub use callout::{CalloutTone, RevealCallout};
 pub use icons::{ComponentAssets, FluxIcon, category_icon};
 pub use kit::{
     BusyExt, ControlExt, DIALOG_PRIMARY_KEY_CONTEXT, DialogIntent, IconControlExt, caption_number,
@@ -16,6 +19,7 @@ pub use kit::{
     segmented_tabs,
 };
 pub use motion::{SlidingHighlight, StateLayer, color_transition};
+pub use qr::{MAX_QR_TEXT_LENGTH, QrPalette, qr_image};
 pub use sidebar::{SidebarChange, SidebarPanel, SidebarState};
 
 use fluxdown_ui_theme::active_theme;

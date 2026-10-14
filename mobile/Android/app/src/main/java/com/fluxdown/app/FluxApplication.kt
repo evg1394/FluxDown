@@ -8,6 +8,7 @@ import android.util.Log
 import androidx.compose.runtime.snapshots.SnapshotStateSet
 import androidx.datastore.preferences.preferencesDataStore
 import com.fluxdown.app.data.AppearanceRepo
+import com.fluxdown.app.data.DeviceSettings
 import com.fluxdown.app.data.HostRepo
 import com.fluxdown.app.data.SecretBox
 import com.fluxdown.app.data.ViewPrefsRepo
@@ -15,19 +16,21 @@ import com.fluxdown.app.service.LocalActivity
 import com.fluxdown.bridge.FluxBridge
 import com.fluxdown.core.host.CreateTaskRequest
 import com.fluxdown.core.host.HostErrorCode
-import com.fluxdown.core.host.HostEvent
 import com.fluxdown.core.host.HostException
 import com.fluxdown.core.host.HostSession
 import com.fluxdown.core.host.HostSignal
 import com.fluxdown.core.model.HostRef
 import com.fluxdown.core.model.SelectionOutcome
-import com.fluxdown.core.store.Connection
+import com.fluxdown.core.store.HostState
 import com.fluxdown.core.store.HostStore
+import com.fluxdown.app.update.AppUpdateController
+import com.fluxdown.app.update.UpdateCheckJobService
 import com.fluxdown.fluxui.theme.FluxFonts
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.flow.Flow
@@ -37,9 +40,11 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.plus
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
@@ -55,6 +60,11 @@ class FluxApplication : Application() {
     override fun onCreate() {
         super.onCreate()
         container = AppContainer(this)
+        // 周期后台检查按「自动检查」开关登记 / 取消（幂等；不持久化，每次冷启动重登）。
+        // 偏好读取与 JobScheduler binder 调用放 IO，不占冷启动主线程。
+        container.appScope.launch(Dispatchers.IO) {
+            UpdateCheckJobService.sync(this@FluxApplication, DeviceSettings.of(this@FluxApplication).updateAutoCheck)
+        }
         // 冷启动在后台解析字体文件，避免首帧在主线程加载 ~5MB 字体
         container.appScope.launch(Dispatchers.IO) { FluxFonts.preload(this@FluxApplication) }
     }
@@ -82,6 +92,13 @@ class AppContainer(context: Context) {
     val viewPrefs = ViewPrefsRepo(context.prefs)
     val store = HostStore(storeScope)
 
+    /** 应用自更新（惰性创建：首次用到才加载更新器；与当前主机无关）。 */
+    val updates: AppUpdateController by lazy {
+        AppUpdateController(appContext, appScope, DeviceSettings.of(appContext)) {
+            localActivity.value.let { it.active + it.pending + it.retryPending }
+        }
+    }
+
     private val hostRepo = HostRepo(context.prefs, SecretBox())
     private val localRef = HostRef.Local(displayName = Build.MODEL.orEmpty().ifBlank { "Android" })
 
@@ -100,13 +117,19 @@ class AppContainer(context: Context) {
     var session: HostSession = UnavailableSession(HostException(HostErrorCode.Unavailable, message = "host starting"))
         private set
 
-    private val _localActivity = MutableStateFlow(LocalActivity.Idle)
+    private val _localState = MutableStateFlow(HostState())
 
     /**
-     * 本机引擎活动量（无论当前选中哪个主机）。前台服务据此保活：远端主机在前台时，
-     * 进程内的本机下载仍可能在跑，进程不能被回收。
+     * 本机主机的状态投影（无论当前选中哪个主机）：当前就是本机时即 [store] 的状态；切到远端时来自进程内
+     * 本机主机的第二个会话（独立 [HostStore]）。进度通知、前台服务保活与本机任务的完成通知都读它。
      */
-    val localActivity: StateFlow<LocalActivity> = _localActivity.asStateFlow()
+    val localState: StateFlow<HostState> = _localState.asStateFlow()
+
+    /** 本机引擎活动量：前台服务据此保活（远端主机在前台时，进程内的本机下载仍可能在跑，进程不能被回收）。 */
+    val localActivity: StateFlow<LocalActivity> = _localState
+        .map { LocalActivity.from(it) }
+        .flowOn(Dispatchers.Default)
+        .stateIn(appScope, SharingStarted.Eagerly, LocalActivity.Idle)
 
     private var localMonitor: Job? = null
 
@@ -206,8 +229,10 @@ class AppContainer(context: Context) {
         }
     }
 
-    /** store.detach → 关旧会话 → 绑定新会话 → 重选本机活动量来源。 */
+    /** 停本机监视 → store.detach → 关旧会话 → 绑定新会话 → 重选本机状态来源。 */
     private fun adopt(ref: HostRef, next: HostSession) {
+        // 先停监视：当前是本机时它直接投影 store，store 换绑后的远端状态不能流进 localState
+        localMonitor?.cancel()
         store.detach()
         val old = session
         session = next
@@ -218,21 +243,16 @@ class AppContainer(context: Context) {
     }
 
     /**
-     * 本机活动量来源（仅在 [switchLock] 内调用）：
-     * - 当前主机就是本机：直接投影主 [store] 的统计，不再开第二个会话；
-     * - 当前主机是远端：对进程内同一本机主机再开一个只读会话，只消费 `Snapshot.stats` 与
-     *   `RuntimeStatsChanged`（其余事件忽略），不建 [HostStore]。
-     * 全程事件驱动，无轮询；会话结束 / 失联（Stale、Fatal）一律视为空闲，避免前台服务僵死。
+     * 本机状态来源（仅在 [switchLock] 内调用）：
+     * - 当前主机就是本机：直接投影主 [store]，不再开第二个会话；
+     * - 当前主机是远端：对进程内同一本机主机再开一个会话，由独立的 [HostStore] 归约。
+     * 全程事件驱动，无轮询；失联（Stale、Fatal）由 [LocalActivity.from] 视为空闲，避免前台服务僵死。
      */
     private fun restartLocalMonitor(ref: HostRef) {
         localMonitor?.cancel()
         localMonitor = appScope.launch(Dispatchers.Default) {
             when (ref) {
-                is HostRef.Local -> store.state
-                    .map { state ->
-                        if (state.connection == Connection.Live) LocalActivity.from(state.stats) else LocalActivity.Idle
-                    }
-                    .collect { _localActivity.value = it }
+                is HostRef.Local -> store.state.collect { _localState.value = it }
                 is HostRef.Remote -> monitorLocalSession()
             }
         }
@@ -244,21 +264,17 @@ class AppContainer(context: Context) {
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            Log.w(TAG, "local activity monitor unavailable: ${e.message}")
-            _localActivity.value = LocalActivity.Idle
+            Log.w(TAG, "local monitor unavailable: ${e.message}")
+            _localState.value = HostState()
             return
         }
         try {
-            monitor.signals.collect { signal ->
-                when (signal) {
-                    is HostSignal.Snapshot -> _localActivity.value = LocalActivity.from(signal.snapshot.stats)
-                    is HostSignal.Event -> (signal.event as? HostEvent.RuntimeStatsChanged)?.let {
-                        _localActivity.value = LocalActivity.from(it.stats)
-                    }
-                    HostSignal.Stale, is HostSignal.Fatal -> _localActivity.value = LocalActivity.Idle
-                }
+            coroutineScope {
+                // 与主 store 相同的串行约束；随本协程取消（切主机）一并停止
+                val local = HostStore(this + Dispatchers.Default.limitedParallelism(1))
+                local.attach(monitor)
+                local.state.collect { _localState.value = it }
             }
-            _localActivity.value = LocalActivity.Idle
         } finally {
             monitor.close()
         }

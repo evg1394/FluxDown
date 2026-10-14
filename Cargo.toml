@@ -40,9 +40,10 @@ unwrap_used = "deny"
 wildcard_imports = "deny"
 
 [patch.crates-io]
-# zerx-lab/rqbit = lingdiansr/rqbit (MSE) + Android HTTPS 修复（bundled webpki 根替代需 JNI 初始化的
-# rustls-platform-verifier，否则 Android 上任何 https tracker 都会 panic 掉磁力解析）+ tracker panic 隔离。
-librqbit = { git = "https://github.com/zerx-lab/rqbit", rev = "d9e79c939f223679612cd0b06bd00ed49bd2eff8" }
+# zerx-lab/rqbit main = 上游 ikatson/rqbit main（v9.0.1 之后）+ lingdiansr MSE
+# + Android HTTPS 修复（bundled webpki 根替代需 JNI 初始化的 rustls-platform-verifier，否则 Android 上任何
+# https tracker 都会 panic 掉磁力解析）+ tracker panic 隔离 + 握手超时下发到 Live 种子的 peer 连接。
+librqbit = { git = "https://github.com/zerx-lab/rqbit", rev = "00374a6d772d4123f079f5adf6a1fe013e363381" }
 # 上游 0.7.0 在 iOS 上编译失败（Apple 平台只放行 macOS 的按索引绑定），补丁见源码内 `FluxDown 补丁` 注释；
 # 上游修复发布后删除本条与 third_party/ 副本。
 librqbit-dualstack-sockets = { path = "third_party/librqbit-dualstack-sockets" }
@@ -61,13 +62,6 @@ codegen-units = 16
 debug = "limited"
 split-debuginfo = "unpacked"
 
-# gpui-fast 的 compat 壳只做再导出，实际代码在同仓的 `gpui` / `gpui_platform` 包里。
-[profile.dev.package.gpui]
-opt-level = 3
-
-[profile.dev.package.gpui_platform]
-opt-level = 3
-
 # BT 数据面（逐字节 RC4、逐消息解析、MSE DH 大数运算）在 opt-level 0 下慢一个数量级：
 # 本地 loopback 实测 dev 基线 36.5 CPU·s/GB、吞吐封顶 165 MB/s；仅下面 5 个 crate
 # 开 O3 后 4.8 CPU·s/GB、854 MB/s。开发期跑 fluxdownd 下 BT 不再吃满多核。
@@ -75,7 +69,7 @@ opt-level = 3
 opt-level = 3
 
 [profile.release]
-# 全部 release 产物（GPUI 桌面端、agent、fluxdownd、CLI、hub cdylib、nmh、
+# 全部 release 产物（GPUI 桌面端、agent、fluxdownd、CLI、原生移动端核心、nmh、
 # Docker/NAS 包）共用本 profile，统一按运行期性能优先：opt-level=3 + fat LTO +
 # 单 codegen 单元，换取最佳吞吐/延迟，代价是产物体积和编译时间。
 # 不再用 "z"：它关闭循环向量化、压低内联阈值，BT 数据面（DH768 2.46 vs 1.60 ms）、

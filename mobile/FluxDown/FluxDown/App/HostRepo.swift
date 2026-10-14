@@ -15,7 +15,7 @@ final class HostRepo {
     }
 
     private static let listKey = "hosts.remotes"
-    private static let service = "com.fluxdown.FluxDown.host-access-key"
+    private static let service = "com.fluxdown.app.host-access-key"
 
     private let defaults: UserDefaults
     private(set) var remotes: [HostRef] = []

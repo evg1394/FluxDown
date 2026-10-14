@@ -77,6 +77,8 @@ pub(crate) fn open_rename(
         dialog
             .title(dialog_title(title.clone(), cx))
             .w(active_theme(cx).text_extent(440.))
+            // 回车由输入框 `PressEnter` 提交；默认 Confirm 会抢先关窗。
+            .on_ok(|_, _, _| false)
             .content(move |content, _, _| content.child(view.clone()))
     });
     input.update(cx, |input, cx| input.focus(window, cx));

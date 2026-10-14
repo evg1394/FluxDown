@@ -56,7 +56,7 @@ impl ActivityEntry {
         match self {
             Self::Downloads => fluxdown_ui_i18n::keys::MOBILE_NAV_DOWNLOADS,
             Self::Rss => "sidebarRss",
-            Self::Webhooks => "webhookNavTitle",
+            Self::Webhooks => "pushNavTitle",
             Self::Account => "settingsCatAccount",
             Self::Settings => fluxdown_ui_i18n::keys::SETTINGS,
         }

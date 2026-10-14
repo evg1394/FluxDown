@@ -5,6 +5,7 @@ import { useT } from '../../../../i18n'
 import { LATER_QUEUE_ID, MAIN_QUEUE_ID, rpc, useDaemon } from '../../../../lib/rpc'
 import type { QueueDto } from '../../../../lib/rpc'
 import { rpcErrorText } from '../../../../lib/rpcErrorText'
+import { ThreadsRiskCallout } from '../../../../lib/ThreadsRiskCallout'
 import { Button, Switch, toast } from '../../../../ui'
 import {
   DaemonEnumRow,
@@ -160,7 +161,12 @@ function ConnectionSection() {
   const cdnMulti = useDaemonBool('cdn_multi_enabled')
   return (
     <SettingsSection title={t('settingsGroupConnection')}>
-      <DaemonNumberRow configKey="default_segments" titleKey="defaultThreads" descKey="defaultThreadsDesc" />
+      <DaemonNumberRow
+        configKey="default_segments"
+        titleKey="defaultThreads"
+        descKey="defaultThreadsDesc"
+        footer={(segments) => <ThreadsRiskCallout segments={segments} contentClassName="pb-3" />}
+      />
       {autoSegments ? <DaemonNumberRow configKey="auto_max_connections" titleKey="autoMaxConnections" descKey="autoMaxConnectionsDesc" /> : null}
       <DaemonSwitchRow configKey="cdn_multi_enabled" titleKey="cdnMultiEnabled" descKey="cdnMultiEnabledDesc" />
       {cdnMulti ? <DaemonNumberRow configKey="cdn_max_nodes" titleKey="cdnMaxNodes" descKey="cdnMaxNodesDesc" /> : null}

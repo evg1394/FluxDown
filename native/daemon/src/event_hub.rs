@@ -233,6 +233,12 @@ impl fluxdown_engine::events::EventSink for DaemonEngineEventSink {
                 self.0.set_retry_pending_tasks(count);
                 return;
             }
+            EngineEvent::TaskNotice(notice) => {
+                self.0.publish(DaemonEvent::TaskNotice(
+                    fluxdown_engine_protocol::task_notice_to_dto(notice),
+                ));
+                return;
+            }
             _ => {}
         }
 
@@ -592,6 +598,44 @@ mod tests {
             panic!("deliveries must use the domain event consumed by live settings");
         };
         assert_eq!(deliveries[0].delivery_id, "delivery-1");
+    }
+
+    #[test]
+    fn task_notice_maps_to_the_dedicated_daemon_event() {
+        let hub = DaemonEventHub::new(DaemonSnapshot::default(), 8);
+        let (mut subscriber, _) = hub.subscribe_and_snapshot();
+        let sink = DaemonEngineEventSink(hub);
+        sink.emit(EngineEvent::TaskNotice(
+            fluxdown_engine::webhook::TaskNotice {
+                delivery_id: "d-1".into(),
+                event: "task.completed".into(),
+                timestamp_ms: 42,
+                queue_id: "default".into(),
+                queue_name: "Default".into(),
+                task: Some(fluxdown_engine::webhook::WebhookTask {
+                    id: "t-1".into(),
+                    file_name: "a.bin".into(),
+                    url: "https://example.com/a.bin".into(),
+                    save_dir: "/tmp".into(),
+                    total_bytes: 9,
+                    status: 3,
+                    error_message: String::new(),
+                }),
+            },
+        ));
+        let frame = subscriber.try_recv().expect("notice is published");
+        let fluxdown_protocol::ServiceEvent::Daemon(DaemonEvent::TaskNotice(notice)) = frame.event
+        else {
+            panic!("task notices use the dedicated event, not an engine message");
+        };
+        assert_eq!(notice.delivery_id, "d-1");
+        assert_eq!(notice.event, "task.completed");
+        assert_eq!(notice.timestamp_ms, 42);
+        let task = notice.task.expect("task snapshot");
+        assert_eq!(
+            (task.id.as_str(), task.total_bytes, task.status),
+            ("t-1", 9, 3)
+        );
     }
 
     #[test]

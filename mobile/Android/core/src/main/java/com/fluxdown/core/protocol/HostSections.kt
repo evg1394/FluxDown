@@ -27,6 +27,8 @@ object HostSection {
     const val agentShell = "agent.shell"
     /** `PowerStatusDto`。 */
     const val agentPower = "agent.power"
+    /** `CloudNotifyStateDto`：云端推送概览（渠道 / 用量 / 本机上报偏好）；移动端暂不展示。 */
+    const val agentCloudNotify = "agent.cloudNotify"
     /** `BTreeMap<String, u64>`：sourceId → RSS 条目流修订号。 */
     const val daemonRssItemRevisions = "daemon.rssItemRevisions"
     /** `Vec<PluginDto>`。 */

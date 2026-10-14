@@ -184,13 +184,14 @@ export function DaemonNumberRow({
   unit,
   step,
   disabled,
-}: RowText & { configKey: string; unit?: string; step?: number; disabled?: boolean }) {
+  footer,
+}: RowText & { configKey: string; unit?: string; step?: number; disabled?: boolean; footer?: (value: number) => ReactNode }) {
   const { title, description } = useRowText({ titleKey, descKey })
   const value = useDaemonNumber(configKey)
   const field = daemonConfigField(configKey)
   const float = field?.kind === 'float'
   return (
-    <SettingsRow title={title} description={description} disabled={disabled}>
+    <SettingsRow title={title} description={description} disabled={disabled} {...(footer ? { footer: footer(value) } : {})}>
       <NumberField
         value={value}
         {...(field?.min !== undefined ? { min: field.min } : {})}

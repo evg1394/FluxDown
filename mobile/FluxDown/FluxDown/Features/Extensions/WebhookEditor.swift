@@ -74,7 +74,7 @@ struct WebhookEditorSheet: View {
 
     // MARK: 草稿
 
-    /// 草稿 → 模型（与 Dart `_draft` 同序同规则）。
+    /// 草稿 → 模型。
     private func buildDraft() -> WebhookEndpoint {
         var map: [String: String] = [:]
         for row in headers {
@@ -113,6 +113,15 @@ struct WebhookEditorSheet: View {
     }
 
     private var currentPreset: WebhookPreset? { presets.first { $0.id == preset } }
+
+    /// URL 输入下方的提示文案键（ntfy / 钉钉各有专属提示）。
+    private static func urlHintKey(for preset: String) -> String {
+        switch preset {
+        case "ntfy": "webhookUrlHintNtfy"
+        case "dingtalk": "webhookUrlHintDingtalk"
+        default: "webhookUrlHint"
+        }
+    }
 
     private var previewText: String {
         WebhookTemplate.previewRequest(
@@ -257,7 +266,7 @@ struct WebhookEditorSheet: View {
                 Text(L("webhookFieldUrl"))
             } footer: {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text(L(preset == "ntfy" ? "webhookUrlHintNtfy" : "webhookUrlHint"))
+                    Text(L(Self.urlHintKey(for: preset)))
                     if urlTouched, let urlError {
                         Label(L(urlError), systemImage: FluxSymbol.failure)
                             .foregroundStyle(Color.fdStatusFailedText)

@@ -13,7 +13,7 @@ import type { EndpointSpec, TestReport } from './endpoints'
 import { WebhookGroup } from './WebhookGroup'
 import type { RunWrite } from './write'
 
-export function EndpointsGroup({ disabled, runWrite }: { disabled: boolean; runWrite: RunWrite }) {
+export function EndpointsGroup({ disabled, runWrite, onTryCloud }: { disabled: boolean; runWrite: RunWrite; onTryCloud: (() => void) | null }) {
   const t = useT()
   const raw = useConfigValue(ENDPOINTS_KEY)
   const endpoints = useMemo(() => parseEndpoints(raw), [raw])
@@ -54,10 +54,25 @@ export function EndpointsGroup({ disabled, runWrite }: { disabled: boolean; runW
   }
 
   return (
-    <WebhookGroup title={t('notifyGroupWebhook')} subtitle={t('webhookSemantics')}>
+    <WebhookGroup subtitle={t('webhookSemantics')}>
       <div className="flex w-full flex-col gap-0.5">
         {endpoints.length === 0 ? (
-          <EmptyState icon={Webhook} title={t('webhookEmptyTitle')} description={t('webhookEmptyDesc')} />
+          <EmptyState
+            icon={Webhook}
+            title={t('webhookEmptyTitle')}
+            description={t('webhookEmptyDescSelfHosted')}
+            action={
+              onTryCloud ? (
+                <button
+                  type="button"
+                  className="text-xs text-primary underline-offset-2 hover:underline focus-visible:underline focus-visible:outline-none"
+                  onClick={onTryCloud}
+                >
+                  {t('webhookTryCloud')}
+                </button>
+              ) : undefined
+            }
+          />
         ) : null}
         {endpoints.map((endpoint) => (
           <EndpointRow

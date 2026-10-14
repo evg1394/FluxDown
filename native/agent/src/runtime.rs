@@ -169,6 +169,7 @@ pub(crate) async fn run_with(
         remote_tasks: state.remote_tasks.clone(),
         shell: crate::shell::shell_status(host.availability, &state.preferences),
         update: crate::update::initial_status(&update_target),
+        cloud_notify: crate::cloud_notify::initial_state(state.cloud_notify),
         ..AgentSnapshot::default()
     };
     let events = AgentEventHub::new(initial);
@@ -196,7 +197,9 @@ pub(crate) async fn run_with(
     let shell = ShellState::new(host.availability, daemon.clone(), events.clone());
     let power = Arc::new(PowerService::new(events.clone()));
     let power_task = tokio::spawn(power.clone().run(cancel.clone()));
-    let event_task = spawn_daemon_projection(daemon_events, events.clone(), cancel.clone());
+    let (notice_tx, notice_rx) = crate::cloud_notify::notice_channel();
+    let event_task =
+        spawn_daemon_projection(daemon_events, events.clone(), notice_tx, cancel.clone());
     let notifier = Arc::new(crate::notification::Notifier::new(
         paths.agent_data_dir.clone(),
     ));
@@ -271,10 +274,12 @@ pub(crate) async fn run_with(
         api: cloud_api,
         sync,
         remote,
+        notify,
         sync_task,
         remote_task,
         device_meta_task,
         cdn_task,
+        notify_task,
     } = start_cloud_services(
         fluxcloud_base_url(
             std::env::var("FLUXCLOUD_BASE_URL").ok(),
@@ -284,6 +289,7 @@ pub(crate) async fn run_with(
         &events,
         &shared_state,
         &store,
+        notice_rx,
         &cancel,
     )
     .await?;
@@ -364,6 +370,7 @@ pub(crate) async fn run_with(
             cloud,
             sync,
             remote,
+            notify,
             capture.clone(),
             blobs.clone(),
             diagnostics.clone(),
@@ -477,6 +484,7 @@ pub(crate) async fn run_with(
     for (task, handle) in [
         ("daemon event projection", event_task),
         ("CDN", cdn_task),
+        ("cloud notify", notify_task),
         ("cloud sync", sync_task),
         ("remote tasks", remote_task),
         ("device link", link_task),
@@ -623,6 +631,7 @@ async fn await_daemon_ready(readiness: DaemonReadiness) -> AgentResult {
 pub(crate) fn spawn_daemon_projection(
     mut daemon_events: tokio::sync::mpsc::Receiver<DaemonClientEvent>,
     events: AgentEventHub,
+    notices: crate::cloud_notify::NoticeSender,
     cancel: CancellationToken,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
@@ -641,7 +650,7 @@ pub(crate) fn spawn_daemon_projection(
                         }
                         DaemonClientEvent::Event(frame) => {
                             if let ServiceEvent::Daemon(event) = frame.event {
-                                events.apply_daemon_event(event);
+                                crate::cloud_notify::route_daemon_event(&events, &notices, event);
                             }
                         }
                         DaemonClientEvent::Stale => {
@@ -686,10 +695,12 @@ pub(crate) struct CloudServices {
     pub(crate) api: crate::cloud::CloudApi,
     pub(crate) sync: Arc<crate::sync::SyncService>,
     pub(crate) remote: Arc<crate::remote::RemoteTaskService>,
+    pub(crate) notify: Arc<crate::cloud_notify::CloudNotifyService>,
     pub(crate) sync_task: tokio::task::JoinHandle<()>,
     pub(crate) remote_task: tokio::task::JoinHandle<()>,
     pub(crate) device_meta_task: tokio::task::JoinHandle<()>,
     pub(crate) cdn_task: tokio::task::JoinHandle<()>,
+    pub(crate) notify_task: tokio::task::JoinHandle<()>,
 }
 
 /// 装配并启动云相关服务；桌面 / server 与嵌入式宿主共用，差别只在 `base_url` 的来源。
@@ -699,6 +710,7 @@ pub(crate) async fn start_cloud_services(
     events: &AgentEventHub,
     state: &Arc<tokio::sync::Mutex<AgentState>>,
     store: &Arc<StateStore>,
+    notices: crate::cloud_notify::NoticeReceiver,
     cancel: &CancellationToken,
 ) -> Result<CloudServices, crate::cloud::CloudError> {
     let cloud_client = crate::cloud::CloudClient::new(base_url, state.clone(), store.clone())?
@@ -717,13 +729,24 @@ pub(crate) async fn start_cloud_services(
         store.clone(),
     ));
     let sync_task = tokio::spawn(sync.clone().run(cancel.clone()));
-    let remote = Arc::new(crate::remote::RemoteTaskService::new(
+    let notify = Arc::new(crate::cloud_notify::CloudNotifyService::new(
         api.clone(),
-        daemon.clone(),
         events.clone(),
         state.clone(),
         store.clone(),
+        cancel.clone(),
     ));
+    let notify_task = tokio::spawn(notify.clone().run(notices));
+    let remote = Arc::new(
+        crate::remote::RemoteTaskService::new(
+            api.clone(),
+            daemon.clone(),
+            events.clone(),
+            state.clone(),
+            store.clone(),
+        )
+        .with_notify_feed(notify.feed()),
+    );
     let remote_task = tokio::spawn(remote.clone().run(cancel.clone()));
     let device_meta_task = tokio::spawn(
         Arc::new(crate::device_meta::DeviceMetaService::new(
@@ -741,10 +764,12 @@ pub(crate) async fn start_cloud_services(
         api,
         sync,
         remote,
+        notify,
         sync_task,
         remote_task,
         device_meta_task,
         cdn_task,
+        notify_task,
     })
 }
 

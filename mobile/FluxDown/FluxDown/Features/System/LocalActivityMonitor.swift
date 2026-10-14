@@ -16,7 +16,7 @@ import os
 final class LocalActivityMonitor {
     private let container: AppContainer
     private let onChange: @MainActor (LocalActivity) -> Void
-    private let log = Logger(subsystem: "com.fluxdown.FluxDown", category: "background")
+    private let log = Logger(subsystem: "com.fluxdown.app", category: "background")
 
     private var batch = TransferBatch()
     private var current = LocalActivity.idle

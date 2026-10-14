@@ -1,5 +1,6 @@
 package com.fluxdown.app.feature.downloads
 
+import androidx.compose.foundation.gestures.animateScrollBy
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -13,6 +14,7 @@ import androidx.compose.foundation.layout.asPaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.lazy.LazyColumn
@@ -96,10 +98,12 @@ import com.fluxdown.fluxui.theme.FluxText
 import com.fluxdown.fluxui.theme.FluxTheme
 import kotlin.math.max
 import kotlin.math.min
+import kotlinx.coroutines.launch
 
 private const val HEADER_KEY = "header"
 private const val HERO_KEY = "hero"
 private const val SLOT_KEY = "slot"
+private const val TAIL_KEY = "tail"
 
 /** 状态文件夹显示名（ScopeTabs / Rail / expanded 标题共用）。 */
 @Composable
@@ -171,7 +175,11 @@ fun DownloadsScreen(expanded: Boolean) {
                     Modifier
                         .align(Alignment.BottomCenter)
                         .fillMaxWidth()
-                        .padding(start = 16.dp, end = 16.dp, bottom = 22.dp),
+                        .padding(
+                            start = 16.dp,
+                            end = 16.dp,
+                            bottom = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding() + 8.dp,
+                        ),
                     contentAlignment = Alignment.BottomCenter,
                 ) { ExpandedSelectionDock() }
             }
@@ -182,7 +190,7 @@ fun DownloadsScreen(expanded: Boolean) {
 // ── 滚动度量 ─────────────────────────────────────────────────────────────────
 
 /**
- * 读取 LazyColumn 布局信息的度量器：全部在 layer / draw 阶段调用（不触发重组）。
+ * 读取 LazyColumn 布局信息的度量器：全部在 layer / draw 阶段或快照流中调用（不触发重组）。
  * 英雄卡折叠进度按 §3.3：`p = clamp((scrollTop − .35h)/(.5h), 0, 1)`。
  */
 @Stable
@@ -217,6 +225,34 @@ internal class ListTracker(private val state: LazyListState, private val topInse
         val slot = find(SLOT_KEY) ?: return if (state.firstVisibleItemIndex >= 2) -1e6f else 1e6f
         val origin = if (headerRest.isNaN()) 0f else headerRest
         return slot.offset - origin + topInsetPx
+    }
+
+    /**
+     * 英雄区吸附（iOS 大标题式）：滚动停在页头与英雄卡之间时，过半 → 滚到完全折叠（占位项贴顶、读数条出现），
+     * 否则回到顶部。返回需滚动的像素；静止于顶部或已越过英雄卡 → null。
+     */
+    fun snapDelta(): Float? {
+        val hero = find(HERO_KEY) ?: return null
+        val s = heroScroll()
+        if (restTop.isNaN()) return null
+        val total = restTop + hero.size
+        if (s <= 1f || s >= total - 1f) return null
+        return if (s >= total / 2f) total - s else -s
+    }
+
+    /**
+     * 短列表补白（px）：占位项之后的内容（筛选区 + 行 + 补白）至少铺满视口，任务再少也能把英雄卡滚到完全折叠。
+     * 补白项不可见时以最后一个可见项的底边估计（只会偏大，且补白在视口外，校正时不跳动）；
+     * 占位项已滚过（长列表）→ null，沿用上次值。
+     */
+    fun tailNeed(): Int? {
+        val info = state.layoutInfo
+        val slot = find(SLOT_KEY) ?: return null
+        val end = find(TAIL_KEY)?.offset
+            ?: info.visibleItemsInfo.lastOrNull()?.let { it.offset + it.size }
+            ?: return null
+        val room = info.viewportSize.height - info.beforeContentPadding - info.afterContentPadding
+        return (room - (end - slot.offset)).coerceAtLeast(0)
     }
 }
 
@@ -256,7 +292,12 @@ private fun DownloadsListBody(
     val swipe = LocalSwipeRevealCoordinator.current
     val density = LocalDensity.current
     val margin = FluxTheme.space.screenMargin
-    val clearance = if (expanded) FluxTheme.space.pageClearance else FluxTheme.space.dockClearance
+    val bottomInset = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
+    val clearance = bottomInset + if (expanded && !nav.selecting) {
+        FluxTheme.space.pageClearance
+    } else {
+        FluxTheme.space.dockClearance
+    }
     val list = view.list
     val prefs = view.prefs
     val style = remember(prefs?.density, prefs?.fields) { prefs?.let { RowStyle(it.density, it.fields) } }
@@ -264,10 +305,24 @@ private fun DownloadsListBody(
     val a11y = rememberTouchExploration()
     val dockConnection = remember(nav, density) { DockScrollConnection(nav, with(density) { 5.dp.toPx() }) }
     val nearTopPx = with(density) { 24.dp.toPx() }
+    val motion = FluxTheme.motion
+    var tailPx by remember { mutableIntStateOf(0) }
 
     LaunchedEffect(listState, nearTopPx) {
         snapshotFlow { listState.firstVisibleItemIndex == 0 && listState.firstVisibleItemScrollOffset < nearTopPx }
             .collect { if (it) nav.dockMini = false }
+    }
+    if (!expanded) {
+        LaunchedEffect(tracker) {
+            snapshotFlow { tracker.tailNeed() }.collect { need -> if (need != null) tailPx = need }
+        }
+        // 松手 / 惯性结束后吸附：英雄卡不停在半折叠状态。用户再次拖动会打断吸附动画（只取消该子协程）。
+        LaunchedEffect(tracker, motion) {
+            snapshotFlow { listState.isScrollInProgress }.collect { scrolling ->
+                val delta = if (scrolling) null else tracker.snapDelta()
+                if (delta != null) launch { listState.animateScrollBy(delta, motion.of(motion.page)) }
+            }
+        }
     }
 
     LazyColumn(
@@ -353,6 +408,11 @@ private fun DownloadsListBody(
                 }
             }
         }
+        if (!expanded) {
+            item(key = TAIL_KEY, contentType = ContentType.Tail) {
+                Spacer(Modifier.fillMaxWidth().height(with(density) { tailPx.toDp() }))
+            }
+        }
     }
 }
 
@@ -425,6 +485,8 @@ private fun HeroCard() {
         title = str(R.string.mobileInstrumentLabel),
         pauseAllLabel = str(R.string.pauseAll),
         resumeAllLabel = str(R.string.resumeAll),
+        // 空闲（无活跃 / 排队任务、无传输）时收起波形，首页默认更紧凑；开始下载再展开
+        showWaveform = stats.active > 0 || stats.pending > 0 || stats.down > 0 || stats.up > 0,
     )
 }
 

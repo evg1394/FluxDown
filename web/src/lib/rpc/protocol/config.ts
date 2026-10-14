@@ -41,6 +41,24 @@ export interface ProxyTestResponse {
   latencyMs: number;
 }
 
+/** `daemon.link.probe` 参数：只读 HEAD 探测下载链接。 */
+export interface LinkProbeParams {
+  url: string;
+}
+
+export type LinkProbeVerdict = 'resource' | 'notResource' | 'unknown';
+
+export interface LinkProbeResult {
+  verdict: LinkProbeVerdict;
+  /** 跟随重定向后的地址；未拿到响应时等于原 url。 */
+  finalUrl: string;
+  fileName: string;
+  /** 小写 MIME essence，无则空。 */
+  mime: string;
+  /** 0 = 未知。 */
+  totalBytes: number;
+}
+
 /** 按域连接上限摘要。 */
 export interface ConnPolicySummaryDto {
   domainCount: number;
@@ -166,7 +184,7 @@ const readOnly = (key: string, dflt = ''): DaemonConfigField => ({
 export const DAEMON_CONFIG_FIELDS: readonly DaemonConfigField[] = [
   // 下载
   text('default_save_dir'),
-  int('default_segments', '0', 0, 64),
+  int('default_segments', '0', 0, 512),
   int('auto_max_connections', '16', 0, 128),
   bool('cdn_multi_enabled', 'false'),
   int('cdn_max_nodes', '0', 0, 8),
@@ -189,6 +207,7 @@ export const DAEMON_CONFIG_FIELDS: readonly DaemonConfigField[] = [
   bool('bt_enabled', 'true'),
   bool('bt_enable_dht', 'true'),
   bool('bt_enable_upnp', 'true'),
+  bool('bt_enable_utp', 'true'),
   int('bt_port_start', '6881', 1, 65_535),
   int('bt_port_end', '6891', 1, 65_535),
   oneOf('bt_mse_mode', 'enabled', BT_MSE_MODES),

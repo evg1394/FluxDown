@@ -141,6 +141,9 @@ pub struct AgentSnapshot {
     pub power: PowerStatusDto,
     #[serde(default)]
     pub update: crate::UpdateStatusDto,
+    /// 云端推送状态（未登录时只保留本机上报开关与隐私字段，`overview` 为空）。
+    #[serde(default)]
+    pub cloud_notify: crate::CloudNotifyStateDto,
 }
 
 /// `system.snapshot` 的服务角色对应主体。
@@ -200,6 +203,9 @@ pub enum DaemonEvent {
     SelectionResolved {
         request_id: String,
     },
+    /// 任务生命周期语义事件（与 webhook 同源）。只供 agent 消费云端推送，agent 不转发给 UI；
+    /// 不改变 daemon 快照。
+    TaskNotice(crate::TaskNoticeDto),
 }
 
 /// agent 自有或转发的状态变化事件。
@@ -229,6 +235,8 @@ pub enum AgentEvent {
     ShellChanged(ShellStatusDto),
     PowerChanged(PowerStatusDto),
     UpdateChanged(crate::UpdateStatusDto),
+    /// 云端推送状态整体替换（`AgentSnapshot.cloud_notify`）。
+    CloudNotifyChanged(crate::CloudNotifyStateDto),
     /// 外部捕获未经确认直接建成的任务（免打扰下载 / 系统打开链接 / 拖入）。一次性通知，
     /// 不进快照；官方 UI 据此为单任务弹出进度窗口。失败条目不在列表中。
     CaptureTasksStarted(Vec<String>),
@@ -275,6 +283,12 @@ pub fn apply_agent_event(snapshot: &mut AgentSnapshot, event: &AgentEvent) {
                 snapshot.cloud_devices.clear();
                 snapshot.remote_tasks.clear();
                 snapshot.cloud_connection = crate::CloudConnectionDto::default();
+                snapshot.cloud_notify.overview = None;
+                snapshot.cloud_notify.loading = false;
+                snapshot.cloud_notify.last_error_reason = None;
+                snapshot.cloud_notify.updated_at_unix_ms = None;
+                snapshot.cloud_notify.recent_deliveries.clear();
+                snapshot.cloud_notify.recent_next_cursor = None;
             }
         }
         AgentEvent::SyncChanged(sync) => snapshot.sync.clone_from(sync),
@@ -303,6 +317,7 @@ pub fn apply_agent_event(snapshot: &mut AgentSnapshot, event: &AgentEvent) {
         AgentEvent::ShellChanged(shell) => snapshot.shell.clone_from(shell),
         AgentEvent::PowerChanged(power) => snapshot.power = *power,
         AgentEvent::UpdateChanged(update) => snapshot.update.clone_from(update),
+        AgentEvent::CloudNotifyChanged(state) => snapshot.cloud_notify.clone_from(state),
         AgentEvent::CaptureTasksStarted(_) | AgentEvent::SessionRevoked(_) => {}
     }
 }
@@ -351,7 +366,7 @@ pub fn apply_daemon_event(snapshot: &mut DaemonSnapshot, event: &DaemonEvent) {
                 .task_runtime
                 .insert(runtime.task_id.clone(), runtime);
         }
-        DaemonEvent::TaskActivityAdded(_) => {}
+        DaemonEvent::TaskActivityAdded(_) | DaemonEvent::TaskNotice(_) => {}
         DaemonEvent::SnapshotReplaced(replacement) => snapshot.clone_from(replacement),
         DaemonEvent::Engine(message) => apply_engine_message(snapshot, message),
         DaemonEvent::TaskChanged(task) => {

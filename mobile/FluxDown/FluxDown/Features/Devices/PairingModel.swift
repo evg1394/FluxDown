@@ -55,7 +55,7 @@ final class PairingModel {
     @ObservationIgnored private var closed = false
     @ObservationIgnored private var chain: Task<Void, Never>?
     @ObservationIgnored private var expiryTask: Task<Void, Never>?
-    private static let log = Logger(subsystem: "com.fluxdown.FluxDown", category: "pairing")
+    private static let log = Logger(subsystem: "com.fluxdown.app", category: "pairing")
 
     /// 配对码到期后重新申请前的最短等待（防止主机时钟偏差造成刷新风暴）。
     private static let minRefreshDelayMs: Int64 = 3000

@@ -95,6 +95,7 @@ impl LinkTaskCreator for DaemonTaskCreator {
                     // 对端下发的任务没有人在本机确认选择框：全选文件直接开始。
                     unattended: true,
                     hint_file_size: None,
+                    name_hint: None,
                 }),
             )
             .await
@@ -251,7 +252,7 @@ pub fn rpc_value<T: serde::Serialize>(
     }
 }
 
-/// 互联层错误 → 兼容 API 错误（决定响应状态码，与 hub / 旧 server 一致）。
+/// 互联层错误 → 兼容 API 错误（保留历史响应状态码）。
 fn api_error(error: LinkError) -> ApiError {
     match error {
         LinkError::Unauthorized | LinkError::NotPaired => ApiError::Unauthorized,

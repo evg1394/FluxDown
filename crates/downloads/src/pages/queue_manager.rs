@@ -3,7 +3,8 @@
 use std::sync::Arc;
 
 use fluxdown_protocol::{
-    AgentEvent, AgentSnapshot, DaemonEvent, LATER_QUEUE_ID, MAIN_QUEUE_ID, QueueDto, ServiceEvent,
+    AgentEvent, AgentSnapshot, DaemonEvent, LATER_QUEUE_ID, MAIN_QUEUE_ID, MAX_TASK_SEGMENTS,
+    QueueDto, ServiceEvent,
 };
 use fluxdown_ui_components::{
     ControlExt as _, FluxIcon, check_row, field_error, field_hint, form as form_layout, form_field,
@@ -15,13 +16,14 @@ use fluxdown_ui_theme::active_theme;
 use gpui::{
     Anchor, App, AppContext as _, ClickEvent, Context, Div, Entity, FontWeight,
     InteractiveElement as _, IntoElement, ParentElement, Render, SharedString,
-    StatefulInteractiveElement as _, Styled, Window, div, prelude::FluentBuilder as _, px,
+    StatefulInteractiveElement as _, Styled, Subscription, Window, div,
+    prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
     Disableable as _, Icon, WindowExt as _,
     button::{Button, ButtonVariants as _},
     h_flex,
-    input::{Input, InputState},
+    input::{Input, InputEvent, InputState},
     menu::{DropdownMenu as _, PopupMenuItem},
     scroll::ScrollableElement as _,
     switch::Switch,
@@ -29,6 +31,7 @@ use gpui_component::{
     v_flex,
 };
 
+use crate::components::threads_risk::{parse_segments_input, threads_risk_callout};
 use crate::controller::{DownloadsCommand, DownloadsPort, QueueFields};
 
 /// 左列队列列表宽度。
@@ -40,8 +43,8 @@ const TIME_MENU_MAX_HEIGHT: gpui::Pixels = px(280.);
 /// 分钟下拉的步长。
 const MINUTE_STEP: u16 = 5;
 
-/// 队列默认线程数上限（与 `download.default_segments` 的 0..=64 范围一致）。
-const MAX_SEGMENTS: i32 = 64;
+/// 队列默认线程数上限（与 `download.default_segments` 的范围一致）。
+const MAX_SEGMENTS: i32 = MAX_TASK_SEGMENTS;
 
 /// 空串 → 0；否则须为 `0..=max` 内的整数，非法（非数字 / 负数 / 溢出 / 超限）→ `None`。
 fn parse_non_negative(input: &str, max: i32) -> Option<i32> {
@@ -98,6 +101,8 @@ struct QueueForm {
     upload_limit: Entity<InputState>,
     save_dir: Entity<InputState>,
     segments: Entity<InputState>,
+    /// 线程数输入变化即重绘本视图（风险提示随输入联动）。
+    _segments_watch: Subscription,
     user_agent: Entity<InputState>,
     schedule_enabled: bool,
     /// 当日分钟数；`None` = 不定时。
@@ -110,6 +115,7 @@ struct QueueForm {
 
 impl QueueForm {
     fn blank(window: &mut Window, cx: &mut Context<QueueManagerView>) -> Self {
+        let (segments, segments_watch) = watched_input("0".to_owned(), window, cx);
         Self {
             queue_id: None,
             is_running: true,
@@ -118,7 +124,8 @@ impl QueueForm {
             speed_limit: cx.new(|cx| InputState::new(window, cx).default_value("0")),
             upload_limit: cx.new(|cx| InputState::new(window, cx).default_value("0")),
             save_dir: cx.new(|cx| InputState::new(window, cx)),
-            segments: cx.new(|cx| InputState::new(window, cx).default_value("0")),
+            segments,
+            _segments_watch: segments_watch,
             user_agent: cx.new(|cx| InputState::new(window, cx)),
             schedule_enabled: false,
             schedule_start: None,
@@ -133,6 +140,8 @@ impl QueueForm {
         window: &mut Window,
         cx: &mut Context<QueueManagerView>,
     ) -> Self {
+        let (segments, segments_watch) =
+            watched_input(queue.default_segments.to_string(), window, cx);
         Self {
             queue_id: Some(queue.queue_id.clone()),
             is_running: queue.is_running,
@@ -149,9 +158,8 @@ impl QueueForm {
             save_dir: cx.new(|cx| {
                 InputState::new(window, cx).default_value(queue.default_save_dir.clone())
             }),
-            segments: cx.new(|cx| {
-                InputState::new(window, cx).default_value(queue.default_segments.to_string())
-            }),
+            segments,
+            _segments_watch: segments_watch,
             user_agent: cx.new(|cx| {
                 InputState::new(window, cx).default_value(queue.default_user_agent.clone())
             }),
@@ -177,6 +185,21 @@ impl QueueForm {
             ScheduleSlot::Stop => &mut self.schedule_stop,
         }
     }
+}
+
+/// 创建输入框并订阅其变更：每次输入都通知本视图重绘。
+fn watched_input(
+    value: String,
+    window: &mut Window,
+    cx: &mut Context<QueueManagerView>,
+) -> (Entity<InputState>, Subscription) {
+    let input = cx.new(|cx| InputState::new(window, cx).default_value(value));
+    let watch = cx.subscribe(&input, |_, _, event: &InputEvent, cx| {
+        if matches!(event, InputEvent::Change) {
+            cx.notify();
+        }
+    });
+    (input, watch)
 }
 
 /// 新建队列后待补发的定时设置。
@@ -951,25 +974,34 @@ impl QueueManagerView {
                 ],
                 cx,
             ))
-            .child(form_row(
-                [
-                    self.render_field(
-                        "queueMaxConcurrent",
-                        &form.max_concurrent,
-                        Some("queueMaxConcurrentHint"),
+            .child(
+                v_flex()
+                    .w_full()
+                    .child(form_row(
+                        [
+                            self.render_field(
+                                "queueMaxConcurrent",
+                                &form.max_concurrent,
+                                Some("queueMaxConcurrentHint"),
+                                cx,
+                            )
+                            .into_any_element(),
+                            self.render_field(
+                                "queueDefaultSegments",
+                                &form.segments,
+                                Some("queueDefaultSegmentsHint"),
+                                cx,
+                            )
+                            .into_any_element(),
+                        ],
                         cx,
-                    )
-                    .into_any_element(),
-                    self.render_field(
-                        "queueDefaultSegments",
-                        &form.segments,
-                        Some("queueDefaultSegmentsHint"),
-                        cx,
-                    )
-                    .into_any_element(),
-                ],
-                cx,
-            ))
+                    ))
+                    .child(threads_risk_callout(
+                        "queue-manager-threads-risk",
+                        parse_segments_input(&form.segments.read(cx).value()),
+                        self.translator.read(cx),
+                    )),
+            )
             .child(self.render_save_dir_field(form, cx))
             .child(self.render_field(
                 "queueDefaultUserAgent",

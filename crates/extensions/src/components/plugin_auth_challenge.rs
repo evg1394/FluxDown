@@ -1,14 +1,10 @@
-use std::fmt::Write as _;
 use std::sync::Arc;
 
+use fluxdown_ui_components::{QrPalette, qr_image};
 use gpui::{Image, ImageFormat};
-use qrcodegen::{QrCode, QrCodeEcc};
 
 const CHALLENGE_TEXT_LIMIT: usize = 512;
 const MAX_CHALLENGE_DATA_URL_LEN: usize = 256 * 1024;
-// Even a numeric QR at the lowest ECC cannot hold more than 7089 characters.
-const MAX_QR_TEXT_LENGTH: usize = 7089;
-const QR_BORDER: i32 = 4;
 
 #[derive(Default)]
 pub(super) struct AuthChallenge {
@@ -74,44 +70,11 @@ fn challenge_image(value: &str, qrcode: bool) -> Option<Image> {
         // A malformed/unsupported data image remains text, not a QR of its base64 payload.
         return decode_data_image_challenge(value);
     }
-    if !qrcode
-        || value.is_empty()
-        || value.chars().take(MAX_QR_TEXT_LENGTH + 1).count() > MAX_QR_TEXT_LENGTH
-    {
+    if !qrcode {
         return None;
     }
-    let qr = match QrCode::encode_text(value, QrCodeEcc::Medium) {
-        Ok(qr) => qr,
-        Err(error) => {
-            eprintln!("plugin authentication QR encoding failed: {error}");
-            return None;
-        }
-    };
-    match qr_svg(&qr) {
-        Ok(bytes) => Some(Image::from_bytes(ImageFormat::Svg, bytes)),
-        Err(error) => {
-            eprintln!("plugin authentication QR image formatting failed: {error}");
-            None
-        }
-    }
-}
-
-fn qr_svg(qr: &QrCode) -> Result<Vec<u8>, std::fmt::Error> {
-    let side = qr.size() + QR_BORDER * 2;
-    let mut svg = String::with_capacity((qr.size() * qr.size()) as usize * 10);
-    write!(
-        svg,
-        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"240\" height=\"240\" viewBox=\"0 0 {side} {side}\" shape-rendering=\"crispEdges\"><rect width=\"100%\" height=\"100%\" fill=\"white\"/><path fill=\"black\" d=\""
-    )?;
-    for y in 0..qr.size() {
-        for x in 0..qr.size() {
-            if qr.get_module(x, y) {
-                write!(svg, "M{},{}h1v1h-1z", x + QR_BORDER, y + QR_BORDER)?;
-            }
-        }
-    }
-    svg.push_str("\"/></svg>");
-    Ok(svg.into_bytes())
+    // Empty or over-capacity text yields no image; the caller falls back to the full original text.
+    qr_image(value, QrPalette::MONOCHROME)
 }
 
 fn decode_data_image_challenge(value: &str) -> Option<Image> {
@@ -186,35 +149,12 @@ pub(super) fn truncate_challenge_text(value: &str) -> String {
 mod tests {
     use std::sync::Arc;
 
+    use fluxdown_ui_components::MAX_QR_TEXT_LENGTH;
     use gpui::SvgRenderer;
-    use qrcodegen::{QrCode, QrCodeEcc};
 
-    use super::{AuthChallenge, MAX_QR_TEXT_LENGTH, QR_BORDER, challenge_image};
+    use super::{AuthChallenge, challenge_image};
 
     const LOGIN_URL: &str = "https://account.bilibili.com/h5/account-h5/auth/scan-web?navhide=1&callback=close&qrcode_key=regression-test&from=";
-
-    #[test]
-    fn qr_login_has_opaque_white_quiet_zone_and_black_finder_pattern() {
-        let image = challenge_image(LOGIN_URL, true).expect("login URL should encode");
-        let rendered = image
-            .to_image_data(SvgRenderer::new(Arc::new(())))
-            .expect("QR SVG should render");
-        let width = u32::from(rendered.size(0).width) as usize;
-        let pixels = rendered.as_bytes(0).expect("QR pixels");
-        let qr = QrCode::encode_text(LOGIN_URL, QrCodeEcc::Medium).expect("reference dimensions");
-        let side = (qr.size() + QR_BORDER * 2) as usize;
-        let border = QR_BORDER as usize * width / side;
-        // The full quiet zone must remain opaque in dark themes, not just the SVG's first row.
-        for y in 0..border {
-            for x in 0..width {
-                let pixel = (y * width + x) * 4;
-                assert_eq!(&pixels[pixel..pixel + 4], &[255, 255, 255, 255]);
-            }
-        }
-        let finder_center = ((QR_BORDER as usize * 2 + 1) * width) / (side * 2);
-        let finder = (finder_center * width + finder_center) * 4;
-        assert_eq!(&pixels[finder..finder + 4], &[0, 0, 0, 255]);
-    }
 
     #[test]
     fn pending_poll_preserves_preview_but_terminal_response_clears_it() {

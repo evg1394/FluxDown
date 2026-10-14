@@ -129,3 +129,44 @@ describe('apply daemon events', () => {
     expect(capped.webhookDeliveries[0]?.timestampMs).toBe(WEBHOOK_DELIVERY_LIMIT + 4)
   })
 })
+
+describe('apply cloud notify', () => {
+  const state = {
+    reporting: true,
+    includeUrl: true,
+    includeSaveDir: false,
+    catalog: [{ kind: 'email', available: true }],
+    overview: { enabled: true, channels: [], maxChannels: 2, accountEmail: 'a@b.c', usage: {} },
+    loading: true,
+    lastErrorReason: 'cloudUnreachable',
+    updatedAtUnixMs: 1,
+  } as unknown as NonNullable<AgentSnapshot['cloudNotify']>
+
+  test('cloudNotifyChanged replaces the state; taskNotice never changes the snapshot', () => {
+    const initial = { cloudNotify: undefined, daemon: daemon([]) } as unknown as AgentSnapshot
+    const next = applyAgentEvent(initial, { type: 'cloudNotifyChanged', data: state })
+    expect(next.cloudNotify).toBe(state)
+    const notice = applyAgentEvent(next, {
+      type: 'daemon',
+      data: { type: 'taskNotice', data: { deliveryId: 'd', event: 'task.completed', timestampMs: 1, queueId: 'q', queueName: 'Q' } },
+    })
+    expect(notice).toBe(next)
+  })
+
+  test('session end clears overview, loading and error but keeps local preferences and the public catalog', () => {
+    const snapshot = { cloudNotify: state, cloudDevices: [], remoteTasks: [] } as unknown as AgentSnapshot
+    const next = applyAgentEvent(snapshot, { type: 'sessionChanged', data: null })
+    expect(next.cloudNotify).toEqual({
+      reporting: true,
+      catalog: [{ kind: 'email', available: true }],
+      includeUrl: true,
+      includeSaveDir: false,
+      overview: null,
+      loading: false,
+      lastErrorReason: null,
+      updatedAtUnixMs: null,
+      recentDeliveries: [],
+      recentNextCursor: null,
+    })
+  })
+})

@@ -8,7 +8,7 @@ use fluxdown_engine::model::{
     ResolveVariantOption, SegmentDetail, SourceBytes, TaskInfo,
 };
 use fluxdown_engine::rss::model::{RssItemInfo, RssSourceInfo};
-use fluxdown_engine::webhook::{PresetInfo, WebhookDelivery};
+use fluxdown_engine::webhook::{PresetInfo, TaskNotice, WebhookDelivery};
 use fluxdown_protocol::daemon::{
     BtFileDto, CdnNodeDto, GroupDto, HlsQualityOptionDto, QueueDto, QueuePositionDto, RequestBody,
     ResolveVariantOptionDto, RssItemDto, RssSourceDto, SegmentDetailDto, TaskDto,
@@ -342,6 +342,29 @@ pub fn webhook_delivery_to_dto(delivery: WebhookDelivery) -> WebhookDeliveryDto 
         attempts: delivery.attempts,
         success: delivery.success,
         error: delivery.error,
+    }
+}
+
+/// 将云端推送语义事件转换为 wire DTO（`DaemonEvent::TaskNotice`）。
+#[must_use]
+pub fn task_notice_to_dto(notice: TaskNotice) -> fluxdown_protocol::TaskNoticeDto {
+    fluxdown_protocol::TaskNoticeDto {
+        delivery_id: notice.delivery_id,
+        event: notice.event,
+        timestamp_ms: notice.timestamp_ms,
+        queue_id: notice.queue_id,
+        queue_name: notice.queue_name,
+        task: notice
+            .task
+            .map(|task| fluxdown_protocol::TaskNoticeTaskDto {
+                id: task.id,
+                file_name: task.file_name,
+                url: task.url,
+                save_dir: task.save_dir,
+                total_bytes: task.total_bytes,
+                status: task.status,
+                error_message: task.error_message,
+            }),
     }
 }
 

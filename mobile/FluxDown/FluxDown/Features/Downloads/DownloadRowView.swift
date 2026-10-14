@@ -156,20 +156,29 @@ extension View {
     }
 }
 
-/// 首次快照到达前的占位行（`redacted`；减弱动态效果下本身无动画）。
+/// 首次快照到达前的占位行：文字走 `redacted`，图形用 `.quaternary` 填充（不填会按前景色画成纯黑块），
+/// 整行 1.6s 一个周期呼吸（同 Android `FluxSkeletonRows`）；减弱动态效果下静止。
 struct DownloadRowPlaceholder: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var dimmed = false
+
     var body: some View {
         HStack(spacing: 12) {
-            RoundedRectangle(cornerRadius: 12, style: .continuous).frame(width: 44, height: 44)
+            RoundedRectangle(cornerRadius: 12, style: .continuous).fill(.quaternary).frame(width: 44, height: 44)
             VStack(alignment: .leading, spacing: 6) {
                 Text(verbatim: "placeholder-file-name.zip").font(.fluxTaskName)
                 Text(verbatim: "12.3 MB/s").font(.footnote)
-                Capsule().frame(height: 5)
+                Capsule().fill(.quaternary).frame(height: 5)
             }
-            Circle().frame(width: 36, height: 36)
+            Circle().fill(.quaternary).frame(width: 36, height: 36)
         }
         .padding(.vertical, 4)
         .redacted(reason: .placeholder)
+        .opacity(dimmed ? 0.5 : 1)
+        .onAppear {
+            guard !reduceMotion else { return }
+            withAnimation(.easeInOut(duration: 0.8).repeatForever(autoreverses: true)) { dimmed = true }
+        }
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(L("mobileLoading"))
     }

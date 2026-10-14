@@ -227,6 +227,7 @@ export function applyDaemonEvent(snapshot: DaemonSnapshot, event: DaemonEvent): 
       return { ...snapshot, taskRuntime: { ...snapshot.taskRuntime, [runtime.taskId]: runtime } }
     }
     case 'taskActivityAdded':
+    case 'taskNotice':
       return snapshot
     case 'snapshotReplaced':
       return event.data
@@ -301,7 +302,24 @@ export function applyAgentEvent(snapshot: AgentSnapshot, event: AgentEvent): Age
     case 'sessionChanged':
       // 会话结束后账号维度投影随之失效（对应 Rust apply_agent_event）。
       return event.data === null
-        ? { ...snapshot, session: null, cloudDevices: [], remoteTasks: [], cloudConnection: { state: 'disconnected' } }
+        ? {
+            ...snapshot,
+            session: null,
+            cloudDevices: [],
+            remoteTasks: [],
+            cloudConnection: { state: 'disconnected' },
+            cloudNotify: snapshot.cloudNotify
+              ? {
+                  ...snapshot.cloudNotify,
+                  overview: null,
+                  loading: false,
+                  lastErrorReason: null,
+                  updatedAtUnixMs: null,
+                  recentDeliveries: [],
+                  recentNextCursor: null,
+                }
+              : snapshot.cloudNotify,
+          }
         : { ...snapshot, session: event.data }
     case 'syncChanged':
       return { ...snapshot, sync: event.data }
@@ -335,6 +353,8 @@ export function applyAgentEvent(snapshot: AgentSnapshot, event: AgentEvent): Age
       return { ...snapshot, shell: event.data }
     case 'powerChanged':
       return { ...snapshot, power: event.data }
+    case 'cloudNotifyChanged':
+      return { ...snapshot, cloudNotify: event.data }
     case 'captureTasksStarted':
     case 'sessionRevoked':
       return snapshot

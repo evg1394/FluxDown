@@ -39,6 +39,8 @@ pub const AGENT_LINK_DISCOVERED: &str = "agent.linkDiscovered";
 pub const AGENT_SHELL: &str = "agent.shell";
 /// `PowerStatusDto`。
 pub const AGENT_POWER: &str = "agent.power";
+/// `CloudNotifyStateDto`：云端推送状态（原生移动端暂不展示，仅作通用通道完整性）。
+pub const AGENT_CLOUD_NOTIFY: &str = "agent.cloudNotify";
 /// `BTreeMap<String, u64>`：sourceId → RSS 条目流修订号（变化即应重新 `daemon.rss.getItems`）。
 pub const DAEMON_RSS_ITEM_REVISIONS: &str = "daemon.rssItemRevisions";
 /// `Vec<PluginDto>`。
@@ -87,6 +89,7 @@ pub(crate) enum Section {
     AgentLinkDiscovered,
     AgentShell,
     AgentPower,
+    AgentCloudNotify,
     DaemonRssItemRevisions,
     DaemonPlugins,
     DaemonComponents,
@@ -94,7 +97,7 @@ pub(crate) enum Section {
 }
 
 impl Section {
-    pub(crate) const ALL: [Self; 15] = [
+    pub(crate) const ALL: [Self; 16] = [
         Self::AgentSession,
         Self::AgentSync,
         Self::AgentCloudConnection,
@@ -106,6 +109,7 @@ impl Section {
         Self::AgentLinkDiscovered,
         Self::AgentShell,
         Self::AgentPower,
+        Self::AgentCloudNotify,
         Self::DaemonRssItemRevisions,
         Self::DaemonPlugins,
         Self::DaemonComponents,
@@ -129,6 +133,7 @@ impl Section {
             Self::AgentLinkDiscovered => AGENT_LINK_DISCOVERED,
             Self::AgentShell => AGENT_SHELL,
             Self::AgentPower => AGENT_POWER,
+            Self::AgentCloudNotify => AGENT_CLOUD_NOTIFY,
             Self::DaemonRssItemRevisions => DAEMON_RSS_ITEM_REVISIONS,
             Self::DaemonPlugins => DAEMON_PLUGINS,
             Self::DaemonComponents => DAEMON_COMPONENTS,
@@ -150,6 +155,7 @@ impl Section {
             Self::AgentLinkDiscovered => to_json(self.key(), &snapshot.link_discovered),
             Self::AgentShell => to_json(self.key(), &snapshot.shell),
             Self::AgentPower => to_json(self.key(), &snapshot.power),
+            Self::AgentCloudNotify => to_json(self.key(), &snapshot.cloud_notify),
             Self::DaemonRssItemRevisions => {
                 to_json(self.key(), &snapshot.daemon.rss_item_revisions)
             }
@@ -204,6 +210,8 @@ pub(crate) fn affected(event: &AgentEvent) -> &'static [Section] {
             },
             DaemonEvent::TaskRuntimeChanged(_)
             | DaemonEvent::TaskActivityAdded(_)
+            // 云端推送事件只由 agent 消费，不应到达投影；到达也不改变任何分区。
+            | DaemonEvent::TaskNotice(_)
             | DaemonEvent::SnapshotReplaced(_)
             | DaemonEvent::TaskChanged(_)
             | DaemonEvent::TaskDeleted { .. }
@@ -225,6 +233,7 @@ pub(crate) fn affected(event: &AgentEvent) -> &'static [Section] {
         AgentEvent::LinkDiscoveredChanged(_) => &[Section::AgentLinkDiscovered],
         AgentEvent::ShellChanged(_) => &[Section::AgentShell],
         AgentEvent::PowerChanged(_) => &[Section::AgentPower],
+        AgentEvent::CloudNotifyChanged(_) => &[Section::AgentCloudNotify],
         AgentEvent::DaemonSnapshotReplaced(_)
         | AgentEvent::DaemonConnectionChanged(_)
         | AgentEvent::CloudDevicesChanged(_)

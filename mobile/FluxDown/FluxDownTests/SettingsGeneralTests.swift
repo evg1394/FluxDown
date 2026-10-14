@@ -86,7 +86,7 @@ struct GeneralRowTests {
     @Test func searchIndexesEveryRow() {
         let ctx = SettingsSearchContext(form: SettingsConfigForm(), isLocalHost: true, capabilities: [])
         let ids = GeneralPage.searchEntries(ctx).map(\.id)
-        #expect(ids == GeneralRow.allCases.map(\.id))
+        #expect(ids == GeneralRow.allCases.filter { FeatureFlags.webhooks || $0 != .activityWebhooks }.map(\.id))
         #expect(Set(ids).count == ids.count)
     }
 

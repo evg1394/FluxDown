@@ -1,8 +1,8 @@
 //! FluxCloud HTTPS 客户端、并发 401 单飞刷新与一次重放。
 //!
 //! 服务地址：`default_base_url` 由启动环境固定；仅调试构建允许经
-//! [`CloudClient::set_endpoint`] 覆盖（持久化在 agent 私有状态），与 Flutter
-//! `CloudApiConfig` 同一策略——正式包锁定默认地址，避免残留覆盖值指向失效地址。
+//! [`CloudClient::set_endpoint`] 覆盖（持久化在 agent 私有状态；GPUI 账户页同样只在调试构建展示该入口）
+//! ——正式包锁定默认地址，避免残留覆盖值指向失效地址。
 
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
@@ -21,13 +21,13 @@ use crate::event_hub::AgentEventHub;
 use crate::http_client::LazyHttpClient;
 use crate::state::{AgentState, CloudCredentials, StateStore};
 
-/// 是否允许运行期覆盖 FluxCloud 地址；与 Flutter `kDebugMode` 门控一致。
+/// 是否允许运行期覆盖 FluxCloud 地址；仅调试构建。
 const ENDPOINT_EDITABLE: bool = cfg!(debug_assertions);
 
 /// 云端连接的 TCP keepalive 探测间隔。
 const TCP_KEEPALIVE: Duration = Duration::from_secs(30);
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct RequestEpoch(u64);
 
 #[derive(Clone)]
@@ -922,6 +922,11 @@ impl CloudError {
             Some("target_device_offline") => Some(ErrorReason::TargetDeviceOffline),
             Some("task_state_conflict") => Some(ErrorReason::TaskStateConflict),
             Some("task_device_mismatch") => Some(ErrorReason::TaskDeviceMismatch),
+            Some("notify_channel_limit") => Some(ErrorReason::NotifyChannelLimit),
+            Some("notify_disabled") => Some(ErrorReason::NotifyDisabled),
+            Some(
+                "notify_target_invalid" | "notify_kind_unavailable" | "notify_email_unverified",
+            ) => Some(ErrorReason::NotifyTargetInvalid),
             _ => None,
         };
         by_code.or(match self.status {
@@ -942,9 +947,11 @@ impl CloudError {
                 | ErrorReason::DeviceUntrusted
                 | ErrorReason::SessionExpired,
             ) => (ApplicationErrorCode::Unauthorized, false),
-            Some(ErrorReason::InvalidVerificationCode | ErrorReason::WrongPassword) => {
-                (ApplicationErrorCode::InvalidArgument, false)
-            }
+            Some(
+                ErrorReason::InvalidVerificationCode
+                | ErrorReason::WrongPassword
+                | ErrorReason::NotifyTargetInvalid,
+            ) => (ApplicationErrorCode::InvalidArgument, false),
             Some(ErrorReason::RateLimited) => (ApplicationErrorCode::Unavailable, true),
             Some(
                 ErrorReason::EmailTaken
@@ -954,11 +961,14 @@ impl CloudError {
                 | ErrorReason::DeviceLimit
                 | ErrorReason::SyncDeviceLimit
                 | ErrorReason::TaskStateConflict
-                | ErrorReason::TaskDeviceMismatch,
+                | ErrorReason::TaskDeviceMismatch
+                | ErrorReason::NotifyChannelLimit,
             ) => (ApplicationErrorCode::Conflict, false),
-            Some(ErrorReason::RegistrationClosed | ErrorReason::OriginIdChangeNotAllowed) => {
-                (ApplicationErrorCode::Unsupported, false)
-            }
+            Some(
+                ErrorReason::RegistrationClosed
+                | ErrorReason::OriginIdChangeNotAllowed
+                | ErrorReason::NotifyDisabled,
+            ) => (ApplicationErrorCode::Unsupported, false),
             Some(ErrorReason::MailNotConfigured) => (ApplicationErrorCode::Unavailable, false),
             Some(ErrorReason::CloudUnreachable | ErrorReason::TargetDeviceOffline) => {
                 (ApplicationErrorCode::Unavailable, true)
@@ -1978,5 +1988,62 @@ mod tests {
                 tracing::warn!(path = %dir.display(), error = %error, "remove session event test directory");
             }
         }
+    }
+
+    #[test]
+    fn notify_error_codes_map_to_stable_reasons_and_rpc_codes() {
+        use fluxdown_protocol::{ApplicationErrorCode, ErrorReason};
+
+        use super::CloudError;
+        let error = |status: u16, code: &str| CloudError {
+            status: Some(status),
+            code: Some(code.to_owned()),
+            message: String::new(),
+            retryable: status == 429,
+            unreachable: false,
+        };
+        let cases = [
+            (
+                error(403, "notify_channel_limit"),
+                ErrorReason::NotifyChannelLimit,
+                ApplicationErrorCode::Conflict,
+            ),
+            (
+                error(403, "notify_disabled"),
+                ErrorReason::NotifyDisabled,
+                ApplicationErrorCode::Unsupported,
+            ),
+            (
+                error(400, "notify_email_unverified"),
+                ErrorReason::NotifyTargetInvalid,
+                ApplicationErrorCode::InvalidArgument,
+            ),
+            (
+                error(400, "invalid_code"),
+                ErrorReason::InvalidVerificationCode,
+                ApplicationErrorCode::InvalidArgument,
+            ),
+            (
+                error(422, "notify_target_invalid"),
+                ErrorReason::NotifyTargetInvalid,
+                ApplicationErrorCode::InvalidArgument,
+            ),
+            (
+                error(422, "notify_kind_unavailable"),
+                ErrorReason::NotifyTargetInvalid,
+                ApplicationErrorCode::InvalidArgument,
+            ),
+            (
+                error(429, "rate_limited"),
+                ErrorReason::RateLimited,
+                ApplicationErrorCode::Unavailable,
+            ),
+        ];
+        for (error, reason, code) in cases {
+            assert_eq!(error.reason(), Some(reason), "{:?}", error.code);
+            assert_eq!(error.to_rpc_error().code, code, "{:?}", error.code);
+        }
+        let unreachable = CloudError::network("dns".to_owned());
+        assert_eq!(unreachable.reason(), Some(ErrorReason::CloudUnreachable));
     }
 }

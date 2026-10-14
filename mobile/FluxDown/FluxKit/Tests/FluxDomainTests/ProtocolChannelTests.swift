@@ -152,8 +152,12 @@ struct ProtocolChannelTests {
         #expect(HostMethod.agentLinkDiscoverySet == "agent.link.discovery.set")
         #expect(HostMethod.agentPreferencesPatch == "agent.preferences.patch")
         #expect(HostMethod.serviceEvent == "service.event")
+        #expect(HostMethod.agentCloudNotifyTelegramBindStatus == "agent.cloudNotify.telegramBindStatus")
+        #expect(HostMethod.agentCloudNotifySendEmailCode == "agent.cloudNotify.sendEmailCode")
+        #expect(HostMethod.agentCloudNotifyVerifyEmail == "agent.cloudNotify.verifyEmail")
+        #expect(HostSection.agentCloudNotify == "agent.cloudNotify")
         #expect(HostCapability.agentRemoteTasks == "agent.remoteTasks")
-        #expect(HostSection.all.count == 15)
+        #expect(HostSection.all.count == 16)
         #expect(Set(HostSection.all).count == HostSection.all.count)
         #expect(HostSection.all.allSatisfy { $0.hasPrefix("agent.") || $0.hasPrefix("daemon.") })
     }

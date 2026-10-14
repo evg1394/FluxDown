@@ -198,6 +198,7 @@ internal object ContentType {
     const val Skeleton = 11
     const val Scope = 12
     const val RowRemote = 13
+    const val Tail = 14
 }
 
 /** 「传输中」分区头：右侧实时汇总下行速度 + 任务数。 */

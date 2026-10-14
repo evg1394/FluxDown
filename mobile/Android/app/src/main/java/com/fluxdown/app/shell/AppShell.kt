@@ -3,14 +3,14 @@ package com.fluxdown.app.shell
 import android.content.ClipboardManager
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.EnterExitState
 import androidx.compose.animation.core.VisibilityThreshold
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
-import androidx.compose.animation.scaleOut
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.togetherWith
+import androidx.compose.foundation.MutatePriority
 import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.stopScroll
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.Row
@@ -25,21 +25,28 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsTopHeight
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.saveable.rememberSaveableStateHolder
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.max
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.compose.ui.res.stringResource
@@ -71,6 +78,7 @@ import com.fluxdown.app.feature.settings.LocalSettingsFocus
 import com.fluxdown.app.feature.settings.SettingsFocus
 import com.fluxdown.app.feature.settings.AppearanceSyncEffect
 import com.fluxdown.app.feature.settings.account.AccountEffects
+import com.fluxdown.app.update.UpdateEffects
 import com.fluxdown.app.feature.settings.general.GeneralSettingsEffects
 import com.fluxdown.app.feature.settings.SettingsPageScreen
 import com.fluxdown.app.feature.settings.SettingsScreen
@@ -101,6 +109,7 @@ import com.fluxdown.fluxui.icons.FluxIcons
 import com.fluxdown.fluxui.material.FluxBackdrop
 import com.fluxdown.fluxui.material.FluxCanvas
 import com.fluxdown.fluxui.material.LocalFluxBackdrop
+import com.fluxdown.fluxui.material.LocalFlowInEnabled
 import com.fluxdown.fluxui.material.fluxBackdropSource
 import com.fluxdown.fluxui.overlay.FluxOverlayHost
 import com.fluxdown.fluxui.overlay.FluxPortalHost
@@ -152,12 +161,16 @@ fun AppShell() {
     // 回到前台：文件跟踪重扫（10s 节流，对齐 RescanThrottle；空闲静默期间不轮询）
     LifecycleEventEffect(Lifecycle.Event.ON_START) {
         container.rescanOnForeground()
+        // 应用更新：重试挂起的安装、6h 节流检查、条件允许时自动下载（永不自动安装）
+        container.updates.onForeground()
         // 仍在等待的 fileExists 询问：回到前台重新弹出（含点通知进入）
         nav.reopenFileConflicts()
     }
     // 本机有活跃 / 排队任务 → 前台服务（dataSync）；首次下载时请求通知权限
     DownloadServiceEffect()
     val portal = remember { FluxPortalState() }
+    val pagingBlocked = orb.fanOpen || overlays.hasMenu || overlays.hasDialog ||
+        selection != null || FileConflicts.shouldShow(fileConflicts, nav.deferredFileConflicts)
 
     CompositionLocalProvider(
         LocalFluxBackdrop provides backdrop,
@@ -172,6 +185,7 @@ fun AppShell() {
         GeneralSettingsEffects()
         AppearanceSyncEffect()
         AccountEffects()
+        UpdateEffects()
         ProvideDownloadsView {
             BackHandler(enabled = nav.searchOpen || nav.sheet != null || nav.selecting || nav.stack.isNotEmpty() || nav.tab != AppTab.Downloads) {
                 nav.back()
@@ -183,8 +197,8 @@ fun AppShell() {
                     CompositionLocalProvider(LocalFluxBackdrop provides null) {
                         FluxCanvas(modifier = Modifier.fillMaxSize()) {
                             when (windowClass) {
-                                FluxWindowClass.Expanded -> ExpandedStage()
-                                else -> CompactStage(paned = windowClass == FluxWindowClass.Medium)
+                                FluxWindowClass.Expanded -> ExpandedStage(pagingBlocked)
+                                else -> CompactStage(paned = windowClass == FluxWindowClass.Medium, pagingBlocked = pagingBlocked)
                             }
                         }
                     }
@@ -219,57 +233,122 @@ private fun BoxScope.StatusScrim() {
     )
 }
 
-/** 页面栈状态：深度用于判定推入 / 返回方向。 */
+/** 页面栈只包含推入深度与路由；根标签由同一个 Pager 保持，不重建页面栈。 */
 private data class PageKey(val depth: Int, val route: Route?)
 
 /** compact / medium：顶层页 + 推入页；medium 档任务详情进右栏（不做推入）。 */
 @Composable
-private fun CompactStage(paned: Boolean) {
+private fun CompactStage(paned: Boolean, pagingBlocked: Boolean) {
     val nav = LocalNavigator.current
     val top = nav.top
     val paneTask = (top as? Route.TaskDetail)?.takeIf { paned && nav.tab == AppTab.Downloads }
     Row(Modifier.fillMaxSize()) {
-        PageStack(Modifier.weight(1f).fillMaxHeight(), if (paneTask != null) null else top, expanded = false)
+        PageStack(Modifier.weight(1f).fillMaxHeight(), if (paneTask != null) null else top, expanded = false, pagingBlocked = pagingBlocked)
         if (paned && nav.tab == AppTab.Downloads) DetailPane(paneTask?.taskId, DetailPaneMedium)
     }
 }
 
 /** expanded：Rail 272 | 列表 | 详情 460（PC 三栏心智）。 */
 @Composable
-private fun ExpandedStage() {
+private fun ExpandedStage(pagingBlocked: Boolean) {
     val nav = LocalNavigator.current
     val top = nav.top
     val paneTask = (top as? Route.TaskDetail)?.takeIf { nav.tab == AppTab.Downloads }
     Row(Modifier.fillMaxSize()) {
         AppRail()
-        PageStack(Modifier.weight(1f).fillMaxHeight(), if (paneTask != null) null else top, expanded = true)
+        PageStack(Modifier.weight(1f).fillMaxHeight(), if (paneTask != null) null else top, expanded = true, pagingBlocked = pagingBlocked)
         if (nav.tab == AppTab.Downloads) DetailPane(paneTask?.taskId, DetailPaneExpanded)
     }
 }
 
-/** 推入页：新页自右滑入（fluid 弹簧），下层页缩小 + 淡出；返回反向。Reduce motion → 瞬时。 */
+/**
+ * 页面过渡（对齐 iOS 导航）：推入 = 新页整页不透明地自右滑入、盖在上层，下层页向左视差 30%；返回反向，
+ * 离场页保持在上层滑出。`page` 弹簧临界阻尼、无回弹；全程不缩放、不模糊、不淡化文字。
+ * 根页之间由 Pager 跟手切换，落定后才更新导航。入场期间关闭流入（[LocalFlowInEnabled]）。
+ * Reduce motion → 瞬时。
+ */
 @Composable
-private fun PageStack(modifier: Modifier, route: Route?, expanded: Boolean) {
+private fun PageStack(modifier: Modifier, route: Route?, expanded: Boolean, pagingBlocked: Boolean) {
     val nav = LocalNavigator.current
     val motion = FluxTheme.motion
+    val host = hostState()
+    val tabs = visibleTabs()
+    val pager = rememberPagerState(initialPage = tabs.indexOf(nav.tab)) { tabs.size }
+    val roots = rememberSaveableStateHolder()
+    val pagingEnabled = !pagingBlocked && nav.stack.isEmpty() &&
+        !nav.selecting && !nav.searchOpen && nav.sheet == null
+    val latestEnabled by rememberUpdatedState(pagingEnabled)
+    val revision = nav.revision
+    val selectedTab = nav.tab
+    var syncedRevision by remember { mutableLongStateOf(-1L) }
+    // 不接收子级滚动容器的剩余横向位移 / fling：chips、滑块、行内侧滑由子级拥有。
+    val childScrollBoundary = remember { object : NestedScrollConnection {} }
+    LaunchedEffect(revision, tabs, pagingEnabled) {
+        if (nav.revision != revision) return@LaunchedEffect
+        // 导航是事实源；恢复、点选、隐藏 RSS 与弹出浮层都会撤销旧手势并对齐到当前标签。
+        pager.stopScroll(MutatePriority.PreventUserInput)
+        pager.scrollToPage(tabs.indexOf(selectedTab))
+        syncedRevision = revision
+        if (!pagingEnabled) return@LaunchedEffect
+        var scrolling = false
+        snapshotFlow { pager.isScrollInProgress }.collect { inProgress ->
+            if (inProgress) {
+                scrolling = true
+            } else if (scrolling) {
+                scrolling = false
+                val currentTabs = rootTabs(host.value.preferences.bool("ui.show_activity_rss", true), nav.tab)
+                if (latestEnabled && currentTabs == tabs) {
+                    tabs.getOrNull(pager.settledPage)?.let { tab ->
+                        nav.selectTabFromSwipe(tab, revision)
+                    }
+                }
+            }
+        }
+    }
     AnimatedContent(
         targetState = PageKey(if (route == null) 0 else nav.stack.size, route),
         modifier = modifier,
-        contentKey = { it.route },
+        contentKey = { it.route ?: "root" },
         transitionSpec = {
-            val push = targetState.depth >= initialState.depth
-            val slide = motion.of<IntOffset>(motion.fluid, IntOffset.VisibilityThreshold)
-            val fade = motion.of<Float>(motion.fluid)
-            (slideInHorizontally(slide) { w -> if (push) w else -w / 4 } + fadeIn(fade)) togetherWith
-                (slideOutHorizontally(slide) { w -> if (push) -w / 4 else w } + fadeOut(fade) + scaleOut(fade, targetScale = .94f))
+            val slide = motion.of<IntOffset>(motion.page, IntOffset.VisibilityThreshold)
+            when {
+                targetState.depth >= initialState.depth ->
+                    (slideInHorizontally(slide) { w -> w } togetherWith slideOutHorizontally(slide) { w -> -w * 3 / 10 })
+                        .apply { targetContentZIndex = 1f }
+                else ->
+                    (slideInHorizontally(slide) { w -> -w * 3 / 10 } togetherWith slideOutHorizontally(slide) { w -> w })
+                        .apply { targetContentZIndex = -1f }
+            }
         },
         label = "page",
     ) { key ->
         val r = key.route
-        // 非首页（其余 Tab 根页与推入页）铺实色画布：推入 / 返回过渡中不与下层页透叠。
-        val home = r == null && nav.tab == AppTab.Downloads
-        Box(if (home) Modifier.fillMaxSize() else Modifier.fillMaxSize().background(FluxTheme.colors.canvas)) {
-            if (r == null) TabRoot(nav.tab, expanded) else RouteContent(r, inPane = false)
+        val entering = transition.targetState == EnterExitState.Visible && transition.currentState != EnterExitState.Visible
+        // 推入页铺实色画布，根页的保存状态按标签隔离，离屏 / 推入后仍保留列表位置。
+        CompositionLocalProvider(LocalFlowInEnabled provides (!entering && !pager.isScrollInProgress)) {
+            Box(if (r == null) Modifier.fillMaxSize() else Modifier.fillMaxSize().background(FluxTheme.colors.canvas)) {
+                if (r == null) {
+                    HorizontalPager(
+                        state = pager,
+                        modifier = Modifier.fillMaxSize(),
+                        key = { tabs[it].name },
+                        userScrollEnabled = pagingEnabled && syncedRevision == nav.revision,
+                        pageNestedScrollConnection = childScrollBoundary,
+                    ) { page ->
+                        val tab = tabs[page]
+                        roots.SaveableStateProvider(tab.name) {
+                            Box(
+                                if (tab == AppTab.Downloads) Modifier.fillMaxSize()
+                                else Modifier.fillMaxSize().background(FluxTheme.colors.canvas),
+                            ) {
+                                TabRoot(tab, expanded)
+                            }
+                        }
+                    }
+                } else {
+                    RouteContent(r, inPane = false)
+                }
+            }
         }
     }
 }
@@ -339,8 +418,11 @@ private fun visibleTabs(): List<AppTab> {
     val nav = LocalNavigator.current
     val host = hostState()
     val showRss by remember { derivedStateOf { host.value.preferences.bool("ui.show_activity_rss", true) } }
-    return if (showRss || nav.tab == AppTab.Rss) AppTab.entries else AppTab.entries - AppTab.Rss
+    return rootTabs(showRss, nav.tab)
 }
+
+internal fun rootTabs(showRss: Boolean, selected: AppTab): List<AppTab> =
+    if (showRss || selected == AppTab.Rss) AppTab.entries else AppTab.entries - AppTab.Rss
 
 @Composable
 private fun dockItems(failed: Boolean, tabs: List<AppTab>): List<FluxDockItem> {
@@ -372,7 +454,7 @@ private fun BoxScope.BottomChrome(failed: Boolean, orb: FluxOrbState) {
     val navInset = with(density) { WindowInsets.navigationBars.getBottom(this).toDp() }
     val imeVisible = WindowInsets.ime.getBottom(density) > 0
     val medium = FluxTheme.windowClass == FluxWindowClass.Medium
-    val bottom = max(if (medium) 22.dp else 26.dp, navInset + 12.dp)
+    val bottom = navInset + 8.dp
     val pushed = nav.stack.isNotEmpty() && !(medium && nav.top is Route.TaskDetail && nav.tab == AppTab.Downloads)
     val hidden = imeVisible || pushed || nav.searchOpen
     val pasteLabel = str(R.string.mobileOrbPaste)
@@ -382,7 +464,7 @@ private fun BoxScope.BottomChrome(failed: Boolean, orb: FluxOrbState) {
             .align(Alignment.BottomCenter)
             .fillMaxWidth()
             .padding(start = 16.dp, end = 16.dp, bottom = bottom)
-            .height(64.dp),
+            .height(FluxTheme.space.dockHeight),
     ) {
         FluxDock(
             items = dockItems(failed, tabs),

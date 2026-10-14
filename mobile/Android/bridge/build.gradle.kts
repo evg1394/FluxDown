@@ -93,6 +93,13 @@ abstract class CargoNdkBuild @Inject constructor(private val exec: ExecOperation
     @get:Optional
     abstract val cargoBin: Property<String>
 
+    /**
+     * 核心经 `option_env!` 读取的编译期环境变量（名 → 值，空串 = 未设置）：作为输入，值变化时任务重跑，
+     * 否则 Gradle 判定 up-to-date，沿用旧值编出的 .so。
+     */
+    @get:Input
+    abstract val compileEnv: MapProperty<String, String>
+
     @get:OutputDirectory
     abstract val outputDir: DirectoryProperty
 
@@ -118,6 +125,10 @@ abstract class CargoNdkBuild @Inject constructor(private val exec: ExecOperation
             workingDir = workspaceRoot.get().asFile
             environment("ANDROID_NDK_HOME", ndk.absolutePath)
             environment("PATH", Rust.cargoPath(cargoBin.orNull))
+            // 空串必须移除：option_env! 会把空串当成「已设置」写进二进制。
+            compileEnv.get().forEach { (name, value) ->
+                if (value.isEmpty()) environment.remove(name) else environment(name, value)
+            }
             commandLine(args)
         }
         abiList.forEach { abi ->
@@ -266,6 +277,10 @@ fun CargoNdkBuild.configureCommon() {
     )
     sdkDir.set(androidComponents.sdkComponents.sdkDirectory.map { it.asFile.absolutePath })
     cargoBin.set(cargoBinProperty)
+    // FLUXCLOUD_BASE_URL：agent 嵌入模式的云端地址；FLUXDOWN_APP_VERSION：引擎 UA 等编译期版本（native/engine/build.rs）
+    listOf("FLUXCLOUD_BASE_URL", "FLUXDOWN_APP_VERSION").forEach { name ->
+        compileEnv.put(name, providers.environmentVariable(name).orElse(""))
+    }
 }
 
 // release 配置 `strip = true` 会抹掉 UniFFI proc-macro 元数据符号，绑定只能从未 strip 的库生成；

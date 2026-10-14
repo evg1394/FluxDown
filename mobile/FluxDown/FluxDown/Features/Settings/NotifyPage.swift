@@ -71,16 +71,18 @@ struct NotifyPage: View {
                 .disabled(readOnly)
             }
 
-            Section {
-                NavigationLink(value: SettingsRoute.webhook) {
-                    SettingsTileLabel(
-                        title: L("webhookNavTitle"), subtitle: L("mobileNotifWebhookDesc"),
-                        symbol: "bolt.horizontal.fill", color: .indigo
-                    )
+            if FeatureFlags.webhooks {
+                Section {
+                    NavigationLink(value: SettingsRoute.webhook) {
+                        SettingsTileLabel(
+                            title: L("webhookNavTitle"), subtitle: L("mobileNotifWebhookDesc"),
+                            symbol: "bolt.horizontal.fill", color: .indigo
+                        )
+                    }
+                    .settingsRow(Self.webhookID)
+                } header: {
+                    Text(L("notifyGroupWebhook"))
                 }
-                .settingsRow(Self.webhookID)
-            } header: {
-                Text(L("notifyGroupWebhook"))
             }
         }
         .fluxAnimation(.smooth, value: ctx.form)
@@ -274,10 +276,12 @@ extension NotifyPage {
         if SettingsDownloadRow.silentSkipSelection.isVisible(in: download) {
             entries.append(SettingsEntry(item: SettingsDownloadRow.silentSkipSelection.item, route: .notify, breadcrumb: silent, symbol: symbol))
         }
-        entries.append(SettingsEntry(
-            id: webhookID, route: .notify, title: L("webhookNavTitle"), detail: L("mobileNotifWebhookDesc"),
-            breadcrumb: "\(name) › \(L("notifyGroupWebhook"))", symbol: "bolt.horizontal.fill"
-        ))
+        if FeatureFlags.webhooks {
+            entries.append(SettingsEntry(
+                id: webhookID, route: .notify, title: L("webhookNavTitle"), detail: L("mobileNotifWebhookDesc"),
+                breadcrumb: "\(name) › \(L("notifyGroupWebhook"))", symbol: "bolt.horizontal.fill"
+            ))
+        }
         return entries
     }
 

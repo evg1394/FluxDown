@@ -259,6 +259,178 @@ impl CloudApi {
             .await
     }
 
+    // ---- 云端推送通知（契约 §3，`/api/v1/notifications/*`）----
+
+    /// `GET /notifications/catalog`：公开接口（匿名），返回管理员启用的渠道种类（固定顺序）。
+    pub async fn notify_catalog(
+        &self,
+    ) -> Result<Vec<fluxdown_protocol::CloudNotifyKindDto>, CloudError> {
+        #[derive(serde::Deserialize)]
+        struct Catalog {
+            #[serde(default)]
+            kinds: Vec<fluxdown_protocol::CloudNotifyKindDto>,
+        }
+        let catalog: Catalog = self
+            .client
+            .public::<Value, Catalog>(Method::GET, "/api/v1/notifications/catalog", None)
+            .await?;
+        Ok(catalog.kinds)
+    }
+
+    /// `GET /notifications/overview`。
+    pub async fn notify_overview(
+        &self,
+    ) -> Result<fluxdown_protocol::CloudNotifyOverviewDto, CloudError> {
+        self.notify_call(Method::GET, "/overview", None::<&Value>)
+            .await
+    }
+
+    /// `POST /notifications/channels`。
+    pub async fn notify_create_channel(
+        &self,
+        params: &fluxdown_protocol::CloudNotifyChannelCreateParams,
+    ) -> Result<fluxdown_protocol::CloudNotifyChannelDto, CloudError> {
+        self.notify_call(Method::POST, "/channels", Some(params))
+            .await
+    }
+
+    /// `PATCH /notifications/channels/{id}`：只提交显式给出的字段（`id` 在路径里）。
+    pub async fn notify_update_channel(
+        &self,
+        params: &fluxdown_protocol::CloudNotifyChannelUpdateParams,
+    ) -> Result<fluxdown_protocol::CloudNotifyChannelDto, CloudError> {
+        let mut body = serde_json::Map::new();
+        if let Some(name) = &params.name {
+            body.insert("name".to_owned(), Value::from(name.as_str()));
+        }
+        if let Some(enabled) = params.enabled {
+            body.insert("enabled".to_owned(), Value::from(enabled));
+        }
+        if let Some(events) = &params.events {
+            body.insert("events".to_owned(), Value::from(events.clone()));
+        }
+        if let Some(addresses) = &params.addresses {
+            body.insert("addresses".to_owned(), Value::from(addresses.clone()));
+        }
+        self.notify_call(
+            Method::PATCH,
+            &format!("/channels/{}", encode(&params.id)),
+            Some(&Value::Object(body)),
+        )
+        .await
+    }
+
+    /// `DELETE /notifications/channels/{id}`。
+    pub async fn notify_delete_channel(&self, id: &str) -> Result<(), CloudError> {
+        let _: Value = self
+            .notify_call(
+                Method::DELETE,
+                &format!("/channels/{}", encode(id)),
+                None::<&Value>,
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// `POST /notifications/email/code`：向非账号邮箱发 6 位验证码。
+    pub async fn notify_send_email_code(
+        &self,
+        address: &str,
+    ) -> Result<fluxdown_protocol::CloudNotifyEmailCodeResult, CloudError> {
+        self.notify_call(
+            Method::POST,
+            "/email/code",
+            Some(&serde_json::json!({ "address": address })),
+        )
+        .await
+    }
+
+    /// `POST /notifications/email/verify`：校验验证码，把地址记为本账号已验证的通知邮箱。
+    pub async fn notify_verify_email(&self, address: &str, code: &str) -> Result<(), CloudError> {
+        let _: Value = self
+            .notify_call(
+                Method::POST,
+                "/email/verify",
+                Some(&serde_json::json!({ "address": address, "code": code })),
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// `POST /notifications/channels/{id}/test`（同步发送，不计额度）。
+    pub async fn notify_test_channel(
+        &self,
+        id: &str,
+    ) -> Result<fluxdown_protocol::CloudNotifyTestResult, CloudError> {
+        self.notify_call(
+            Method::POST,
+            &format!("/channels/{}/test", encode(id)),
+            None::<&Value>,
+        )
+        .await
+    }
+
+    /// `POST /notifications/telegram/bind`。
+    pub async fn notify_telegram_bind(
+        &self,
+    ) -> Result<fluxdown_protocol::CloudNotifyTelegramBindDto, CloudError> {
+        self.notify_call(Method::POST, "/telegram/bind", None::<&Value>)
+            .await
+    }
+
+    /// `GET /notifications/telegram/bind/{code}`。
+    pub async fn notify_telegram_bind_status(
+        &self,
+        code: &str,
+    ) -> Result<fluxdown_protocol::CloudNotifyTelegramBindStatusDto, CloudError> {
+        self.notify_call(
+            Method::GET,
+            &format!("/telegram/bind/{}", encode(code)),
+            None::<&Value>,
+        )
+        .await
+    }
+
+    /// `GET /notifications/deliveries?limit=&before=`。
+    pub async fn notify_deliveries(
+        &self,
+        params: &fluxdown_protocol::CloudNotifyDeliveriesParams,
+    ) -> Result<fluxdown_protocol::CloudNotifyDeliveriesPage, CloudError> {
+        let mut query = format!("?limit={}", params.limit.unwrap_or(50).clamp(1, 100));
+        if let Some(before) = params.before.as_deref().filter(|value| !value.is_empty()) {
+            query.push_str("&before=");
+            query.push_str(&encode(before));
+        }
+        self.notify_call(Method::GET, &format!("/deliveries{query}"), None::<&Value>)
+            .await
+    }
+
+    /// `POST /notifications/events`：批量上报任务事件（≤ 50 条，由调用方分批）。
+    pub async fn notify_report_events<P: Serialize>(
+        &self,
+        events: &[P],
+    ) -> Result<NotifyReportResponse, CloudError> {
+        self.notify_call(
+            Method::POST,
+            "/events",
+            Some(&serde_json::json!({ "events": events })),
+        )
+        .await
+    }
+
+    async fn notify_call<P: Serialize, R: serde::de::DeserializeOwned>(
+        &self,
+        method: Method,
+        suffix: &str,
+        body: Option<&P>,
+    ) -> Result<R, CloudError> {
+        let value = self
+            .authed(method, &format!("/api/v1/notifications{suffix}"), body)
+            .await?;
+        serde_json::from_value(value)
+            .map_err(|error| CloudError::invalid_response(error.to_string()))
+    }
+
     pub async fn profile_call<P: Serialize>(
         &self,
         method: Method,
@@ -333,6 +505,25 @@ impl CloudApi {
             .authenticated_epoch(method, path, body, self.request_epoch())
             .await
     }
+}
+
+/// `POST /notifications/events` 响应：逐条结果与最新额度用量。
+#[derive(Clone, Debug, Default, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NotifyReportResponse {
+    #[serde(default)]
+    pub results: Vec<NotifyReportResult>,
+    #[serde(default)]
+    pub usage: Option<fluxdown_protocol::cloud_notify::CloudNotifyUsageDto>,
+}
+
+/// 单条事件的受理结果。
+#[derive(Clone, Debug, Default, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NotifyReportResult {
+    pub delivery_id: String,
+    /// `accepted` / `duplicate` / `no_channel` / `quota_exceeded` / `disabled`。
+    pub outcome: String,
 }
 
 fn encode(value: &str) -> String {

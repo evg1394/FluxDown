@@ -22,8 +22,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.drawWithCache
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.BlurEffect
-import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.RenderEffect
 import androidx.compose.ui.graphics.TileMode
 import androidx.compose.ui.graphics.drawscope.translate
 import androidx.compose.ui.graphics.layer.drawLayer
@@ -31,7 +29,6 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.positionInRoot
-import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
@@ -44,13 +41,11 @@ import com.fluxdown.fluxui.material.FluxGlass
 import com.fluxdown.fluxui.material.FluxGlassKind
 import com.fluxdown.fluxui.material.LocalFluxBackdrop
 import com.fluxdown.fluxui.material.fluxGlass
-import com.fluxdown.fluxui.theme.FluxColors
 import com.fluxdown.fluxui.theme.FluxGlassMode
 import com.fluxdown.fluxui.theme.FluxText
 import com.fluxdown.fluxui.theme.FluxTheme
 import com.fluxdown.fluxui.theme.LocalFluxGlassMode
 import com.fluxdown.fluxui.theme.fluxPressable
-import kotlin.math.min
 
 /**
  * 覆盖层状态机：Toast（同一时刻一条，新替旧）、Menu（一个）、Dialog（一个）。
@@ -173,39 +168,6 @@ internal class OverlayProgress {
 
 @Composable
 internal fun rememberOverlayProgress(): OverlayProgress = remember { OverlayProgress() }
-
-/**
- * 入场模糊 N→0（量化为 4 档，避免动画中每帧新建 RenderEffect；Reduce motion 下关闭，§8.9）。
- */
-internal class EnterBlurs(maxRadiusPx: Float) {
-    private val effects = Array(STEPS) {
-        val r = maxRadiusPx * (it + 1) / STEPS
-        BlurEffect(r, r, TileMode.Decal)
-    }
-
-    fun at(progress: Float): RenderEffect? {
-        val rest = 1f - progress
-        if (rest <= 0.02f) return null
-        return effects[min(STEPS - 1, (rest * STEPS).toInt())]
-    }
-
-    private companion object {
-        const val STEPS = 4
-    }
-}
-
-@Composable
-internal fun rememberEnterBlurs(max: Dp): EnterBlurs? {
-    val reduce = FluxTheme.motion.reduce
-    val density = LocalDensity.current
-    return remember(max, density.density, reduce) {
-        if (reduce) null else EnterBlurs(with(density) { max.toPx() })
-    }
-}
-
-/** 浮层环境阴影色（§5.5 例外）：深色近黑，浅色降到 ink 的低透明度。仅 token 派生。 */
-internal fun FluxColors.softShadow(alphaDark: Float): Color =
-    if (dark) ramp[0].copy(alpha = alphaDark) else ramp[11].copy(alpha = alphaDark * 0.45f)
 
 /**
  * 遮罩：`dim` 渐入 + 背景 [blurSigma] 模糊（§5.2：Sheet 8 / Dialog 10，直接 RenderEffect，

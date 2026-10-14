@@ -35,6 +35,8 @@ import type {
   PluginMarketInstallParams,
   PluginSetEnabledParams,
   PluginUpdateSettingsParams,
+  LinkProbeParams,
+  LinkProbeResult,
   PrepareLogExportResult,
   ProxyTestRequest,
   ProxyTestResponse,
@@ -171,6 +173,11 @@ const siteAuth = {
     call<SiteAuthCredentialDto | null>(METHOD.DAEMON_SITE_AUTH_MATCH, params),
 };
 
+const link = {
+  /** 剪贴板识别用的只读 HEAD 探测（慢方法，上限 1.5s）。 */
+  probe: (params: LinkProbeParams) => call<LinkProbeResult>(METHOD.DAEMON_LINK_PROBE, params),
+};
+
 const runtime = {
   stats: () => call<DaemonRuntimeStatsDto>(METHOD.DAEMON_RUNTIME_STATS),
 };
@@ -271,6 +278,7 @@ const diagnostics = {
 };
 
 export const daemon = {
+  link,
   task,
   queue,
   group,

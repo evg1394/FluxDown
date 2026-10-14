@@ -1,5 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <!-- 仅供窗口首帧 / 启动画面：与 FluxColors.canvas（纸面 n1）一致 -->
-    <color name="flux_canvas">#FFF4F4F1</color>
+    <!-- 窗口首帧 / 启动画面底色：与 FluxColors.canvas（纸面 n1）一致 -->
+    <color name="flux_canvas">#FFF4F5F7</color>
+    <!-- App 内强制明暗时的启动画面底色（Theme.FluxDown.Splash.*），与 FluxColors 纸面 / 墨 n1 一致 -->
+    <color name="flux_canvas_paper">#FFF4F5F7</color>
+    <color name="flux_canvas_ink">#FF07080A</color>
 </resources>

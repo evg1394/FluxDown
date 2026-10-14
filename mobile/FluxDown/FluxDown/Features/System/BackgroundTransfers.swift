@@ -60,7 +60,7 @@ final class BackgroundTransfers {
         }
     }
 
-    private let log = Logger(subsystem: "com.fluxdown.FluxDown", category: "background")
+    private let log = Logger(subsystem: "com.fluxdown.app", category: "background")
 
     private var monitor: LocalActivityMonitor?
     private var observers: [any NSObjectProtocol] = []

@@ -48,13 +48,24 @@ pub const BT_MSE_MODES: &[&str] = &["disabled", "enabled", "forced"];
 pub const PROXY_MODES: &[&str] = &["none", "system", "manual", "auto"];
 pub const PROXY_TYPES: &[&str] = &["http", "https", "socks4", "socks5"];
 
+/// 单任务连接（线程）数上限：设置、队列默认值与新建任务共用；
+/// 与引擎 `segment_coordinator::MAX_SEGMENTS` 保持一致。
+pub const MAX_TASK_SEGMENTS: i32 = 512;
+/// 线程数超过该值时 UI 须动态提示可能触发服务器限速或安全风控封禁 IP（提醒档）。
+pub const HIGH_SEGMENTS_WARN_ABOVE: i32 = 64;
+/// 线程数超过该值时提示升级为高风险档（危险色、更强措辞）。
+pub const SEVERE_SEGMENTS_WARN_ABOVE: i32 = 256;
+
 /// 全部 daemon 配置键。顺序无语义。
 pub const DAEMON_CONFIG_FIELDS: &[DaemonConfigField] = &[
     // ── 下载 ──
     field("default_save_dir", DaemonConfigKind::Text, ""),
     field(
         "default_segments",
-        DaemonConfigKind::Integer { min: 0, max: 64 },
+        DaemonConfigKind::Integer {
+            min: 0,
+            max: MAX_TASK_SEGMENTS as i64,
+        },
         "0",
     ),
     field(
@@ -125,6 +136,7 @@ pub const DAEMON_CONFIG_FIELDS: &[DaemonConfigField] = &[
     field("bt_enabled", DaemonConfigKind::Bool, "true"),
     field("bt_enable_dht", DaemonConfigKind::Bool, "true"),
     field("bt_enable_upnp", DaemonConfigKind::Bool, "true"),
+    field("bt_enable_utp", DaemonConfigKind::Bool, "true"),
     field(
         "bt_port_start",
         DaemonConfigKind::Integer {
@@ -458,6 +470,22 @@ mod tests {
         assert_eq!(
             normalize_daemon_config_value("proxy_mode", " manual ").as_deref(),
             Ok("manual")
+        );
+    }
+
+    #[test]
+    fn default_segments_accepts_up_to_task_cap() {
+        assert_eq!(
+            normalize_daemon_config_value("default_segments", "512").as_deref(),
+            Ok("512")
+        );
+        assert!(normalize_daemon_config_value("default_segments", "513").is_err());
+        assert!(
+            crate::settings::validate_value(
+                "download.default_segments",
+                &serde_json::json!(MAX_TASK_SEGMENTS)
+            )
+            .is_ok()
         );
     }
 

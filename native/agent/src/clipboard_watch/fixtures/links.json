@@ -1,0 +1,33 @@
+{
+  "notResource": [
+    "https://github.com/zerx-lab/FluxDown",
+    "https://www.google.com/search?q=download+zip",
+    "https://news.example.com/2026/10/09/some-story-title",
+    "https://example.com/a.png",
+    "http://127.0.0.1:17800",
+    "http://localhost:3000/download",
+    "https://x.com/auth/verify?token=0123456789abcdef0123456789abcdef",
+    "https://t.co/abc",
+    "https://example.com/main.ts",
+    "http://intranet/download/a.zip",
+    "https://[::1]/a.zip",
+    "magnet:?dn=no-hash",
+    "ed2k://|server|1.2.3.4|4661|/"
+  ],
+  "resource": [
+    "https://example.com/files/pack.zip",
+    "https://bucket.s3.amazonaws.com/a.zip?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Signature=0123456789abcdef0123456789abcdef",
+    "https://github.com/zerx-lab/FluxDown/releases/download/v1.0.0/FluxDown-1.0.0-x64.tar.gz",
+    "https://example.com/download?filename=a.exe",
+    "https://example.com/file.zip/download",
+    "thunder://QUFodHRwOi8vYS5iL2MuemlwWlo=",
+    "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567&dn=demo",
+    "ed2k://|file|a.iso|123|0123456789ABCDEF0123456789ABCDEF|/",
+    "https://example.com/%E8%A7%86%E9%A2%91/%E7%94%B5%E5%BD%B1.mp4",
+    "ftp://ftp.example.com/pub/a.7z"
+  ],
+  "probe": [
+    "https://sourceforge.net/projects/x/files/latest/download",
+    "https://example.com/dl?id=1"
+  ]
+}

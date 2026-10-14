@@ -1,8 +1,12 @@
 //! 下载：保存位置、行为、连接与性能、自动重试、高级。
 
-use fluxdown_ui_components::{ButtonVariant, FluxIcon, button, loading_button, tabular_numbers};
+use fluxdown_protocol::{HIGH_SEGMENTS_WARN_ABOVE, SEVERE_SEGMENTS_WARN_ABOVE};
+use fluxdown_ui_components::{
+    ButtonVariant, CalloutTone, FluxIcon, RevealCallout, button, loading_button, tabular_numbers,
+};
+use fluxdown_ui_i18n::Translator;
 use fluxdown_ui_theme::active_theme;
-use gpui::{App, ParentElement, SharedString, Styled};
+use gpui::{App, ParentElement, SharedString, Styled, Window};
 use gpui_component::h_flex;
 
 use super::{SectionContext, rate_limit, user_agent};
@@ -161,17 +165,59 @@ fn default_queue_control(ctx: &SectionContext, cx: &mut App) -> Control {
     ctx.daemon_dropdown("default_queue_id", options)
 }
 
+/// 「最大连接数」行下方的风险提示：值 > [`HIGH_SEGMENTS_WARN_ABOVE`] 时展开，
+/// > [`SEVERE_SEGMENTS_WARN_ABOVE`] 升级为危险档；每帧读取 store，输入即时联动。
+fn threads_risk_footer(
+    ctx: &SectionContext,
+) -> impl Fn(bool, &SharedString, &mut Window, &mut App) -> RevealCallout + 'static {
+    let store = ctx.store();
+    let translator = ctx.translator.clone();
+    move |_, key, _, cx| {
+        let segments = store.read(cx).daemon_i64("default_segments");
+        threads_risk_callout(
+            SharedString::from(format!("{key}-risk")),
+            segments,
+            &translator,
+        )
+    }
+}
+
+fn threads_risk_callout(id: SharedString, segments: i64, translator: &Translator) -> RevealCallout {
+    let severe = segments > i64::from(SEVERE_SEGMENTS_WARN_ABOVE);
+    let (tone, title_key, desc_key) = if severe {
+        (
+            CalloutTone::Danger,
+            "threadsRiskSevereTitle",
+            "threadsRiskSevereDesc",
+        )
+    } else {
+        (CalloutTone::Warning, "threadsRiskTitle", "threadsRiskDesc")
+    };
+    let count = segments.to_string();
+    let limit = HIGH_SEGMENTS_WARN_ABOVE.to_string();
+    RevealCallout::new(
+        id,
+        segments > i64::from(HIGH_SEGMENTS_WARN_ABOVE),
+        tone,
+        translator.text(title_key).to_owned(),
+        translator.text_with(desc_key, &[("count", &count), ("limit", &limit)]),
+    )
+}
+
 fn connection_section(ctx: &SectionContext, cx: &mut App) -> SettingsSection {
     let store = ctx.store.read(cx);
     let auto_segments = store.daemon_i64("default_segments") == 0;
     let cdn_multi = store.daemon_bool("cdn_multi_enabled");
     let mut section = SettingsSection::new()
         .title(ctx.t("settingsGroupConnection"))
-        .row(ctx.item(
-            "defaultThreads",
-            Some("defaultThreadsDesc"),
-            ctx.daemon_number("default_segments"),
-        ));
+        .row(
+            ctx.item(
+                "defaultThreads",
+                Some("defaultThreadsDesc"),
+                ctx.daemon_number("default_segments"),
+            )
+            .footer(threads_risk_footer(ctx)),
+        );
     if auto_segments {
         section = section.row(ctx.item(
             "autoMaxConnections",
