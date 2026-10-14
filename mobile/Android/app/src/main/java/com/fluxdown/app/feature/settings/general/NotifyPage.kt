@@ -12,6 +12,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleEventEffect
+import com.fluxdown.app.FeatureFlags
 import com.fluxdown.app.R
 import com.fluxdown.app.data.DeviceSettings
 import com.fluxdown.app.feature.settings.SettingRowBox
@@ -139,7 +140,7 @@ internal fun NotifyPage() {
             }
         }
         flowItem(index++, gate, NotifyIds.ITEM_SYSTEM) {
-            GlassSection(title = str(R.string.notifyGroupSystem), footer = str(R.string.mobileNotifSystemFooter)) {
+            GlassSection(title = str(R.string.notifyGroupSystem), footer = str(R.string.mobileNotifSystemFooterAndroid)) {
                 settingSwitch(
                     ctx, COMPLETE_KEY, R.string.notifyOnComplete, R.string.notifyOnCompleteDesc, id = NotifyIds.COMPLETE,
                     onChange = { on ->
@@ -176,17 +177,19 @@ internal fun NotifyPage() {
                 }
             }
         }
-        flowItem(index++, gate, NotifyIds.ITEM_WEBHOOK) {
-            GlassSection(title = str(R.string.notifyGroupWebhook)) {
-                row(hasIcon = true) {
-                    SettingRowBox(ctx, NotifyIds.WEBHOOK, null) {
-                        FluxListRow(
-                            title = str(R.string.webhookNavTitle),
-                            subtitle = str(R.string.mobileNotifWebhookDesc),
-                            icon = FluxIcons.Webhook,
-                            chevron = true,
-                            onClick = { nav.push(Route.Settings(SettingsPage.Webhook)) },
-                        )
+        if (FeatureFlags.WEBHOOKS) {
+            flowItem(index++, gate, NotifyIds.ITEM_WEBHOOK) {
+                GlassSection(title = str(R.string.notifyGroupWebhook)) {
+                    row(hasIcon = true) {
+                        SettingRowBox(ctx, NotifyIds.WEBHOOK, null) {
+                            FluxListRow(
+                                title = str(R.string.webhookNavTitle),
+                                subtitle = str(R.string.mobileNotifWebhookDesc),
+                                icon = FluxIcons.Webhook,
+                                chevron = true,
+                                onClick = { nav.push(Route.Settings(SettingsPage.Webhook)) },
+                            )
+                        }
                     }
                 }
             }
@@ -263,12 +266,14 @@ internal fun notifySearchEntries(ctx: SettingsSearchContext): List<SettingsEntry
                 add(ctx.entry(NotifyIds.SILENT_SKIP, page, NotifyIds.ITEM_SILENT, R.string.silentSkipSelection, R.string.silentSkipSelectionDesc, silent, icon))
             }
         }
-        add(
-            ctx.entry(
-                NotifyIds.WEBHOOK, page, NotifyIds.ITEM_WEBHOOK, R.string.webhookNavTitle, R.string.mobileNotifWebhookDesc,
-                ctx.crumb(R.string.settingsCatNotify, R.string.notifyGroupWebhook), FluxIcons.Webhook,
-            ),
-        )
+        if (FeatureFlags.WEBHOOKS) {
+            add(
+                ctx.entry(
+                    NotifyIds.WEBHOOK, page, NotifyIds.ITEM_WEBHOOK, R.string.webhookNavTitle, R.string.mobileNotifWebhookDesc,
+                    ctx.crumb(R.string.settingsCatNotify, R.string.notifyGroupWebhook), FluxIcons.Webhook,
+                ),
+            )
+        }
     }
 }
 

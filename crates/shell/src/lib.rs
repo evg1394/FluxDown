@@ -71,9 +71,13 @@ fn shell_window_options() -> WindowOptions {
     options
 }
 
+/// 主窗口的系统级标题：产品名，不随语言变化。任务栏 / Alt+Tab / Dock 窗口列表 /
+/// 窗口管理器与读屏软件都读它；界面内标题栏由 shell 自绘，不显示此文本。
+const MAIN_WINDOW_TITLE: &str = "FluxDown";
+
 /// 构造 FluxDown 主窗口选项。
 pub fn main_window_options() -> WindowOptions {
-    shell_window_options()
+    auxiliary_window_options(MAIN_WINDOW_TITLE)
 }
 
 /// 构造使用 FluxDown 自定义标题栏的辅助窗口选项。
@@ -108,7 +112,7 @@ mod tests {
                 .titlebar
                 .as_ref()
                 .and_then(|titlebar| titlebar.title.as_deref()),
-            None
+            Some("FluxDown")
         );
         assert_eq!(options.window_min_size, Some(size(px(720.), px(520.))));
         assert_eq!(

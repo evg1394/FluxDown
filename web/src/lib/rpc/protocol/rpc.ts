@@ -4,10 +4,10 @@ import type { JsonValue, ServiceRole } from './common';
 import type { RpcErrorObject } from './error';
 
 export const JSONRPC_VERSION = '2.0';
-/** 当前协议版本；v4 增加 ShellChanged / PowerChanged，v5 增加 CaptureTasksStarted，v6 增加错误 reason 扩展、远程任务/局域网互联新参数与事件，v7 增加 CloudConnectionChanged，v8 增加应用内更新（UpdateStatusDto / UpdateChanged / agent.update.*），v9 增加「文件已存在」交互选择（SelectionKind::FileExists / SelectionOutcome::FileExists）与 `file_exists_behavior = ask`。 */
-export const PROTOCOL_VERSION = 9;
-/** 服务端拒绝低于此版本的客户端，握手时不兼容即断开；v9 起 `pendingSelections` 可含 `fileExists` 种类。 */
-export const MIN_PROTOCOL_VERSION = 9;
+/** 当前协议版本；v4 增加 ShellChanged / PowerChanged，v5 增加 CaptureTasksStarted，v6 增加错误 reason 扩展、远程任务/局域网互联新参数与事件，v7 增加 CloudConnectionChanged，v8 增加应用内更新（UpdateStatusDto / UpdateChanged / agent.update.*），v9 增加「文件已存在」交互选择（SelectionKind::FileExists / SelectionOutcome::FileExists）与 `file_exists_behavior = ask`，v10 增加云端推送（TaskNotice / CloudNotifyChanged / AgentSnapshot.cloudNotify / agent.cloudNotify.*）。 */
+export const PROTOCOL_VERSION = 10;
+/** 服务端拒绝低于此版本的客户端，握手时不兼容即断开；v10 起快照含 `cloudNotify`。 */
+export const MIN_PROTOCOL_VERSION = 10;
 /** 服务因 `system.shutdown` 退出时的 WebSocket 关闭原因：客户端据此停止重连与重拉。 */
 export const CLOSE_REASON_SERVICE_QUIT = 'service-quit';
 /** server 模式更新重启时的关闭原因：客户端保持重连，serviceVersion 变化后刷新页面。 */

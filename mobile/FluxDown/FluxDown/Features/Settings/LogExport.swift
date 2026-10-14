@@ -75,7 +75,7 @@ nonisolated enum LogExportHTTP {
 // MARK: - 日志目录大小
 
 nonisolated enum LogSizes {
-    private static let log = Logger(subsystem: "com.fluxdown.FluxDown", category: "diagnostics")
+    private static let log = Logger(subsystem: "com.fluxdown.app", category: "diagnostics")
 
     /// 目录（递归）里普通文件的总字节数；目录不在本机 → nil。
     @concurrent
@@ -124,7 +124,7 @@ final class LogExportModel {
     /// 本机日志总大小；远端主机 / 目录不在本机 → nil（不显示该行）。
     private(set) var sizeText: String?
 
-    @ObservationIgnored private let log = Logger(subsystem: "com.fluxdown.FluxDown", category: "diagnostics")
+    @ObservationIgnored private let log = Logger(subsystem: "com.fluxdown.app", category: "diagnostics")
 
     /// 刷新当前日志大小：只在本机主机上统计（日志目录路径来自 `agent.diagnostics.logPaths`）。
     func refreshSize(container: AppContainer) async {

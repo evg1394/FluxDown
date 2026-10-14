@@ -124,6 +124,8 @@ struct DownloadsListScreen: View {
             }
         }
         .listStyle(.insetGrouped)
+        // 占位行 → 首个快照的真实行：随系统 List 行插删动画淡入，而不是硬切。
+        .fluxAnimation(.smooth, value: loading)
         .overlay {
             // 空态不放进列表行（行内按钮样式 / 行高会把 CUV 的按钮压成无字胶囊）：由系统布局居中。
             if !loading, list.isEmpty {

@@ -1,5 +1,5 @@
 //! 登录对话框：密码 / 邮箱验证码两种方式；新设备需要设备验证时切换到验证步骤
-//! （替换设备提示、有效期倒计时、重新发送、返回）。与 Flutter `_showLoginDialog` 语义对齐。
+//! （替换设备提示、有效期倒计时、重新发送、返回）。
 
 use std::sync::Arc;
 
@@ -22,7 +22,7 @@ use gpui_component::{
     v_flex,
 };
 
-use crate::dialogs::{code_step, email, password_reset, register};
+use crate::dialogs::{code_step, email, password_field, password_reset, register};
 use crate::errors::{ErrorContext, error_text, is_registration_incomplete};
 use crate::verification::{CodeChallenge, spawn_ticker};
 use crate::{AccountCommand, AccountPort, PortFuture, t};
@@ -118,6 +118,8 @@ pub(crate) fn open_with_account(
             .w(active_theme(cx).text_extent(520.))
             // 点遮罩不关闭：登录/验证码流程误触关闭会丢掉已输入内容并迫使重新发码。
             .overlay_closable(false)
+            // 回车由输入框 `PressEnter` 走 `submit`（与主按钮同一路径）；默认 Confirm 会抢先关窗。
+            .on_ok(|_, _, _| false)
             .content(move |content, _, _| content.min_h_0().child(view.clone()))
     });
     focus.update(cx, |input, cx| input.focus(window, cx));
@@ -141,6 +143,7 @@ impl LoginDialog {
                 .masked(true)
                 .placeholder(password_placeholder)
         });
+        password_field::restrict_to_ascii(&password_input, window, cx);
         let email_input = cx.new(|cx| InputState::new(window, cx).placeholder(email_placeholder));
         let code_input = cx.new(|cx| InputState::new(window, cx).placeholder(code_placeholder));
         for input in [&account_input, &password_input, &email_input, &code_input] {

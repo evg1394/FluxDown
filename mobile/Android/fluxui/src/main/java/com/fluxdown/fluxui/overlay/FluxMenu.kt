@@ -49,6 +49,7 @@ import com.fluxdown.fluxui.material.FluxBlur
 import com.fluxdown.fluxui.material.FluxGlass
 import com.fluxdown.fluxui.material.fluxGlass
 import com.fluxdown.fluxui.material.fluxGlow
+import com.fluxdown.fluxui.material.softShadow
 import com.fluxdown.fluxui.theme.FluxText
 import com.fluxdown.fluxui.theme.FluxTheme
 import com.fluxdown.fluxui.theme.fluxPressable
@@ -119,7 +120,6 @@ internal fun MenuLayer(state: FluxOverlayState) {
     if (shown == null || !prog.present) return
 
     val colors = FluxTheme.colors
-    val blurs = rememberEnterBlurs(6.dp)
     val status = WindowInsets.statusBars
     val nav = WindowInsets.navigationBars
     val hostOrigin = remember { FloatArray(2) }
@@ -180,7 +180,6 @@ internal fun MenuLayer(state: FluxOverlayState) {
                     scaleX = s
                     scaleY = s
                     transformOrigin = TransformOrigin(pivot[0], pivot[1])
-                    renderEffect = blurs?.at(v)
                 }
                 .fluxGlow(colors.softShadow(0.5f), 25.dp, shape, spread = (-10).dp, dy = 20.dp)
                 .fluxGlass(FluxGlass.Menu, shape, FluxBlur.Thick)

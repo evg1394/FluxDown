@@ -8,4 +8,5 @@ pub(crate) mod status_bar;
 mod status_proxy;
 pub(crate) mod task_drag;
 pub(crate) mod task_table;
+pub(crate) mod threads_risk;
 pub(crate) mod title_bar;

@@ -79,7 +79,7 @@ fn panic_message(panic_info: &Box<dyn std::any::Any + Send>) -> String {
 }
 
 /// Handle a panicked download task: persist error status and send an error
-/// progress update to Dart. The process-wide panic hook owns the root log event;
+/// progress update to the host. The process-wide panic hook owns the root log event;
 /// the fallback below covers engine consumers that did not initialize it.
 async fn handle_task_panic(
     task_id: &str,
@@ -408,7 +408,7 @@ fn without_urls(msg: &str) -> String {
 
 /// 判断错误信息是否属于可自动重试的瞬时网络错误。
 /// 排除永久性错误（404、403、checksum 等），仅重试网络层问题。
-fn is_retriable_error(msg: &str) -> bool {
+pub(crate) fn is_retriable_error(msg: &str) -> bool {
     if let Some(status) = extract_http_status(msg)
         && is_retriable_http_status(status)
     {
@@ -1225,6 +1225,75 @@ async fn persist_start_name(
         .await
 }
 
+/// 序幕的探测能否直接用下载器的完整探测代替 `meta_prober` 的裸 HEAD：仅限 fresh、
+/// 非 hint、无音轨对的 HTTP(S) GET 类任务——恰好是 `run_download` 会自己探测的那一类。
+/// FTP / HLS / DASH / BT / ed2k、非 GET（POST 等重放有副作用）与 hint（探测会作废
+/// 一次性 URL）仍走 `meta_prober` 或不探测，行为不变。
+fn prelude_shares_downloader_probe(params: &DownloadParams) -> bool {
+    !params.is_resume
+        && params.hint_file_size == 0
+        && params.audio_url.is_none()
+        && params.spec.is_get_like()
+        && (params.url.starts_with("http://") || params.url.starts_with("https://"))
+        && !hls_downloader::is_hls_url(&params.url)
+        && !dash_downloader::is_dash_url(&params.url)
+}
+
+/// 启动序幕的名称 / 大小探测。
+///
+/// 满足 [`prelude_shares_downloader_probe`] 的任务用与下载相同的 client / spec 跑
+/// `resolve_file_info_with_ua_fallback`（HEAD ∥ Range GET，conclusive 206 后只再给
+/// HEAD 1s 宽限，含传输抖动重试与 UA / Referer 自适应），成功后：
+/// - 名称 / 大小按 [`crate::meta_prober::ProbedMeta::from_file_info`] 派生（HTML
+///   页面不产出名字）；
+/// - 自适应后的 spec 与下载器一样即时落库，并连同 `FileInfo` 存入
+///   `params.preprobed`，`run_download_inner` 据此跳过第二轮探测。
+///
+/// 探测失败返回空结果并把错误存入 `params.preprobed`：序幕按 URL 兜底命名，下载器
+/// 直接上报该错误，不再重跑同一套重试阶梯。被取消时不设 `preprobed`。其余任务走
+/// `meta_prober`（裸 HEAD / FTP / magnet / ed2k）。
+async fn probe_start_meta(params: &mut DownloadParams) -> crate::meta_prober::ProbedMeta {
+    if !prelude_shares_downloader_probe(params) {
+        return tokio::select! {
+            _ = params.cancel_token.cancelled() => crate::meta_prober::ProbedMeta::default(),
+            r = crate::meta_prober::probe_task_meta(
+                &params.url,
+                &params.file_name,
+                &params.client,
+                &params.proxy_config,
+                &params.spec,
+            ) => r,
+        };
+    }
+    let resolved = tokio::select! {
+        _ = params.cancel_token.cancelled() => return crate::meta_prober::ProbedMeta::default(),
+        r = downloader::resolve_file_info_with_ua_fallback(
+            &params.client,
+            &params.url,
+            &params.spec,
+        ) => r,
+    };
+    match resolved {
+        Ok((info, adapted)) => {
+            if let Some(adapted_spec) = &adapted {
+                downloader::persist_adapted_spec(&params.db, &params.task_id, adapted_spec).await;
+            }
+            let meta = crate::meta_prober::ProbedMeta::from_file_info(&info);
+            params.preprobed = Some(Ok(downloader::PreprobedInfo { info, adapted }));
+            meta
+        }
+        Err(error) => {
+            log_info!(
+                "[download] task {} prelude probe failed: {}",
+                params.task_id,
+                error
+            );
+            params.preprobed = Some(Err(error));
+            crate::meta_prober::ProbedMeta::default()
+        }
+    }
+}
+
 /// spawned task 启动序幕：文件名最终决策。manager 仍是唯一决策链——本函数
 /// 是 `do_start_task` 派生任务的第一步，下载器自身不变更文件名；决策执行
 /// 从 actor 内联挪到各任务自己的序幕，probe 的网络往返不再阻塞 actor
@@ -1277,18 +1346,11 @@ async fn finalize_start_file_name(
     // Step 2: probe（名称仍未知时）。hint 任务（浏览器扩展 / 插件给了大小）不探测：
     // 一次性签名 URL 会被任何请求消耗，下载器也承诺跳过 probe；名字由下方 URL 兜底
     // 占位，完成期再按实际 GET 响应精修。探到的大小留给「文件已存在」询问展示。
+    // 普通 HTTP(S) GET 任务直接跑下载器的完整探测（HEAD ∥ Range GET）并把结果交给
+    // 下载器复用，整个启动只发一轮探测（见 [`probe_start_meta`]）。
     let mut probed_total: Option<i64> = None;
     if params.file_name.is_empty() && params.hint_file_size == 0 {
-        let probed = tokio::select! {
-            _ = params.cancel_token.cancelled() => crate::meta_prober::ProbedMeta::default(),
-            r = crate::meta_prober::probe_task_meta(
-                &params.url,
-                &params.file_name,
-                &params.client,
-                &params.proxy_config,
-                &params.spec,
-            ) => r,
-        };
+        let probed = probe_start_meta(params).await;
         probed_total = Some(probed.total_bytes);
         if !probed.file_name.is_empty() {
             params.file_name = probed.file_name;
@@ -1299,6 +1361,37 @@ async fn finalize_start_file_name(
                 probed.name_inferred,
             )
             .await
+            {
+                return StartPrelude::Failed {
+                    error: error.into(),
+                };
+            }
+            params.sink.emit(EngineEvent::TaskMetaProbed {
+                task_id: params.task_id.clone(),
+                file_name: params.file_name.clone(),
+                total_bytes: 0,
+            });
+        }
+    } else if params.hint_file_size == 0
+        && naming::needs_type_extension(&params.file_name)
+        && prelude_shares_downloader_probe(params)
+    {
+        // Step 2b：显式名（新建对话框重命名 / API `out=`）缺类型扩展名。下载器本来就要
+        // 探测，序幕代跑同一轮并经 `preprobed` 交给它复用，不多发请求。扩展名取自探测
+        // 得出的完整名（CD > 重定向后的 CDN 路径 > 脚本端点名按 Content-Type 换扩展名），
+        // 不是请求链接的后缀；拿不到可信扩展名（无扩展名 CDN 对象 + octet-stream）时
+        // 保持原名，完成期再按实际 GET 证据与文件头魔数补。必须在「文件已存在」判断与
+        // dedup 之前完成，二者都按最终名工作。
+        let probed = probe_start_meta(params).await;
+        probed_total = Some(probed.total_bytes);
+        if let Some(name) =
+            naming::complete_extension_from_name(&params.file_name, &probed.file_name)
+        {
+            params.file_name = name;
+            if let Err(error) = params
+                .db
+                .set_task_file_name(&params.task_id, &params.file_name)
+                .await
             {
                 return StartPrelude::Failed {
                     error: error.into(),
@@ -1825,7 +1918,7 @@ struct TaskSpeedState {
     cached_segments: Option<Vec<SegmentProgressInfo>>,
     /// Latest observed transfer sample, retained until a terminal frame clears activity.
     cached_runtime: Option<TaskRuntime>,
-    /// Last status sent to Dart.  Used to detect status transitions so that
+    /// Last status sent to the host.  Used to detect status transitions so that
     /// they are always forwarded immediately (not rate-limited).
     last_sent_status: i32,
     /// Last raw status observed from downloader updates.
@@ -1967,6 +2060,9 @@ pub struct NewTaskSpec {
     pub save_dir: String,
     /// 文件名（空 = 探测/URL 推断）。
     pub file_name: String,
+    /// 参照文件名（浏览器捕获时浏览器定下的原始名；空 = 无）。`file_name` 是缺类型
+    /// 扩展名的显式名时借它的扩展名补全，见 [`naming::complete_extension_offline`]。
+    pub name_hint: String,
     /// 分段数（<=0 = 自动）。
     pub segments: i32,
     /// 浏览器 cookies（空 = 无）。
@@ -2068,8 +2164,7 @@ pub struct CreateGroupSpec {
 /// [`DownloadManager::spawn_resolve_preview`] 的一次性结果，经 `oneshot`
 /// 回传给调用方（actor 内 [`DownloadManager::begin_resolve_preview`] 转发为
 /// [`crate::events::EngineEvent::ResolvePreviewReady`]；管理 API 宿主
-/// （`hub`/`server` 的 `ResolvePreview` 命令分支）直接消费本结构的字段
-/// 组装 REST 响应）。
+/// 直接消费本结构的字段组装预解析响应）。
 pub struct ResolvePreviewOutcome {
     pub name: String,
     pub items: Vec<crate::model::ManifestItemInfo>,
@@ -2510,8 +2605,8 @@ pub struct DownloadManager {
     /// Auto 模式最大连接数上限（config `auto_max_connections`）。
     /// <=0 = 不限（罕见，仅显式配置），默认 [`DEFAULT_AUTO_MAX_CONNECTIONS`]。
     auto_max_connections: i32,
-    /// 下载完成后是否把文件修改时间设为服务器提供的 `Last-Modified` 时间
-    /// （config `use_server_time`，默认关闭）。
+    /// 下载完成后是否把文件修改时间设为服务器提供的原始时间（HTTP
+    /// `Last-Modified` / FTP `MDTM`；config `use_server_time`，默认关闭）。
     use_server_time: bool,
     /// 文件已存在时的处理策略（config `file_exists_behavior`，默认
     /// `Rename` = 自动重命名）。`Overwrite`/`Skip` 都只在重名冲突**只**
@@ -2831,7 +2926,7 @@ impl DownloadManager {
         self.plugin_manager = Some(pm);
     }
 
-    /// 获取插件管理器（供 hub/server ApiHost 实现读操作 + 集成测试）。
+    /// 获取插件管理器（供宿主管理接口读操作 + 集成测试）。
     #[cfg(feature = "plugins")]
     pub fn plugin_manager(&self) -> Option<Arc<crate::plugin::PluginManager>> {
         self.plugin_manager.clone()
@@ -3889,12 +3984,12 @@ impl DownloadManager {
         crate::cdn::resolver::set_ecs_subnets(json);
     }
 
-    /// Dart 遥测上报完成（config `cdn_pending_reports` 写空）→ 清空引擎侧
+    /// agent `cdn_worker` 遥测上报完成（config `cdn_pending_reports` 写空）→ 清空引擎侧
     /// 待上传样本缓冲。
     pub fn clear_cdn_pending_reports(&mut self) {
         crate::cdn::telemetry::clear();
     }
-    /// 同步落盘遥测缓冲（Dart `RequestConfig` 读 config 前由宿主调用，
+    /// 同步落盘遥测缓冲（agent `cdn_worker` 读 config 前经 daemon 调用，
     /// 保证上报读到全部内存样本，见 telemetry::flush 文档）。
     pub async fn flush_cdn_pending_reports(&self) {
         crate::cdn::telemetry::flush(&self.db).await;
@@ -4171,6 +4266,16 @@ impl DownloadManager {
             .unwrap_or_else(|| queue_id.to_string())
     }
 
+    /// 所有语义事件触发点的唯一出口：照旧交给自托管 webhook，同时经 EventSink
+    /// 发一条 [`EngineEvent::TaskNotice`] 供 agent 做云端推送（宿主不关心则忽略）。
+    /// 返回值沿用 [`crate::webhook::WebhookDispatcher::emit`]（投出的端点数）。
+    fn emit_task_event(&self, event: crate::webhook::WebhookEvent) -> usize {
+        let notice = crate::webhook::TaskNotice::from_event(&event);
+        let delivered = self.webhook.emit(event);
+        self.sink.emit(EngineEvent::TaskNotice(notice));
+        delivered
+    }
+
     /// 重算每个队列的占用情况，对**由占用转为空**的队列发一条 `queue.drained`。
     ///
     /// 必须在任务**进入**（`enqueue_persisted_task` / `resume_task_inner`）与
@@ -4194,8 +4299,7 @@ impl DownloadManager {
         self.occupied_queues = occupied;
         for queue_id in drained {
             let name = self.queue_display_name(&queue_id);
-            self.webhook
-                .emit(crate::webhook::WebhookEvent::queue_drained(queue_id, name));
+            self.emit_task_event(crate::webhook::WebhookEvent::queue_drained(queue_id, name));
         }
     }
 
@@ -4781,7 +4885,7 @@ impl DownloadManager {
         }
 
         // 2. Gracefully pause each active BT task (cancel token, persist
-        //    progress, update DB status to paused, notify Dart).
+        //    progress, update DB status to paused, notify the host).
         if !bt_task_ids.is_empty() {
             log_info!(
                 "[manager] pausing {} active BT task(s) before session invalidation",
@@ -5614,7 +5718,7 @@ impl DownloadManager {
             };
             if let Some(kind) = webhook_kind {
                 let event = self.webhook_event_from_task(kind, &task);
-                self.webhook.emit(event);
+                self.emit_task_event(event);
             }
         }
 
@@ -6133,8 +6237,8 @@ impl DownloadManager {
                 }
 
                 // Now scan all save_dirs for staging dirs and handle each case.
-                // Tokio fs keeps directory enumeration/stat/delete off the hub's
-                // current-thread runtime while preserving the existing decisions.
+                // Tokio fs keeps directory enumeration/stat/delete off the host's
+                // runtime while preserving the existing decisions.
                 for save_dir in &save_dirs {
                     let dir = Path::new(save_dir);
                     let mut entries = match tokio::fs::read_dir(dir).await {
@@ -6539,6 +6643,7 @@ impl DownloadManager {
             mut url,
             save_dir,
             file_name,
+            name_hint,
             segments,
             cookies,
             referrer,
@@ -6690,7 +6795,13 @@ impl DownloadManager {
         let (save_dir, file_name) = if is_magnet(&url) || !torrent_file_bytes.is_empty() {
             (save_dir, file_name)
         } else {
-            split_relative_file_name(&save_dir, &file_name)
+            let (save_dir, file_name) = split_relative_file_name(&save_dir, &file_name);
+            // 显式名（用户改名 / `out=`）缺类型扩展名：先用无需联网的确定性参照补全，
+            // 建任务即定名——列表、「文件已存在」询问与下载中都显示带扩展名的名字，
+            // hint 任务（一次性 URL，启动期不探测）也不必等到完成期。
+            let file_name = naming::complete_extension_offline(&file_name, &name_hint, &url)
+                .unwrap_or(file_name);
+            (save_dir, file_name)
         };
         // When segments <= 0 ("auto"), store 0 in DB and let the downloader
         // dynamically calculate the optimal count after probing file size,
@@ -6858,7 +6969,7 @@ impl DownloadManager {
             },
             &queue_id,
         );
-        self.webhook.emit(created_event);
+        self.emit_task_event(created_event);
 
         // fail-closed：resolver_item 非空但未命中插件（或 plugins feature 关，
         // has_resolver 恒空）→ 任务直接置 error，绝不发起对 source_url 的下载
@@ -7473,7 +7584,7 @@ impl DownloadManager {
             },
             &queue_id,
         );
-        self.webhook.emit(started_event);
+        self.emit_task_event(started_event);
 
         self.generation += 1;
         let spawn_gen = self.generation;
@@ -7569,7 +7680,7 @@ impl DownloadManager {
             // Only treat file_name as a custom rename target when the task
             // comes from a magnet URL and the user explicitly typed a name.
             // For .torrent-file tasks the file_name is auto-derived from the
-            // .torrent filename (without the ".torrent" extension) by the Dart
+            // .torrent filename (without the ".torrent" extension) by the client
             // layer — it has no extension and does not represent the user's
             // intent to rename the download.  Using it as custom_name would
             // cause the completed file to be saved without its real extension
@@ -7801,6 +7912,7 @@ impl DownloadManager {
                 auto_proxy: auto_ctx,
                 multi_nic,
                 unattended: task_unattended,
+                preprobed: None,
             };
 
             let reserved_set = Arc::clone(&self.reserved_temp_paths);
@@ -7937,7 +8049,7 @@ impl DownloadManager {
             if pending.notify {
                 let event = self
                     .webhook_event_from_task(crate::webhook::WebhookEventKind::TaskPaused, &task);
-                self.webhook.emit(event);
+                self.emit_task_event(event);
             }
         }
 
@@ -8160,7 +8272,7 @@ impl DownloadManager {
         if let Ok(Some(task)) = self.db.load_task_by_id(task_id).await {
             let event =
                 self.webhook_event_from_task(crate::webhook::WebhookEventKind::TaskPaused, &task);
-            self.webhook.emit(event);
+            self.emit_task_event(event);
         }
     }
 
@@ -8535,7 +8647,7 @@ impl DownloadManager {
                     crate::logger::report_error("download-manager", "persist task state", &error);
                     return;
                 }
-                // Notify Dart: task is now queued (pending), not actively resuming.
+                // Notify the host: task is now queued (pending), not actively resuming.
                 // Without this signal, the UI keeps all tasks stuck in "resuming" status
                 // even though only max_concurrent are actually downloading.
                 self.sink.emit(EngineEvent::TaskProgress {
@@ -9184,6 +9296,7 @@ impl DownloadManager {
                 auto_proxy: auto_ctx,
                 multi_nic,
                 unattended: task_unattended,
+                preprobed: None,
             };
 
             let reserved_set = Arc::clone(&self.reserved_temp_paths);
@@ -10928,7 +11041,7 @@ impl DownloadManager {
     // Named queue management
     // -----------------------------------------------------------------------
 
-    /// Broadcast the current list of named queues to Dart.
+    /// Broadcast the current list of named queues to the host.
     pub async fn send_all_queues(&self) {
         match self.db.load_all_queues().await {
             Ok(queues) => self.sink.emit(EngineEvent::QueuesChanged(queues)),
@@ -11735,7 +11848,7 @@ impl DownloadManager {
     /// 「订阅」看到的是一条空列表，只能自己再按一次「立即抓取」。订阅这个动作
     /// 本身就是「我要这个源的内容」，抓取必须同步跟上。
     ///
-    /// 所有入口（Dart 信号 / REST / MCP / CLI）都应走这里而不是
+    /// 所有入口（daemon RPC / REST / MCP / CLI）都应走这里而不是
     /// `rss.create_source`——后者只落库，代理与 UA 也不在 `RssManager` 手上。
     pub async fn create_rss_source(
         &mut self,
@@ -11791,6 +11904,31 @@ impl DownloadManager {
             &proxy,
             &ua,
         )
+    }
+
+    /// 剪贴板识别用的只读链接探测（`daemon.link.probe`）：只发一次 HEAD。
+    ///
+    /// client 与 meta-probe 同源（全局代理 / UA / Auto 路由）；返回的 future 可在 actor 之外
+    /// `await`。非 http(s) 链接不联网，直接 `Unknown`。
+    pub fn link_probe_future(
+        &self,
+        url: String,
+    ) -> impl Future<Output = crate::meta_prober::LinkProbe> + Send + use<> {
+        let client = self.task_http_context(&url, "", "", "", false).0;
+        async move {
+            let lower = url.get(..8).unwrap_or(&url).to_ascii_lowercase();
+            if !(lower.starts_with("http://") || lower.starts_with("https://")) {
+                return crate::meta_prober::LinkProbe {
+                    verdict: crate::meta_prober::LinkVerdict::Unknown,
+                    final_url: url,
+                    file_name: String::new(),
+                    mime: String::new(),
+                    total_bytes: 0,
+                };
+            }
+            let spec = crate::downloader::RequestSpec::empty_get();
+            crate::meta_prober::probe_link_kind(&url, &client, &spec).await
+        }
     }
 
     /// RSS off-actor 回流的唯一入口（宿主 actor 的 `rss_rx` 分支调用）。
@@ -11933,7 +12071,7 @@ impl DownloadManager {
         // 补一次全量任务快照：`create_task` 只发单条 `TaskProgress`，而该事件
         // **不带 queue_id**——客户端「按进度新建任务」只能拿到一个 queue_id 为
         // 空的条目，于是新任务不属于任何队列、队列视图里根本看不见，得手动
-        // 停/启队列触发全量刷新才归位。Dart 自己发起的创建不受影响（它本来
+        // 停/启队列触发全量刷新才归位。客户端自己发起的创建不受影响（它本来
         // 就知道队列），RSS 是引擎自发的，必须由引擎把归属补上。
         self.send_tasks_snapshot().await;
         Some(task_id)
@@ -11984,7 +12122,7 @@ impl DownloadManager {
     ///
     /// - If `task_id` is empty, or equals the current priority task → cancel boost.
     /// - Otherwise: auto-pause all other active/queued tasks, ensure the target
-    ///   task is downloading, and broadcast the new state to Dart.
+    ///   task is downloading, and broadcast the new state to the host.
     pub async fn set_priority_task(&mut self, task_id: String) {
         // Toggle off if same task or empty
         if task_id.is_empty() || self.priority_task_id.as_deref() == Some(task_id.as_str()) {
@@ -12089,7 +12227,7 @@ impl DownloadManager {
         // 验证目标任务是否真的启动成功。
         // 若 do_resume_task / resume_task 内部出错（DB 读取失败、BT 初始化失败等），
         // 任务不会出现在 active_tokens 中。此时必须取消 boost 并恢复已暂停的任务，
-        // 否则 Dart 侧会显示 boost 激活但实际无任务下载，产生莫名其妙的结果。
+        // 否则客户端会显示 boost 激活但实际无任务下载，产生莫名其妙的结果。
         if !self.active_tasks.contains_key(&task_id) {
             log_info!(
                 "[manager] boost: target task {} failed to start — cancelling boost mode",
@@ -12149,7 +12287,7 @@ impl DownloadManager {
         }
         // 在发出 PriorityTaskChanged 之前广播最新队列位置。
         // resume_task 对于无空余槽的任务只是将其入队，不会主动广播。
-        // 此次广播确保 Dart 在收到 PriorityTaskChanged 时已知道哪些任务在队列中
+        // 此次广播确保宿主在收到 PriorityTaskChanged 时已知道哪些任务在队列中
         // （queuePosition > 0），使 pauseAll 能正确识别并暂停它们。
         self.broadcast_queue_positions();
         self.sink.emit(EngineEvent::PriorityTaskChanged {
@@ -12184,7 +12322,7 @@ const SPEED_SEED_INTERVAL_MS: u128 = 300;
 /// a stall, reaching <1 KB/s in ~10 windows (~10 s) for a 1 MB/s baseline.
 const SPEED_DECAY_FACTOR: f64 = 0.5;
 
-/// Minimum interval between forwarding progress to Dart (per task) to avoid
+/// Minimum interval between forwarding progress to the host (per task) to avoid
 /// flooding the signal channel when many segments report simultaneously.
 const MIN_DART_INTERVAL_MS: u128 = 500;
 
@@ -12230,9 +12368,9 @@ pub async fn progress_reporter(
     sink: Arc<dyn EventSink>,
 ) {
     let mut states: HashMap<String, TaskSpeedState> = HashMap::new();
-    // Track last time we sent a signal to Dart per task (rate limiting).
+    // Track last time we forwarded progress to the host per task (rate limiting).
     let mut last_dart_send: HashMap<String, std::time::Instant> = HashMap::new();
-    // Track last DB persistence per task (independent of Dart updates).
+    // Track last DB persistence per task (independent of host updates).
     let mut last_db_save: HashMap<String, std::time::Instant> = HashMap::new();
     // BT 数据完成通知去重:每个 task_id 只发一次 `EngineEvent::BtDataFinished`
     // (完成搬移失败后的重试路径可能再次进入 finished 分支)。
@@ -12436,7 +12574,7 @@ pub async fn progress_reporter(
         let resolved_name = state.file_name.clone();
 
         // For terminal states (completed / error / paused) always send immediately.
-        // For downloading (status=1) and preparing (status=5), rate-limit to avoid flooding Dart.
+        // For downloading (status=1) and preparing (status=5), rate-limit to avoid flooding the host.
         // BT tasks that are actively seeding (status=3, seeding_status=1) are also
         // treated as live so the UI keeps receiving upload speed updates.
         let is_seeding = update.seeding_status == SEEDING_STATUS_ACTIVE;
@@ -14437,6 +14575,164 @@ mod tests {
                 "remove creation failure fixture",
                 &error,
             );
+        }
+    }
+
+    /// 取出 sink 里收到的全部 `TaskNotice`（按到达顺序）。
+    fn collected_notices(sink: &RecordingSink) -> Vec<crate::webhook::TaskNotice> {
+        sink.events()
+            .into_iter()
+            .filter_map(|event| match event {
+                EngineEvent::TaskNotice(notice) => Some(notice),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn task_event_helper_emits_notice_with_unique_ids_and_keeps_webhook_return() {
+        let db = Db::connect("sqlite::memory:")
+            .await
+            .expect("connect mem db");
+        let sink = Arc::new(RecordingSink::new());
+        let mgr = sched_manager_with_sink(&db, 1, sink.clone());
+        insert_task_at_status(&db, "t-done", "/tmp", "done.bin", 3).await;
+        insert_task_at_status(&db, "t-fail", "/tmp", "fail.bin", 4).await;
+        let done = db
+            .load_task_by_id("t-done")
+            .await
+            .expect("load")
+            .expect("task");
+        let failed = db
+            .load_task_by_id("t-fail")
+            .await
+            .expect("load")
+            .expect("task");
+        use crate::webhook::WebhookEventKind as Kind;
+        let before = chrono::Utc::now().timestamp_millis();
+        // 没有任何端点订阅时 webhook.emit 返回 0（simulate 依赖该语义），helper 原样透传。
+        assert_eq!(
+            mgr.emit_task_event(mgr.webhook_event_from_task(Kind::TaskCompleted, &done)),
+            0
+        );
+        assert_eq!(
+            mgr.emit_task_event(mgr.webhook_event_from_task(Kind::TaskFailed, &failed)),
+            0
+        );
+        let notices = collected_notices(&sink);
+        assert_eq!(notices.len(), 2);
+        assert_eq!(notices[0].event, "task.completed");
+        assert_eq!(notices[1].event, "task.failed");
+        assert_ne!(notices[0].delivery_id, notices[1].delivery_id);
+        assert!(uuid::Uuid::parse_str(&notices[0].delivery_id).is_ok());
+        assert!(notices[0].timestamp_ms >= before);
+        let task = notices[0].task.as_ref().expect("task snapshot");
+        assert_eq!(task.id, "t-done");
+        assert_eq!(task.file_name, "done.bin");
+        assert_eq!(task.status, 3);
+    }
+
+    #[tokio::test]
+    async fn lifecycle_trigger_points_emit_task_notice() {
+        let db = Db::connect("sqlite::memory:")
+            .await
+            .expect("connect mem db");
+        let sink = Arc::new(RecordingSink::new());
+        let mut mgr = sched_manager_with_sink(&db, 1, sink.clone());
+
+        // task.created：建任务即发。
+        let id = mgr
+            .create_task(NewTaskSpec {
+                url: "http://127.0.0.1:1/file.bin".to_string(),
+                save_dir: std::env::temp_dir().to_string_lossy().into_owned(),
+                file_name: "file.bin".to_string(),
+                start_paused: true,
+                ..Default::default()
+            })
+            .await
+            .expect("create paused task");
+        let notices = collected_notices(&sink);
+        assert_eq!(notices.len(), 1, "created 应恰好一条");
+        assert_eq!(notices[0].event, "task.created");
+        assert_eq!(
+            notices[0].task.as_ref().map(|t| t.id.as_str()),
+            Some(id.as_str())
+        );
+
+        // task.paused：读回任务行后发。
+        mgr.emit_paused_webhook(&id).await;
+        let notices = collected_notices(&sink);
+        assert_eq!(
+            notices.last().map(|n| n.event.as_str()),
+            Some("task.paused")
+        );
+
+        // queue.drained：占用 → 空的边沿触发，无任务快照。
+        mgr.occupied_queues.insert("default".to_string());
+        mgr.sync_queue_occupancy();
+        let notices = collected_notices(&sink);
+        let drained = notices.last().expect("drained notice");
+        assert_eq!(drained.event, "queue.drained");
+        assert_eq!(drained.queue_id, "default");
+        assert!(drained.task.is_none());
+    }
+
+    /// `task.started`（真实建任务即启动）与 `task.completed` / `task.failed`（`on_task_done`
+    /// 终态点）都经同一个 helper 发出 `TaskNotice`。
+    #[tokio::test]
+    async fn started_completed_and_failed_trigger_points_emit_task_notice() {
+        let db = Db::connect("sqlite::memory:")
+            .await
+            .expect("connect mem db");
+        let sink = Arc::new(RecordingSink::new());
+        let mut mgr = sched_manager_with_sink(&db, 1, sink.clone());
+        mgr.set_max_auto_retries(0);
+
+        // task.started：未暂停的新任务在派发时发出（紧随 task.created）。
+        let id = mgr
+            .create_task(NewTaskSpec {
+                url: "http://127.0.0.1:1/never.bin".to_string(),
+                save_dir: std::env::temp_dir().to_string_lossy().into_owned(),
+                file_name: "never.bin".to_string(),
+                ..Default::default()
+            })
+            .await
+            .expect("create task");
+        let kinds: Vec<String> = collected_notices(&sink)
+            .into_iter()
+            .filter(|n| n.task.as_ref().is_some_and(|t| t.id == id))
+            .map(|n| n.event)
+            .collect();
+        assert_eq!(kinds, ["task.created", "task.started"]);
+
+        // task.completed / task.failed：on_task_done 的终态点（失败仅在放弃重试后发出）。
+        for (task_id, status, expected) in [
+            ("done-ok", 3, "task.completed"),
+            ("done-bad", 4, "task.failed"),
+        ] {
+            insert_task_at_status(&db, task_id, "/tmp", "x.bin", status).await;
+            mgr.active_tasks.insert(
+                task_id.to_string(),
+                ActiveTaskEntry {
+                    token: CancellationToken::new(),
+                    generation: 3,
+                    handle: None,
+                    is_bt: false,
+                    queue_id: String::new(),
+                },
+            );
+            mgr.on_task_done(&TaskDone {
+                task_id: task_id.to_string(),
+                generation: 3,
+                reserved_temp_path: None,
+                phase: TaskDonePhase::Finished,
+            })
+            .await;
+            let notice = collected_notices(&sink)
+                .into_iter()
+                .find(|n| n.event == expected && n.task.as_ref().is_some_and(|t| t.id == task_id))
+                .unwrap_or_else(|| panic!("{expected} notice for {task_id}"));
+            assert_eq!(notice.task.as_ref().map(|t| t.status), Some(status));
         }
     }
 
@@ -16516,7 +16812,7 @@ mod tests {
     /// BT 数据下载完成标记的一次性契约(`bt_finish_notified` 去重集,见
     /// `progress_reporter` 文档):同一 task_id 第二次标记
     /// `bt_data_finished=true`(对应完成搬移失败后重试路径重新进入 finished
-    /// 分支)不得再次触发 `EngineEvent::BtDataFinished`,否则 hub/server 会
+    /// 分支)不得再次触发 `EngineEvent::BtDataFinished`,否则宿主会
     /// 对同一 GID 重复广播 `aria2.onBtDownloadComplete`。
     #[tokio::test]
     async fn progress_reporter_emits_bt_data_finished_once_and_dedupes_repeat() {

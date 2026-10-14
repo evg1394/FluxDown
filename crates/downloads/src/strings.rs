@@ -34,6 +34,7 @@ pub(crate) struct DownloadStrings {
     pub(crate) clean_stale_tasks: SharedString,
     pub(crate) clean_stale_tasks_description: SharedString,
     delete_confirm_with_file: SharedString,
+    delete_confirm_keep_file: SharedString,
     batch_delete_confirm_with_file: SharedString,
     pub(crate) too_many_windows_hint: SharedString,
     pub(crate) confirm: SharedString,
@@ -160,6 +161,7 @@ impl DownloadStrings {
             clean_stale_tasks: shared(translator.text("cleanStaleTasks")),
             clean_stale_tasks_description: shared(translator.text("cleanStaleTasksDesc")),
             delete_confirm_with_file: shared(translator.text("deleteConfirmDescWithFile")),
+            delete_confirm_keep_file: shared(translator.text("deleteConfirmDescKeepFile")),
             batch_delete_confirm_with_file: shared(
                 translator.text("batchDeleteConfirmDescWithFile"),
             ),
@@ -265,6 +267,16 @@ impl DownloadStrings {
         }
     }
 
+    /// 单任务删除确认文案：按是否同时删除文件选模板，代入任务名。
+    pub(crate) fn delete_task_description(&self, name: &str, delete_files: bool) -> SharedString {
+        let template = if delete_files {
+            &self.delete_confirm_with_file
+        } else {
+            &self.delete_confirm_keep_file
+        };
+        SharedString::from(template.replace("{fileName}", name))
+    }
+
     /// 「删除任务组及文件」确认文案：复用单任务模板，代入组名。
     pub(crate) fn group_delete_with_files_description(&self, group_name: &str) -> SharedString {
         SharedString::from(
@@ -357,7 +369,7 @@ impl DownloadStrings {
     }
 }
 
-/// 「新建下载」表单文案，键集与 `lib/src/widgets/new_download_dialog.dart` 一致。
+/// 「新建下载」表单文案，使用公共 i18n 资源键。
 #[derive(Clone)]
 pub(crate) struct NewDownloadStrings {
     pub(crate) subtitle: SharedString,
@@ -465,7 +477,13 @@ impl NewDownloadStrings {
             threads: shared(translator.text("threads")),
             threads_auto: shared(translator.text("auto")),
             threads_custom: shared(translator.text("customThreads")),
-            threads_custom_hint: shared(translator.text("customThreadsHint")),
+            threads_custom_hint: shared(&translator.text_with(
+                "customRangeHint",
+                &[
+                    ("min", "1"),
+                    ("max", &crate::model::new_download::MAX_THREADS.to_string()),
+                ],
+            )),
             rename: shared(translator.text("renameOptional")),
             rename_placeholder: shared(translator.text("autoDetectFilename")),
             advanced: shared(translator.text("taskProxyAdvanced")),

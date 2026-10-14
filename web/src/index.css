@@ -348,6 +348,18 @@
   animation: fx-pop-in 120ms cubic-bezier(0.16, 1, 0.3, 1);
   transform-origin: var(--radix-popper-transform-origin, center);
 }
+/* 风险提示图标的一次性「放大回弹」（与 GPUI RevealCallout 同曲线：1 → 1.28 → 0.94 → 1）。 */
+@keyframes fx-icon-pop {
+  35% {
+    transform: scale(1.28);
+  }
+  70% {
+    transform: scale(0.94);
+  }
+}
+@utility animate-fx-icon-pop {
+  animation: fx-icon-pop 480ms cubic-bezier(0.16, 1, 0.3, 1);
+}
 /*
  * 减弱动效：按类名子串统一关掉，含 `data-[state=closed]:` 这类变体生成的类名
  * （单一类选择器压不过变体的属性选择器，故用 !important）。退场 animation-name 为

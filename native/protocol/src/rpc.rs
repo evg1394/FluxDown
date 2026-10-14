@@ -11,10 +11,11 @@ pub const JSONRPC_VERSION: &str = "2.0";
 /// v5 增加静默捕获建任务通知（`CaptureTasksStarted`），v6 增加局域网配对请求 / 发现事件
 /// （`LinkPairingRequestsChanged` / `LinkDiscoveredChanged`），v7 增加 CloudConnectionChanged，
 /// v8 增加应用内更新状态（`UpdateChanged` / `AgentSnapshot.update`），v9 增加「文件已存在」
-/// 交互选择（`SelectionKind::FileExists` / `SelectionOutcome::FileExists`）。
-pub const PROTOCOL_VERSION: u32 = 9;
+/// 交互选择（`SelectionKind::FileExists` / `SelectionOutcome::FileExists`），v10 增加云端推送
+/// （`DaemonEvent::TaskNotice`、`CloudNotifyChanged` / `AgentSnapshot.cloud_notify`）。
+pub const PROTOCOL_VERSION: u32 = 10;
 /// 旧客户端不能解析新增事件，必须在握手时拒绝混用而非运行中断连。
-pub const MIN_PROTOCOL_VERSION: u32 = 9;
+pub const MIN_PROTOCOL_VERSION: u32 = 10;
 /// 服务收到 `system.shutdown` 而退出时的 WebSocket 关闭原因：客户端据此停止重连与重拉。
 pub const CLOSE_REASON_SERVICE_QUIT: &str = "service-quit";
 /// headless 服务为应用更新而重启时的 WebSocket 关闭原因：浏览器客户端保持重连，

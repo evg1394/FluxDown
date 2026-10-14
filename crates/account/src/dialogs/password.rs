@@ -22,8 +22,8 @@ use gpui_component::{
     v_flex,
 };
 
-use super::code_step;
 use super::login::parse_send_code;
+use super::{code_step, password_field};
 use crate::errors::{ErrorContext, error_text};
 use crate::host::AccountHost;
 use crate::verification::{CodeChallenge, spawn_ticker};
@@ -102,7 +102,9 @@ struct PasswordDialog {
 }
 
 fn password_input(window: &mut Window, cx: &mut App) -> Entity<InputState> {
-    cx.new(|cx| InputState::new(window, cx).masked(true))
+    let input = cx.new(|cx| InputState::new(window, cx).masked(true));
+    password_field::restrict_to_ascii(&input, window, cx);
+    input
 }
 
 pub(crate) fn open(host: &Entity<AccountHost>, window: &mut Window, cx: &mut App) {
@@ -187,6 +189,8 @@ pub(crate) fn open(host: &Entity<AccountHost>, window: &mut Window, cx: &mut App
                 .keyboard(!submitting)
                 // 点遮罩不关闭：误触会丢掉已输入的内容与验证码。
                 .overlay_closable(false)
+                // 回车由输入框 `PressEnter` 提交；默认 Confirm 会抢先关窗。
+                .on_ok(|_, _, _| false)
                 .on_close(move |_, _, cx| on_close.update(cx, |this, _| this.closed = true))
                 .content(move |body, _, _| body.child(content.clone()))
         }

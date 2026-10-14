@@ -278,3 +278,10 @@ fun Modifier.fluxGlow(
         translate(-pad, dy.toPx() - pad) { drawLayer(layer) }
     }
 }
+
+/**
+ * 弹出浮层（菜单、Toast、对话框）的环境阴影色（§5.5 例外；导航坞与读数条不用阴影）：
+ * 深色近黑，浅色降到 ink 的低透明度。仅 token 派生，配合 [fluxGlow] 的向下偏移 + 内缩使用（投影，不是光晕）。
+ */
+internal fun FluxColors.softShadow(alphaDark: Float): Color =
+    if (dark) ramp[0].copy(alpha = alphaDark) else ramp[11].copy(alpha = alphaDark * 0.45f)

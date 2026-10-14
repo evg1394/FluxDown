@@ -157,6 +157,7 @@ impl NewDownloadSubmission {
                                 torrent_blob_id: None,
                                 unattended: false,
                                 hint_file_size: None,
+                                name_hint: None,
                             },
                         ))
                     })

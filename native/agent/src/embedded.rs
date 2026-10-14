@@ -154,6 +154,7 @@ pub async fn start_embedded(
         remote_tasks: state.remote_tasks.clone(),
         shell: crate::shell::shell_status(availability, &state.preferences),
         update: crate::update::initial_status(&crate::update::unsupported_target()),
+        cloud_notify: crate::cloud_notify::initial_state(state.cloud_notify),
         ..AgentSnapshot::default()
     };
     let events = AgentEventHub::new(initial);
@@ -174,15 +175,18 @@ pub async fn start_embedded(
             return Err(AgentStartError::Services(format!("{error:#}")));
         }
     };
+    let (notice_tx, notice_rx) = crate::cloud_notify::notice_channel();
     let CloudServices {
         auth,
         api: cloud_api,
         sync,
         remote,
+        notify,
         sync_task,
         remote_task,
         device_meta_task,
         cdn_task,
+        notify_task,
     } = match start_cloud_services(
         // 宿主进程的环境不属于 agent：地址只取构建期注入值，缺省为本地默认。
         fluxcloud_base_url(None, option_env!("FLUXCLOUD_BASE_URL")),
@@ -190,6 +194,7 @@ pub async fn start_embedded(
         &events,
         &shared_state,
         &store,
+        notice_rx,
         &cancel,
     )
     .await
@@ -203,13 +208,14 @@ pub async fn start_embedded(
 
     let mut tasks: Vec<(&'static str, JoinHandle<()>)> = vec![
         ("CDN", cdn_task),
+        ("cloud notify", notify_task),
         ("cloud sync", sync_task),
         ("remote tasks", remote_task),
         ("device metadata", device_meta_task),
         ("power", tokio::spawn(power.clone().run(cancel.clone()))),
         (
             "daemon event projection",
-            spawn_daemon_projection(daemon_events, events.clone(), cancel.clone()),
+            spawn_daemon_projection(daemon_events, events.clone(), notice_tx, cancel.clone()),
         ),
     ];
 
@@ -264,6 +270,7 @@ pub async fn start_embedded(
         Arc::new(cloud_api),
         sync,
         remote,
+        notify,
         capture,
         blobs,
         diagnostics,

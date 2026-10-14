@@ -15,7 +15,7 @@ Click **New Download** in the top bar (or press <kbd>Ctrl</kbd>/<kbd>Cmd</kbd>+<
 |---|---|
 | **Download URL** | A multi-line box — paste one URL per line to queue a batch download (magnet and `ed2k://` links work too), or a single URL for one task. FluxDown shows a live count of parsed URLs. Use **Open .torrent file** to pick a local `.torrent`, or **Import TXT file** to load a list of URLs from a text file. |
 | **Save Directory** | Where the file lands. Defaults to your global save directory (**Settings → Download**), or your last-used folder if **Remember Last Save Location** is on. |
-| **Threads** | Segments to split the download into: **Auto** (FluxDown picks based on file size and CPU count), a fixed preset (4/8/16/32/64), or a custom value from 1–256. Hidden for magnet links and `.torrent` files, since BitTorrent manages its own connections. |
+| **Threads** | Segments to split the download into: **Auto** (FluxDown picks based on file size and CPU count), a fixed preset (4/8/16/32/64), or a custom value from 1–512 (above 64 a warning about server throttling / IP bans appears). Hidden for magnet links and `.torrent` files, since BitTorrent manages its own connections. |
 | **Rename (optional)** | Override the detected filename. Only shown for a single URL — batch downloads and torrents always use the detected/embedded name. |
 
 Click **Advanced Options** to reveal per-task overrides that default to your global settings when left empty:

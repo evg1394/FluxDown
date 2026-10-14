@@ -28,6 +28,7 @@ use uuid::Uuid;
 use crate::api_host::AgentApiHost;
 use crate::capture::{BlobError, BlobKind, CaptureError, CaptureService, DaemonBlobClient};
 use crate::cloud::{CloudApi, CloudAuthService, CloudError};
+use crate::cloud_notify::CloudNotifyService;
 use crate::daemon_client::DaemonClient;
 use crate::diagnostics::{DiagnosticsError, DiagnosticsService};
 use crate::event_hub::AgentEventHub;
@@ -59,6 +60,7 @@ pub struct GatewayService {
     cloud: Arc<CloudApi>,
     sync: Arc<SyncService>,
     remote: Arc<RemoteTaskService>,
+    notify: Arc<CloudNotifyService>,
     capture: Arc<CaptureService>,
     blobs: Arc<DaemonBlobClient>,
     diagnostics: Arc<DiagnosticsService>,
@@ -91,6 +93,7 @@ impl GatewayService {
         cloud: Arc<CloudApi>,
         sync: Arc<SyncService>,
         remote: Arc<RemoteTaskService>,
+        notify: Arc<CloudNotifyService>,
         capture: Arc<CaptureService>,
         blobs: Arc<DaemonBlobClient>,
         diagnostics: Arc<DiagnosticsService>,
@@ -112,6 +115,7 @@ impl GatewayService {
             cloud,
             sync,
             remote,
+            notify,
             capture,
             blobs,
             diagnostics,
@@ -434,6 +438,75 @@ impl GatewayService {
             method::AGENT_PREFERENCES_PATCH => {
                 self.preferences_patch(params_or_empty(request.params))
                     .await
+            }
+            method::AGENT_CLOUD_NOTIFY_GET => to_value(self.notify.get().await),
+            method::AGENT_CLOUD_NOTIFY_REFRESH => cloud_value(self.notify.refresh().await),
+            method::AGENT_CLOUD_NOTIFY_SET_REPORTING => {
+                let params =
+                    parse_params::<fluxdown_protocol::CloudNotifyReportingParams>(request.params)?;
+                cloud_value(self.notify.set_reporting(params.enabled).await)
+            }
+            method::AGENT_CLOUD_NOTIFY_SET_PRIVACY => {
+                let params =
+                    parse_params::<fluxdown_protocol::CloudNotifyPrivacyParams>(request.params)?;
+                cloud_value(self.notify.set_privacy(params).await)
+            }
+            method::AGENT_CLOUD_NOTIFY_CREATE_CHANNEL => {
+                let params = parse_params::<fluxdown_protocol::CloudNotifyChannelCreateParams>(
+                    request.params,
+                )?;
+                cloud_value(self.notify.create_channel(&params).await)
+            }
+            method::AGENT_CLOUD_NOTIFY_UPDATE_CHANNEL => {
+                let params = parse_params::<fluxdown_protocol::CloudNotifyChannelUpdateParams>(
+                    request.params,
+                )?;
+                cloud_value(self.notify.update_channel(&params).await)
+            }
+            method::AGENT_CLOUD_NOTIFY_DELETE_CHANNEL => {
+                let params =
+                    parse_params::<fluxdown_protocol::CloudNotifyChannelIdParams>(request.params)?;
+                cloud_value(
+                    self.notify
+                        .delete_channel(&params.id)
+                        .await
+                        .map(|()| serde_json::json!({ "ok": true })),
+                )
+            }
+            method::AGENT_CLOUD_NOTIFY_TEST_CHANNEL => {
+                let params =
+                    parse_params::<fluxdown_protocol::CloudNotifyChannelIdParams>(request.params)?;
+                cloud_value(self.notify.test_channel(&params.id).await)
+            }
+            method::AGENT_CLOUD_NOTIFY_TELEGRAM_BIND_START => {
+                cloud_value(self.notify.telegram_bind_start().await)
+            }
+            method::AGENT_CLOUD_NOTIFY_SEND_EMAIL_CODE => {
+                let params =
+                    parse_params::<fluxdown_protocol::CloudNotifyEmailCodeParams>(request.params)?;
+                cloud_value(self.notify.send_email_code(&params.address).await)
+            }
+            method::AGENT_CLOUD_NOTIFY_VERIFY_EMAIL => {
+                let params = parse_params::<fluxdown_protocol::CloudNotifyEmailVerifyParams>(
+                    request.params,
+                )?;
+                cloud_value(
+                    self.notify
+                        .verify_email(&params.address, &params.code)
+                        .await
+                        .map(|()| serde_json::json!({ "ok": true })),
+                )
+            }
+            method::AGENT_CLOUD_NOTIFY_TELEGRAM_BIND_STATUS => {
+                let params = parse_params::<fluxdown_protocol::CloudNotifyTelegramBindStatusParams>(
+                    request.params,
+                )?;
+                cloud_value(self.notify.telegram_bind_status(&params.code).await)
+            }
+            method::AGENT_CLOUD_NOTIFY_DELIVERIES => {
+                let params =
+                    parse_params::<fluxdown_protocol::CloudNotifyDeliveriesParams>(request.params)?;
+                cloud_value(self.notify.deliveries(&params).await)
             }
             method::AGENT_SYNC_GET => to_value(self.sync.status().await),
             method::AGENT_SYNC_ENABLE => sync_value(self.sync.set_enabled(true).await),
@@ -2448,6 +2521,13 @@ mod tests {
                 state.clone(),
                 store.clone(),
             ));
+            let notify = Arc::new(crate::cloud_notify::CloudNotifyService::new(
+                cloud_api.clone(),
+                events.clone(),
+                state.clone(),
+                store.clone(),
+                tokio_util::sync::CancellationToken::new(),
+            ));
             let shell = crate::shell::ShellState::new(
                 crate::shell::TrayAvailability::Unavailable(
                     fluxdown_protocol::TrayUnavailableReason::NotBuilt,
@@ -2529,6 +2609,7 @@ mod tests {
                     Arc::new(cloud_api),
                     sync,
                     remote,
+                    notify,
                     capture,
                     blobs.clone(),
                     diagnostics.clone(),

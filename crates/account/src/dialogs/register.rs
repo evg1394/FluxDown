@@ -1,5 +1,5 @@
 //! 注册对话框：邮箱 + 密码 + 可选昵称；完成后转入邮箱验证码步骤（有效期倒计时、
-//! 重新发送、返回），与 Flutter `_showRegisterDialog` / 注册验证屏幕语义对齐。
+//! 重新发送、返回）。
 //! 登录时服务端报告「注册未完成」会经 [`open_resume`] 直接进入验证步骤。
 
 use std::sync::Arc;
@@ -21,7 +21,7 @@ use gpui_component::{
     v_flex,
 };
 
-use crate::dialogs::code_step;
+use crate::dialogs::{code_step, password_field};
 use crate::errors::{ErrorContext, error_text};
 use crate::verification::{CodeChallenge, spawn_ticker};
 use crate::{AccountCommand, AccountPort, t, t_with};
@@ -59,6 +59,8 @@ pub(crate) fn open(
             .w(active_theme(cx).text_extent(520.))
             // 点遮罩不关闭：误触关闭会丢掉已输入内容并迫使重新发码。
             .overlay_closable(false)
+            // 回车由输入框 `PressEnter` 提交；默认 Confirm 会抢先关窗。
+            .on_ok(|_, _, _| false)
             .content(move |content, _, _| content.min_h_0().child(view.clone()))
     });
     email_input.update(cx, |input, cx| input.focus(window, cx));
@@ -89,6 +91,7 @@ pub(crate) fn open_resume(
             .title(fluxdown_ui_components::dialog_title(title.clone(), cx))
             .w(active_theme(cx).text_extent(520.))
             .overlay_closable(false)
+            .on_ok(|_, _, _| false)
             .content(move |content, _, _| content.min_h_0().child(view.clone()))
     });
 }
@@ -110,6 +113,7 @@ impl RegisterDialog {
                 .masked(true)
                 .placeholder(password_placeholder)
         });
+        password_field::restrict_to_ascii(&password_input, window, cx);
         let nickname_input =
             cx.new(|cx| InputState::new(window, cx).placeholder(nickname_placeholder));
         let code_input = cx.new(|cx| InputState::new(window, cx).placeholder(code_placeholder));

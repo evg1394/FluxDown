@@ -9,7 +9,7 @@
 //!     SetFileInformationByHandle / 拆分协调 / cancel_token / etc.
 //!
 //! 用法：
-//!   cargo test -p hub --release --lib corruption_test \
+//!   cargo test -p fluxdown_engine --release --test corruption_test \
 //!       -- --ignored --nocapture --test-threads=1
 //!
 //! 默认 `#[ignore]`，需要网络才能跑。
@@ -205,7 +205,7 @@ async fn run_one_real_download(
         &progress_tx,
         &cancel,
         &speed_limiter,
-        &spec,
+        &std::sync::Arc::new(fluxdown_engine::downloader::DownloadSpec::new(spec)),
         &sink,
         etag,
         last_modified,

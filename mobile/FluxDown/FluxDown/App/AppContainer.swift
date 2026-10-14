@@ -35,7 +35,7 @@ final class AppContainer {
     @ObservationIgnored private let localRef: HostRef
     @ObservationIgnored private var switchQueue: Task<Void, Never>?
     @ObservationIgnored private var lastRescan: ContinuousClock.Instant?
-    @ObservationIgnored private let log = Logger(subsystem: "com.fluxdown.FluxDown", category: "host")
+    @ObservationIgnored private let log = Logger(subsystem: "com.fluxdown.app", category: "host")
 
     private static let connectTimeout: Duration = .seconds(15)
     private static let rescanCooldown: Duration = .seconds(10)

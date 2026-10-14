@@ -9,6 +9,7 @@ import type { QueueDto, TaskDto } from '../../../lib/rpc'
 import { Button, Checkbox, Dialog, DialogFooter, FieldError, FieldHint, Form, FormField, FormRow, Icon, Input, InputWithAction, OptionGroup, OptionRow, SectionHeader, Select, Switch, confirmDialog, useIsMobile } from '../../../ui'
 import { toastRpcError } from '../../../lib/rpcToast'
 import { cn } from '../../../lib/cn'
+import { ThreadsRiskCallout } from '../../../lib/ThreadsRiskCallout'
 import { FsPickerDialog } from './FsPickerDialog'
 import { closeQueueManager } from './store'
 import { queueLabel } from './utils'
@@ -304,10 +305,13 @@ function QueueEditor({
           <NumberField id="queue-speed" label={t('queueSpeedLimit')} hint={t('queueSpeedLimitHint')} value={speedLimit} onChange={setSpeedLimit} />
           <NumberField id="queue-upload" label={t('queueUploadLimit')} hint={t('queueUploadLimitDesc')} value={uploadLimit} onChange={setUploadLimit} />
         </FormRow>
-        <FormRow>
-          <NumberField id="queue-concurrent" label={t('queueMaxConcurrent')} hint={t('queueMaxConcurrentHint')} value={maxConcurrent} onChange={setMaxConcurrent} />
-          <NumberField id="queue-segments" label={t('queueDefaultSegments')} hint={t('queueDefaultSegmentsHint')} value={segments} onChange={setSegments} />
-        </FormRow>
+        <div className="flex flex-col">
+          <FormRow>
+            <NumberField id="queue-concurrent" label={t('queueMaxConcurrent')} hint={t('queueMaxConcurrentHint')} value={maxConcurrent} onChange={setMaxConcurrent} />
+            <NumberField id="queue-segments" label={t('queueDefaultSegments')} hint={t('queueDefaultSegmentsHint')} value={segments} onChange={setSegments} />
+          </FormRow>
+          <ThreadsRiskCallout segments={intOrZero(segments)} />
+        </div>
         <FormField label={t('queueSaveDir')} htmlFor="queue-save-dir" hint={t('queueDirInheritHint')}>
           <InputWithAction
             input={<Input id="queue-save-dir" value={saveDir} onChange={(event) => setSaveDir(event.target.value)} spellCheck={false} />}

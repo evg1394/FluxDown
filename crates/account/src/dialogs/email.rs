@@ -116,6 +116,8 @@ pub(crate) fn open(host: &Entity<AccountHost>, window: &mut Window, cx: &mut App
                 .keyboard(!submitting)
                 // 点遮罩不关闭：误触会丢掉已输入的验证码，重开又要重新发码。
                 .overlay_closable(false)
+                // 回车由输入框 `PressEnter` 提交；默认 Confirm 会抢先关窗。
+                .on_ok(|_, _, _| false)
                 .on_close(move |_, _, cx| on_close.update(cx, |this, _| this.closed = true))
                 .content(move |body, _, _| body.child(content.clone()))
         }

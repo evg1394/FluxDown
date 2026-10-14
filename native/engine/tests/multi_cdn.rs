@@ -271,7 +271,9 @@ async fn run_with_pool(
         &tx,
         &cancel,
         &speed_limiter,
-        &RequestSpec::empty_get(),
+        &std::sync::Arc::new(fluxdown_engine::downloader::DownloadSpec::new(
+            RequestSpec::empty_get(),
+        )),
         &NoopTestSink,
         "",
         "",

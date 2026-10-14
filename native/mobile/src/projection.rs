@@ -207,6 +207,7 @@ impl Projection {
             | AgentEvent::PendingCapturesChanged(_)
             | AgentEvent::ShellChanged(_)
             | AgentEvent::PowerChanged(_)
+            | AgentEvent::CloudNotifyChanged(_)
             | AgentEvent::UpdateChanged(_)
             | AgentEvent::CaptureTasksStarted(_)
             | AgentEvent::SessionRevoked(_) => {
@@ -250,6 +251,7 @@ impl Projection {
                 })
             }
             DaemonEvent::TaskActivityAdded(_)
+            | DaemonEvent::TaskNotice(_)
             | DaemonEvent::PluginsChanged(_)
             | DaemonEvent::ComponentsChanged(_)
             | DaemonEvent::WebhooksChanged(_)
@@ -935,6 +937,42 @@ mod tests {
         assert_eq!(cleared, FrameOutcome::Applied(Vec::new()));
         let plugins = projection.accept(daemon_frame(4, DaemonEvent::PluginsChanged(Vec::new())));
         assert_eq!(plugins, FrameOutcome::Applied(Vec::new()));
+    }
+
+    #[test]
+    fn cloud_notify_state_is_a_section_and_task_notice_is_ignored() {
+        let mut projection = projection(1, Vec::new());
+        let state = fluxdown_protocol::CloudNotifyStateDto {
+            reporting: true,
+            ..Default::default()
+        };
+        let changed = projection.accept(frame(2, AgentEvent::CloudNotifyChanged(state.clone())));
+        let sections = section_events(changed);
+        assert_eq!(sections.len(), 1);
+        assert_eq!(sections[0].0, "agent.cloudNotify");
+        let decoded: serde_json::Value =
+            serde_json::from_str(&sections[0].1).expect("section json");
+        assert_eq!(decoded["reporting"], true);
+        assert_eq!(
+            projection.snapshot_dto().sections["agent.cloudNotify"],
+            sections[0].1
+        );
+        // 同值重放不下发。
+        let noop = projection.accept(frame(3, AgentEvent::CloudNotifyChanged(state)));
+        assert_eq!(noop, FrameOutcome::Applied(Vec::new()));
+
+        let notice = projection.accept(daemon_frame(
+            4,
+            DaemonEvent::TaskNotice(fluxdown_protocol::TaskNoticeDto {
+                delivery_id: "d".to_owned(),
+                event: "task.completed".to_owned(),
+                timestamp_ms: 1,
+                queue_id: String::new(),
+                queue_name: String::new(),
+                task: None,
+            }),
+        ));
+        assert_eq!(notice, FrameOutcome::Applied(Vec::new()));
     }
 
     #[test]

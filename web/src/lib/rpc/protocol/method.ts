@@ -68,6 +68,7 @@ export const METHOD = {
   DAEMON_RSS_REFRESH_SOURCE: 'daemon.rss.refreshSource',
   DAEMON_RSS_ITEM_ACTION: 'daemon.rss.itemAction',
   DAEMON_RSS_VALIDATE: 'daemon.rss.validate',
+  DAEMON_LINK_PROBE: 'daemon.link.probe',
 
   DAEMON_PLUGIN_LIST: 'daemon.plugin.list',
   DAEMON_PLUGIN_AUTH: 'daemon.plugin.auth',
@@ -199,6 +200,19 @@ export const METHOD = {
   /** 完成后关机；无活跃任务时拒绝（invalidArgument）。 */
   AGENT_POWER_ARM: 'agent.power.arm',
   AGENT_POWER_DISARM: 'agent.power.disarm',
+  AGENT_CLOUD_NOTIFY_GET: 'agent.cloudNotify.get',
+  AGENT_CLOUD_NOTIFY_REFRESH: 'agent.cloudNotify.refresh',
+  AGENT_CLOUD_NOTIFY_SET_REPORTING: 'agent.cloudNotify.setReporting',
+  AGENT_CLOUD_NOTIFY_SET_PRIVACY: 'agent.cloudNotify.setPrivacy',
+  AGENT_CLOUD_NOTIFY_CREATE_CHANNEL: 'agent.cloudNotify.createChannel',
+  AGENT_CLOUD_NOTIFY_UPDATE_CHANNEL: 'agent.cloudNotify.updateChannel',
+  AGENT_CLOUD_NOTIFY_DELETE_CHANNEL: 'agent.cloudNotify.deleteChannel',
+  AGENT_CLOUD_NOTIFY_TEST_CHANNEL: 'agent.cloudNotify.testChannel',
+  AGENT_CLOUD_NOTIFY_TELEGRAM_BIND_START: 'agent.cloudNotify.telegramBindStart',
+  AGENT_CLOUD_NOTIFY_TELEGRAM_BIND_STATUS: 'agent.cloudNotify.telegramBindStatus',
+  AGENT_CLOUD_NOTIFY_DELIVERIES: 'agent.cloudNotify.deliveries',
+  AGENT_CLOUD_NOTIFY_SEND_EMAIL_CODE: 'agent.cloudNotify.sendEmailCode',
+  AGENT_CLOUD_NOTIFY_VERIFY_EMAIL: 'agent.cloudNotify.verifyEmail',
 
   /** 服务端推送通知，params 为 EventFrame。 */
   SERVICE_EVENT: 'service.event',

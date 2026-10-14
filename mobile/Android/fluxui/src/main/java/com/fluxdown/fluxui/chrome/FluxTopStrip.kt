@@ -25,10 +25,6 @@ import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.em
 import com.fluxdown.fluxui.icons.FluxIcons
-import com.fluxdown.fluxui.material.FluxBlur
-import com.fluxdown.fluxui.material.FluxGlass
-import com.fluxdown.fluxui.material.FluxGlassKind
-import com.fluxdown.fluxui.material.fluxGlass
 import com.fluxdown.fluxui.theme.FluxScaleGroup
 import com.fluxdown.fluxui.theme.FluxText
 import com.fluxdown.fluxui.theme.FluxTheme
@@ -38,7 +34,7 @@ import com.fluxdown.fluxui.theme.fluxPressable
  * 顶部读数条（01 §12.6）：下载页滚动后，速度仪表收为顶部 Real 玻璃细条上的实时读数。
  *
  * - [progress]：折叠进度 0..1（`collapse`，§8.7）；`> [threshold]`（默认 0.55）时以 `fluid` 入场
- *   （`translateY −14→0、scale .96→1、blur 8→0、alpha`），回落则离场（退场结束后移出组合，不再占用背景副本）。
+ *   （`translateY −14→0、scale .96→1、alpha`），回落则离场（退场结束后移出组合，不再占用背景副本）。
  *   `progress` 在派生状态内读取，滚动时只在越过阈值时重组。
  * - 槽位（左→右）：速度读数（`mono 15·km / 600` accentHi + 0.72em 单位）、[waveform] 迷你波形槽（占满剩余宽度，高 22dp）、
  *   [meta]（`monoS inkMuted`）、36dp 暂停 / 恢复钮（[allPaused] 时显示播放）。
@@ -86,10 +82,10 @@ fun FluxTopStrip(
     Row(
         modifier
             .fillMaxWidth()
-            .height(46.dp)
-            .chromeFade(translateY = (-14).dp, scaleFrom = 0.96f, blur = 8.dp, pivotY = 0f) { presence.progress.value }
+            .height(48.dp)
+            .chromeFade(translateY = (-14).dp, scaleFrom = 0.96f, pivotY = 0f) { presence.progress.value }
             .fluxPressable(onClick = onClick, scale = 0.98f, enabled = visible, role = Role.Button)
-            .fluxGlass(FluxGlass.G3, shape, FluxBlur.Regular, FluxGlassKind.Real, canvasMix = 0.55f)
+            .floatingChromeSurface(shape)
             .padding(start = 16.dp, end = 5.dp),
         horizontalArrangement = Arrangement.spacedBy(10.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -116,7 +112,7 @@ fun FluxTopStrip(
             contentDescription = if (allPaused) resumeDescription else pauseDescription,
             onClick = onTogglePause,
             size = 36.dp,
-            iconSize = 16.dp,
+            iconSize = 18.dp,
             enabled = visible,
         )
     }

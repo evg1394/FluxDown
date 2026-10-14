@@ -134,8 +134,8 @@ private struct SettingsHomeList: View {
             tile(.ed2k, L("ed2kSettings"), Ed2kPage.readout(ctx) ?? L("ed2kSettingsDesc"), "server.rack", .orange)
             tile(.network, L("settingsCatProxy"), NetworkPage.readout(ctx) ?? L("settingsCatProxyDesc"), "globe", .blue)
             tile(.extensions, L("settingsCatExtensions"), L("settingsCatExtensionsDesc"), "puzzlepiece.extension.fill", .purple)
-            // `ui.show_activity_webhooks` = false：首页不显示 Webhook 行（搜索仍可进入）。
-            if state.preferences.bool("ui.show_activity_webhooks", default: true) {
+            // 功能开关关闭时无入口；开启后 `ui.show_activity_webhooks` = false 仍可隐藏首页行（搜索仍可进入）。
+            if FeatureFlags.webhooks, state.preferences.bool("ui.show_activity_webhooks", default: true) {
                 tile(.webhook, L("webhookNavTitle"), nil, "bolt.horizontal.fill", .indigo)
             }
             if !container.isLocalHost, state.has("agent.gateway") {

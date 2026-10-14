@@ -72,6 +72,8 @@ pub const DAEMON_RSS_DELETE_SOURCE: &str = "daemon.rss.deleteSource";
 pub const DAEMON_RSS_REFRESH_SOURCE: &str = "daemon.rss.refreshSource";
 pub const DAEMON_RSS_ITEM_ACTION: &str = "daemon.rss.itemAction";
 pub const DAEMON_RSS_VALIDATE: &str = "daemon.rss.validate";
+/// 剪贴板识别用的只读链接探测：daemon 以全局代理/UA 只发一次 HEAD（不发 GET），判定是否下载资源。
+pub const DAEMON_LINK_PROBE: &str = "daemon.link.probe";
 
 pub const DAEMON_PLUGIN_LIST: &str = "daemon.plugin.list";
 pub const DAEMON_PLUGIN_AUTH: &str = "daemon.plugin.auth";
@@ -155,7 +157,7 @@ pub const AGENT_SYNC_NOW: &str = "agent.sync.now";
 pub const AGENT_SYNC_SET_LOCAL_ONLY: &str = "agent.sync.setLocalOnly";
 /// FluxCloud 服务地址读取；正式构建 `editable=false`，地址恒为构建期固定值。
 pub const AGENT_CLOUD_ENDPOINT_GET: &str = "agent.cloud.endpointGet";
-/// 仅调试构建可用（对齐 Flutter `CloudApiConfig`）：覆盖/恢复 FluxCloud 服务地址，立即生效。
+/// 仅调试构建可用：覆盖/恢复 FluxCloud 服务地址，立即生效。
 pub const AGENT_CLOUD_ENDPOINT_SET: &str = "agent.cloud.endpointSet";
 pub const AGENT_REMOTE_LIST: &str = "agent.remote.list";
 pub const AGENT_REMOTE_DISPATCH: &str = "agent.remote.dispatch";
@@ -191,6 +193,33 @@ pub const AGENT_REFERRAL_CREATE_CODE: &str = "agent.referral.createCode";
 pub const AGENT_REFERRAL_DELETE_CODE: &str = "agent.referral.deleteCode";
 pub const AGENT_REFERRAL_LIST_RECORDS: &str = "agent.referral.listRecords";
 pub const AGENT_REFERRAL_VALIDATE: &str = "agent.referral.validate";
+
+/// 云端推送状态 → `CloudNotifyStateDto`（读本机缓存；过期时后台刷新并经 `CloudNotifyChanged` 推送）。
+pub const AGENT_CLOUD_NOTIFY_GET: &str = "agent.cloudNotify.get";
+/// 立即向 FluxCloud 拉取概览 → `CloudNotifyStateDto`。
+pub const AGENT_CLOUD_NOTIFY_REFRESH: &str = "agent.cloudNotify.refresh";
+/// `CloudNotifyReportingParams` → `CloudNotifyStateDto`：本设备上报开关（设备本地）。
+pub const AGENT_CLOUD_NOTIFY_SET_REPORTING: &str = "agent.cloudNotify.setReporting";
+/// `CloudNotifyPrivacyParams` → `CloudNotifyStateDto`：上报附带字段（设备本地）。
+pub const AGENT_CLOUD_NOTIFY_SET_PRIVACY: &str = "agent.cloudNotify.setPrivacy";
+/// `CloudNotifyChannelCreateParams` → `CloudNotifyChannelDto`。
+pub const AGENT_CLOUD_NOTIFY_CREATE_CHANNEL: &str = "agent.cloudNotify.createChannel";
+/// `CloudNotifyChannelUpdateParams` → `CloudNotifyChannelDto`。
+pub const AGENT_CLOUD_NOTIFY_UPDATE_CHANNEL: &str = "agent.cloudNotify.updateChannel";
+/// `CloudNotifyChannelIdParams` → `{ "ok": true }`。
+pub const AGENT_CLOUD_NOTIFY_DELETE_CHANNEL: &str = "agent.cloudNotify.deleteChannel";
+/// `CloudNotifyChannelIdParams` → `CloudNotifyTestResult`（不计入额度）。
+pub const AGENT_CLOUD_NOTIFY_TEST_CHANNEL: &str = "agent.cloudNotify.testChannel";
+/// → `CloudNotifyTelegramBindDto`：生成一次性 Telegram 绑定码。
+pub const AGENT_CLOUD_NOTIFY_TELEGRAM_BIND_START: &str = "agent.cloudNotify.telegramBindStart";
+/// `CloudNotifyTelegramBindStatusParams` → `CloudNotifyTelegramBindStatusDto`。
+pub const AGENT_CLOUD_NOTIFY_TELEGRAM_BIND_STATUS: &str = "agent.cloudNotify.telegramBindStatus";
+/// `CloudNotifyDeliveriesParams` → `CloudNotifyDeliveriesPage`。
+pub const AGENT_CLOUD_NOTIFY_DELIVERIES: &str = "agent.cloudNotify.deliveries";
+/// `CloudNotifyEmailCodeParams` → `CloudNotifyEmailCodeResult`：向非账号邮箱发通知渠道验证码。
+pub const AGENT_CLOUD_NOTIFY_SEND_EMAIL_CODE: &str = "agent.cloudNotify.sendEmailCode";
+/// `CloudNotifyEmailVerifyParams` → `{ "ok": true }`：校验验证码，把地址记为本账号已验证的通知邮箱。
+pub const AGENT_CLOUD_NOTIFY_VERIFY_EMAIL: &str = "agent.cloudNotify.verifyEmail";
 
 pub const AGENT_PLATFORM_OPEN_TASK: &str = "agent.platform.openTask";
 pub const AGENT_PLATFORM_REVEAL_TASK: &str = "agent.platform.revealTask";
@@ -314,6 +343,7 @@ pub const ALL_METHODS: &[&str] = &[
     DAEMON_RSS_REFRESH_SOURCE,
     DAEMON_RSS_ITEM_ACTION,
     DAEMON_RSS_VALIDATE,
+    DAEMON_LINK_PROBE,
     DAEMON_PLUGIN_LIST,
     DAEMON_PLUGIN_AUTH,
     DAEMON_PLUGIN_SET_ENABLED,
@@ -407,6 +437,19 @@ pub const ALL_METHODS: &[&str] = &[
     AGENT_REFERRAL_DELETE_CODE,
     AGENT_REFERRAL_LIST_RECORDS,
     AGENT_REFERRAL_VALIDATE,
+    AGENT_CLOUD_NOTIFY_GET,
+    AGENT_CLOUD_NOTIFY_REFRESH,
+    AGENT_CLOUD_NOTIFY_SET_REPORTING,
+    AGENT_CLOUD_NOTIFY_SET_PRIVACY,
+    AGENT_CLOUD_NOTIFY_CREATE_CHANNEL,
+    AGENT_CLOUD_NOTIFY_UPDATE_CHANNEL,
+    AGENT_CLOUD_NOTIFY_DELETE_CHANNEL,
+    AGENT_CLOUD_NOTIFY_TEST_CHANNEL,
+    AGENT_CLOUD_NOTIFY_TELEGRAM_BIND_START,
+    AGENT_CLOUD_NOTIFY_TELEGRAM_BIND_STATUS,
+    AGENT_CLOUD_NOTIFY_DELIVERIES,
+    AGENT_CLOUD_NOTIFY_SEND_EMAIL_CODE,
+    AGENT_CLOUD_NOTIFY_VERIFY_EMAIL,
     AGENT_PLATFORM_OPEN_TASK,
     AGENT_PLATFORM_REVEAL_TASK,
     AGENT_PLATFORM_OPEN_PATH,
@@ -447,6 +490,7 @@ pub const SLOW_DAEMON_METHODS: &[&str] = &[
     DAEMON_PLUGIN_MARKET_INSTALL,
     DAEMON_GROUP_RESOLVE_PREVIEW,
     DAEMON_RSS_VALIDATE,
+    DAEMON_LINK_PROBE,
     DAEMON_CONFIG_PROXY_TEST,
     DAEMON_WEBHOOK_TEST,
     DAEMON_BT_TRACKER_SUBSCRIPTION_REFRESH,

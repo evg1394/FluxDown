@@ -70,6 +70,58 @@ androidComponents {
     }
 }
 
+/**
+ * 发布参数（均可选；`scripts/package.sh` 与 CI 经此注入，本地开发构建无需设置）：
+ *  - Gradle 属性 `fluxdown.version`：versionName（可带 `-rc.1` 之类后缀）；versionCode 由前三段派生
+ *    `MAJ*1000000 + MIN*10000 + PAT*100`，与 Flutter 版 Android 同一公式，同一 applicationId 覆盖安装时单调递增；
+ *  - 环境变量 `FLUXDOWN_ANDROID_KEYSTORE`（.jks 路径）/ `FLUXDOWN_ANDROID_KEYSTORE_PASSWORD` /
+ *    `FLUXDOWN_ANDROID_KEY_ALIAS` / `FLUXDOWN_ANDROID_KEY_PASSWORD`：齐全时 release 用该密钥签名；全缺则 release 不签名；
+ *    只给一部分直接失败，避免静默产出未签名包；
+ *  - Gradle 属性 `fluxdown.splitAbi=true`：在 universal 包之外再按 ABI 拆出单 ABI 包。
+ */
+object Release {
+    private val VERSION = Regex("""^(\d+)\.(\d+)\.(\d+)(?:-[0-9A-Za-z.]+)?$""")
+
+    fun versionCode(versionName: String): Int {
+        val match = VERSION.matchEntire(versionName)
+            ?: throw GradleException("fluxdown.version 须为 X.Y.Z[-后缀]（得到 '$versionName'）")
+        val (major, minor, patch) = match.destructured.toList().map(String::toInt)
+        if (major > 2000 || minor > 99 || patch > 99) {
+            throw GradleException("fluxdown.version 超出 versionCode 编码范围（major ≤ 2000，minor / patch ≤ 99）：$versionName")
+        }
+        val code = major * 1_000_000 + minor * 10_000 + patch * 100
+        // Android 要求 versionCode 为正整数；0.0.0 会产出无法覆盖安装任何正式包的 APK。
+        if (code <= 0) {
+            throw GradleException("fluxdown.version 须大于 0.0.0（versionCode 必须为正）：$versionName")
+        }
+        return code
+    }
+}
+
+val appVersionName: String = providers.gradleProperty("fluxdown.version").orElse("0.1.0").get()
+
+val abiList: List<String> = providers.gradleProperty("fluxdown.abis").orElse("arm64-v8a,x86_64").get()
+    .split(',').map { it.trim() }.filter { it.isNotEmpty() }
+
+val signingEnvNames = listOf(
+    "FLUXDOWN_ANDROID_KEYSTORE",
+    "FLUXDOWN_ANDROID_KEYSTORE_PASSWORD",
+    "FLUXDOWN_ANDROID_KEY_ALIAS",
+    "FLUXDOWN_ANDROID_KEY_PASSWORD",
+)
+
+/** 齐全时为变量名 → 值；全缺为 null。 */
+val releaseSigning: Map<String, String>? = run {
+    val present = signingEnvNames.mapNotNull { name ->
+        providers.environmentVariable(name).orNull?.takeIf { it.isNotBlank() }?.let { name to it }
+    }.toMap()
+    when (present.size) {
+        0 -> null
+        signingEnvNames.size -> present
+        else -> throw GradleException("release 签名环境变量不完整，缺少：${(signingEnvNames - present.keys).joinToString()}")
+    }
+}
+
 android {
     namespace = "com.fluxdown.app"
     compileSdk {
@@ -81,21 +133,43 @@ android {
         // API 31：RenderEffect 背景模糊为材质基线（docs/mobile-ui README §0），无低于 31 的分支
         minSdk = 31
         targetSdk = 37
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = Release.versionCode(appVersionName)
+        versionName = appVersionName
         // 只打包 :bridge 实际编译了 libfluxdown_mobile.so 的 ABI（JNA aar 自带 armeabi / mips 等无对应引擎库的 ABI，
         // 留着会让这些设备装得上却在加载引擎时崩溃）。与 :bridge 同源：Gradle 属性 fluxdown.abis。
         ndk {
-            abiFilters += providers.gradleProperty("fluxdown.abis").orElse("arm64-v8a,x86_64").get()
-                .split(',').map { it.trim() }.filter { it.isNotEmpty() }
+            abiFilters += abiList
+        }
+    }
+
+    splits {
+        abi {
+            isEnable = providers.gradleProperty("fluxdown.splitAbi").map(String::toBoolean).getOrElse(false)
+            reset()
+            include(*abiList.toTypedArray())
+            isUniversalApk = true
+        }
+    }
+
+    signingConfigs {
+        releaseSigning?.let { env ->
+            create("release") {
+                storeFile = file(env.getValue("FLUXDOWN_ANDROID_KEYSTORE"))
+                storePassword = env.getValue("FLUXDOWN_ANDROID_KEYSTORE_PASSWORD")
+                keyAlias = env.getValue("FLUXDOWN_ANDROID_KEY_ALIAS")
+                keyPassword = env.getValue("FLUXDOWN_ANDROID_KEY_PASSWORD")
+            }
         }
     }
 
     buildTypes {
         release {
+            signingConfig = signingConfigs.findByName("release")
+            // 全量 R8（不用实验性的 packageScope）：packageScope 下被范围外代码引用的 kotlin 多文件门面父类
+            // （如 SequencesKt__SequenceBuilderKt）保持包私有，子类却被重打包进默认包，启动即 IllegalAccessError。
+            // JNA / UniFFI 绑定的保留规则在 :bridge 的 consumer-rules.pro。
             optimization {
                 enable = true
-                packageScope = setOf("androidx.**", "kotlin.**", "kotlinx.**")
             }
         }
     }
@@ -126,4 +200,5 @@ dependencies {
     implementation(libs.kotlinx.coroutines.android)
     implementation(libs.androidx.compose.ui.tooling.preview)
     debugImplementation(libs.androidx.compose.ui.tooling)
+    testImplementation(libs.junit)
 }

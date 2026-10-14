@@ -4,7 +4,7 @@
 import type { WebhookPresetDto } from '../../lib/rpc'
 
 export const PRESET_CUSTOM = 'custom'
-/** 与 Dart `WebhookEvents.defaults` 一致。 */
+/** 默认订阅任务完成与失败事件。 */
 export const DEFAULT_EVENTS: readonly string[] = ['task.completed', 'task.failed']
 
 /** 预览用样例变量——与引擎 `WebhookEvent::sample()` 对齐，仅用于预览。 */
@@ -31,7 +31,7 @@ const SAMPLE_VARS: Readonly<Record<string, string>> = {
 
 const UTF8 = new TextEncoder()
 
-/** `application/x-www-form-urlencoded` 组件编码（Dart `Uri.encodeQueryComponent`）。 */
+/** `application/x-www-form-urlencoded` 组件编码。 */
 export function formEncode(value: string): string {
   let out = ''
   for (const byte of UTF8.encode(value)) {
@@ -121,7 +121,14 @@ export function urlErrorKey(rawUrl: string, allowHttp: boolean): 'webhookUrlInva
   return 'webhookUrlInvalid'
 }
 
-/** HMAC 密钥起点（`whsec_` + 32 位十六进制），与 Dart `generateWebhookSecret` 同形。 */
+/** URL 字段提示文案键：ntfy 需带主题路径，钉钉需配「自定义关键词」，其余通用。 */
+export function urlHintKey(preset: string): 'webhookUrlHintNtfy' | 'webhookUrlHintDingtalk' | 'webhookUrlHint' {
+  if (preset === 'ntfy') return 'webhookUrlHintNtfy'
+  if (preset === 'dingtalk') return 'webhookUrlHintDingtalk'
+  return 'webhookUrlHint'
+}
+
+/** HMAC 密钥起点（`whsec_` + 32 位十六进制）。 */
 export function generateSecret(): string {
   const bytes = crypto.getRandomValues(new Uint8Array(16))
   return `whsec_${Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('')}`

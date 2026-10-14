@@ -7,7 +7,9 @@
 //! 3. URL 路径末段（请求 URL 与重定向后 URL 择优）；
 //! 4. 类型证据：响应 `Content-Type` → 扩展名；完成后文件头魔数 → 扩展名。
 //!
-//! 用户/API 显式给定的名字不经过本模块的推断，只做 [`sanitize_filename`]。
+//! 用户/API 显式给定的名字不经过本模块的推断，只做 [`sanitize_filename`]；唯一例外是名字
+//! 缺扩展名时按响应证据补上（[`complete_extension_from_name`] /
+//! [`complete_explicit_extension`]），主名与用户自带的扩展名永不改写。
 //! 解码规则的完整规范见 [`disposition`] 与 [`charset`]，扩展端 `fluxDown/utils/filename.ts`
 //! 与之逐条一致。
 
@@ -201,6 +203,104 @@ fn with_type_extension(name: &str, ext: &str) -> Option<String> {
     None
 }
 
+/// 名字末尾是否已有「类型」扩展名：像样（见 [`has_plausible_extension`]）且至少含一个
+/// ASCII 字母。纯数字尾巴（`Ubuntu 24.04`、`周报 2024.10`）是版本号 / 日期，不是扩展名。
+fn has_typed_extension(name: &str) -> bool {
+    has_plausible_extension(name)
+        && name
+            .rsplit('.')
+            .next()
+            .is_some_and(|ext| ext.bytes().any(|b| b.is_ascii_alphabetic()))
+}
+
+/// 显式名（用户改名 / API `out=`）是否缺类型扩展名，需要按证据补上。
+pub fn needs_type_extension(name: &str) -> bool {
+    !name.trim().is_empty() && !has_typed_extension(name)
+}
+
+/// 参照名（引擎按 CD / URL / `Content-Type` 得出的完整名）里可借给显式名的扩展名：须是
+/// 类型扩展名，且不是脚本端点扩展名（`download.php` 描述的是生成方式，不是内容）。
+/// 压缩 tar（`x.tar.gz`）整体返回 `tar.gz`。
+fn reference_extension(name: &str) -> Option<&str> {
+    let name = name.trim();
+    if !has_typed_extension(name) || is_script_endpoint_name(name) {
+        return None;
+    }
+    let dot = name.rfind('.')?;
+    let stem = &name.as_bytes()[..dot];
+    if stem.len() > 4 && stem[stem.len() - 4..].eq_ignore_ascii_case(b".tar") {
+        return Some(&name[dot - 3..]);
+    }
+    Some(&name[dot + 1..])
+}
+
+/// 给缺类型扩展名的 `name` 追加 `ext`；名字已含该扩展名段（`foo.7z.001` 之于 `7z`）、
+/// 或 `ext` 是网页扩展名（与 [`with_type_extension`] 同理）时返回 `None`。
+fn append_extension(name: &str, ext: &str) -> Option<String> {
+    if !needs_type_extension(name)
+        || ext.is_empty()
+        || ext.eq_ignore_ascii_case("html")
+        || ext.eq_ignore_ascii_case("htm")
+    {
+        return None;
+    }
+    let lower = name.to_ascii_lowercase();
+    let ext_lower = ext.to_ascii_lowercase();
+    if lower.ends_with(&format!(".{ext_lower}")) || lower.contains(&format!(".{ext_lower}.")) {
+        return None;
+    }
+    let base = name.trim().trim_end_matches('.');
+    if base.is_empty() {
+        return None;
+    }
+    let completed = sanitize_filename(&format!("{base}.{ext}"));
+    (completed != name).then_some(completed)
+}
+
+/// 启动期：显式名缺类型扩展名时，借用探测得出的参照名（[`extract_filename`] 的结果，已
+/// 综合 CD、重定向后的 CDN 路径、脚本端点名按 `Content-Type` 换扩展名）的扩展名补上。
+/// 主名保持用户输入；参照名本身没有可信扩展名（无扩展名的 CDN 对象、`download.php` +
+/// `application/octet-stream`）返回 `None`，留给完成期按魔数补。
+pub fn complete_extension_from_name(current: &str, reference: &str) -> Option<String> {
+    append_extension(current, reference_extension(reference)?)
+}
+
+/// 建任务时：显式名缺类型扩展名，用无需联网的确定性参照补全——先是调用方给的参照名
+/// （浏览器捕获时浏览器定下的名字），其次 URL 查询里的 `response-content-disposition` /
+/// `rscd`（GitHub release、S3/OSS/COS/Azure 预签名链接，服务器原样回显）。URL 路径后缀
+/// 不算证据：CDN 对象 / 脚本端点的路径不描述内容，留给启动期探测与完成期证据。
+pub fn complete_extension_offline(current: &str, name_hint: &str, url: &str) -> Option<String> {
+    if !needs_type_extension(current) {
+        return None;
+    }
+    complete_extension_from_name(current, name_hint)
+        .or_else(|| complete_extension_from_name(current, &query_disposition_name(url)?))
+}
+
+/// 完成期：显式名仍缺类型扩展名时按实际 GET 证据补上——CD 名的扩展名优先，其次类型
+/// 证据（魔数 / `Content-Type`，规则同 [`refine_inferred_name`]）。不改主名、不替换
+/// 已有扩展名；无需改动返回 `None`。
+pub fn complete_explicit_extension(current: &str, evidence: &NameEvidence<'_>) -> Option<String> {
+    let ext = evidence
+        .disposition
+        .and_then(reference_extension)
+        .or_else(|| evidence_type_extension(evidence))?;
+    append_extension(current, ext)
+}
+
+/// 类型证据给出的扩展名：魔数优先于 `Content-Type`，唯一例外是魔数只认出泛化的 `zip`，
+/// 而 `Content-Type` 指明了具体的 zip 容器格式。
+fn evidence_type_extension(evidence: &NameEvidence<'_>) -> Option<&'static str> {
+    let mime_ext = evidence.mime.and_then(mime_to_ext);
+    match (evidence.sniffed_ext, mime_ext) {
+        (Some("zip"), Some(mime @ ("docx" | "xlsx" | "pptx" | "apk" | "jar" | "epub"))) => {
+            Some(mime)
+        }
+        (Some(sniffed), _) => Some(sniffed),
+        (None, mime) => mime,
+    }
+}
+
 /// 在请求 URL 与重定向后 URL 的末段之间择名。
 ///
 /// 重定向让两边都可能持有真名：GitHub 的 `archive/refs/tags/<tag>.zip` 重定向到 codeload 的
@@ -304,14 +404,7 @@ pub struct NameEvidence<'a> {
 /// `application/octet-stream` 或错标图片格式），唯一例外是魔数只认出泛化的 `zip`：
 /// docx/xlsx/apk/jar/epub 等都是 zip 容器，此时更具体的 `Content-Type` 扩展名胜出。
 pub fn refine_inferred_name(current: &str, evidence: &NameEvidence<'_>) -> Option<String> {
-    let mime_ext = evidence.mime.and_then(mime_to_ext);
-    let type_ext = match (evidence.sniffed_ext, mime_ext) {
-        (Some("zip"), Some(mime @ ("docx" | "xlsx" | "pptx" | "apk" | "jar" | "epub"))) => {
-            Some(mime)
-        }
-        (Some(sniffed), _) => Some(sniffed),
-        (None, mime) => mime,
-    };
+    let type_ext = evidence_type_extension(evidence);
     let disposition = evidence
         .disposition
         .map(str::trim)
@@ -335,8 +428,9 @@ pub fn refine_inferred_name(current: &str, evidence: &NameEvidence<'_>) -> Optio
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::{
-        NameEvidence, NameHints, NameSource, decode_legacy_bytes, extract_filename,
-        extract_from_url, name_from_url, refine_inferred_name, sanitize_filename, url_host,
+        NameEvidence, NameHints, NameSource, complete_explicit_extension,
+        complete_extension_from_name, decode_legacy_bytes, extract_filename, extract_from_url,
+        name_from_url, refine_inferred_name, sanitize_filename, url_host,
     };
 
     fn headers_with(pairs: &[(&'static str, &str)]) -> reqwest::header::HeaderMap {
@@ -859,5 +953,74 @@ mod tests {
             ..NameEvidence::default()
         };
         assert_eq!(refine("img", mislabeled).as_deref(), Some("img.png"));
+    }
+
+    #[test]
+    fn explicit_name_borrows_extension_from_probed_reference_name() {
+        let complete = |current, reference| complete_extension_from_name(current, reference);
+        assert_eq!(
+            complete("我的视频", "abc.mp4").as_deref(),
+            Some("我的视频.mp4")
+        );
+        // 纯数字尾巴是版本号 / 日期，不算扩展名。
+        assert_eq!(
+            complete("Ubuntu 24.04", "ubuntu-24.04-desktop-amd64.iso").as_deref(),
+            Some("Ubuntu 24.04.iso")
+        );
+        assert_eq!(
+            complete("kernel", "linux-6.1.tar.gz").as_deref(),
+            Some("kernel.tar.gz")
+        );
+        assert_eq!(complete("foo.", "a.zip").as_deref(), Some("foo.zip"));
+        // 探测已按 Content-Type 把脚本端点名换成真扩展名时照借。
+        assert_eq!(complete("包", "download.zip").as_deref(), Some("包.zip"));
+        // 用户自带的扩展名永不替换。
+        assert_eq!(complete("keep.dat", "x.zip"), None);
+        // 名字已含该扩展名段（分卷）。
+        assert_eq!(complete("foo.7z.001", "x.7z"), None);
+        // 参照名没有可信扩展名：脚本端点、网页、无扩展名 CDN 对象、版本号小数点。
+        for reference in [
+            "download.php",
+            "page.html",
+            "8a7b6c",
+            "v1.2",
+            "proton-11.0-1b",
+            "",
+        ] {
+            assert_eq!(complete("foo", reference), None, "{reference}");
+        }
+    }
+
+    #[test]
+    fn explicit_name_completes_extension_from_completion_evidence() {
+        let complete = |current, evidence| complete_explicit_extension(current, &evidence);
+        // CD 名的扩展名优先于类型证据，主名保持用户输入。
+        let cd = NameEvidence {
+            disposition: Some("server.png"),
+            mime: Some("image/jpeg"),
+            sniffed_ext: Some("jpg"),
+        };
+        assert_eq!(complete("keep-this", cd).as_deref(), Some("keep-this.png"));
+        // CD 是脚本端点名 / 无扩展名时退回类型证据。
+        let endpoint = NameEvidence {
+            disposition: Some("get.php"),
+            mime: Some("application/octet-stream"),
+            sniffed_ext: Some("pdf"),
+        };
+        assert_eq!(complete("报告", endpoint).as_deref(), Some("报告.pdf"));
+        // 无扩展名 CDN 对象：只有魔数。
+        let cdn = NameEvidence {
+            mime: Some("application/octet-stream"),
+            sniffed_ext: Some("png"),
+            ..NameEvidence::default()
+        };
+        assert_eq!(complete("photo", cdn).as_deref(), Some("photo.png"));
+        assert_eq!(complete("photo.webp", cdn), None);
+        let html = NameEvidence {
+            mime: Some("text/html"),
+            ..NameEvidence::default()
+        };
+        assert_eq!(complete("photo", html), None);
+        assert_eq!(complete("photo", NameEvidence::default()), None);
     }
 }

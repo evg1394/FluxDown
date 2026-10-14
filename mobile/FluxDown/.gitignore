@@ -8,3 +8,6 @@ DerivedData/
 .build/
 .swiftpm/
 *.xcresult
+
+# scripts/testflight.sh 的归档 / IPA 输出
+build/

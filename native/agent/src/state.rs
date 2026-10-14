@@ -47,6 +47,19 @@ pub struct AccountSyncData {
 /// 暂存账号数上限；超出时丢弃最先的账号，避免状态文件无限增长。
 const SYNC_STASH_LIMIT: usize = 8;
 
+/// 云端推送的设备本地偏好；默认全关（上报开启必须经 UI 显式同意）。
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+#[serde(default)]
+pub struct CloudNotifyPrefs {
+    /// 本设备是否向 FluxCloud 上报任务事件。
+    pub reporting: bool,
+    /// 上报时附带下载地址。
+    pub include_url: bool,
+    /// 上报时附带保存目录。
+    pub include_save_dir: bool,
+}
+
 /// agent 可恢复状态；不包含 daemon 下载快照或捕获 header/cookie。
 #[derive(Clone, Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -82,6 +95,8 @@ pub struct AgentState {
     pub analytics_id: String,
     /// 调试构建下用户覆盖的 FluxCloud 地址；正式构建启动时忽略（锁定固定地址）。
     pub cloud_base_url_override: Option<String>,
+    /// 云端推送的设备本地偏好（上报开关 / 隐私字段）；不进配置同步，换号不重置。
+    pub cloud_notify: CloudNotifyPrefs,
 }
 
 impl AgentState {

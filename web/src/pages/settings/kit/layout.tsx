@@ -137,6 +137,7 @@ export function SettingsRow({
   description,
   help,
   children,
+  footer,
   vertical = false,
   compact = false,
   disabled = false,
@@ -147,6 +148,8 @@ export function SettingsRow({
   /** 标题旁信息图标，点击展开长说明。 */
   help?: string
   children?: ReactNode
+  /** 行下方附加区（随值动态出现的提示等），与本行同属一格。 */
+  footer?: ReactNode
   vertical?: boolean
   compact?: boolean
   disabled?: boolean
@@ -154,7 +157,7 @@ export function SettingsRow({
 }) {
   const label = <RowLabel title={title} description={description} help={help} />
   const stacked = vertical
-  return (
+  const row = (
     <div
       className={cn(
         'w-full px-4',
@@ -162,7 +165,7 @@ export function SettingsRow({
         !stacked && !compact && 'mobile:flex-col mobile:py-3',
         !stacked && compact && 'items-center coarse:min-h-touch',
         disabled && 'pointer-events-none opacity-50',
-        className,
+        footer === undefined && className,
       )}
     >
       {stacked ? (
@@ -178,6 +181,13 @@ export function SettingsRow({
           ) : null}
         </>
       )}
+    </div>
+  )
+  if (footer === undefined) return row
+  return (
+    <div className={cn('w-full', className)}>
+      {row}
+      <div className={cn('px-4', disabled && 'opacity-50')}>{footer}</div>
     </div>
   )
 }

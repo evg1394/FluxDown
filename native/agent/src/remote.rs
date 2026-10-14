@@ -117,6 +117,8 @@ pub struct RemoteTaskService {
     sse_connect_timeout: Duration,
     heartbeat_interval: Duration,
     reconnect: Notify,
+    /// 云端 SSE 里推送相关的事件（`notify.changed` / `notify.delivery` / 重连 / `resync`）转交云端推送模块。
+    notify_feed: Option<crate::cloud_notify::NotifyFeed>,
     runtime: Mutex<Runtime>,
 }
 
@@ -139,8 +141,16 @@ impl RemoteTaskService {
             sse_connect_timeout: SSE_CONNECT_TIMEOUT,
             heartbeat_interval: HEARTBEAT_INTERVAL,
             reconnect: Notify::new(),
+            notify_feed: None,
             runtime: Mutex::new(Runtime::default()),
         }
+    }
+
+    /// 接入云端推送：收到 `notify.changed` 时唤醒其概览刷新。
+    #[must_use]
+    pub fn with_notify_feed(mut self, feed: crate::cloud_notify::NotifyFeed) -> Self {
+        self.notify_feed = Some(feed);
+        self
     }
 
     pub async fn run(self: Arc<Self>, cancel: CancellationToken) {
@@ -202,6 +212,10 @@ impl RemoteTaskService {
                 .map_err(|_| {
                     RemoteError::Protocol("remote SSE response headers timeout".to_owned())
                 })??;
+                // 流已建立：重连期间错过的投递变化由第一页全量拉取纠正。
+                if let Some(feed) = &self.notify_feed {
+                    feed.connected();
+                }
                 let (mut events, _) = self.events.subscribe_and_snapshot();
                 self.consume_events_epoch(response, &cancel, &mut events, epoch)
                     .await
@@ -757,7 +771,30 @@ impl RemoteTaskService {
                     }
                 }
             }
-            "resync" => return Ok(Some(SseEnd::Resync)),
+            "notify.changed" => {
+                if let Some(feed) = &self.notify_feed {
+                    feed.changed();
+                }
+            }
+            "notify.delivery" => {
+                let items = event
+                    .get("items")
+                    .cloned()
+                    .map(serde_json::from_value::<Vec<fluxdown_protocol::CloudNotifyDeliveryDto>>)
+                    .transpose()?
+                    .unwrap_or_default();
+                if let Some(feed) = &self.notify_feed
+                    && !items.is_empty()
+                {
+                    feed.deliveries(items, epoch);
+                }
+            }
+            "resync" => {
+                if let Some(feed) = &self.notify_feed {
+                    feed.resync();
+                }
+                return Ok(Some(SseEnd::Resync));
+            }
             _ => {}
         }
         Ok(None)
@@ -1142,6 +1179,7 @@ impl RemoteTaskService {
                     torrent_blob_id: None,
                     unattended: true,
                     hint_file_size: None,
+                    name_hint: None,
                 }),
             )
             .await

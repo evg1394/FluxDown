@@ -786,33 +786,55 @@ async fn run_dash_download_inner(p: &DownloadParams) -> Result<i64, DownloadErro
     Ok(total)
 }
 
-/// 用 `Range: bytes=0-0` 探测轨道全长（解析 `Content-Range: bytes 0-0/N` 的 N）。
-/// 单次尝试、失败返回 `None`（调用方退化为未知大小），绝不阻塞下载主流程。
-async fn probe_content_length(p: &DownloadParams, url: &str) -> Option<i64> {
+/// 轨道探测结果：全长与服务器 `Last-Modified`。
+#[derive(Debug, Default)]
+struct TrackProbe {
+    /// `Content-Range` 全长；`None` = 未知（探测失败 / 服务器未给全长）。
+    len: Option<i64>,
+    /// 响应的 `Last-Modified`（空串 = 未提供或探测失败），供「使用服务器文件时间」。
+    last_modified: String,
+}
+
+/// 用 `Range: bytes=0-0` 探测轨道全长（解析 `Content-Range: bytes 0-0/N` 的 N）
+/// 并顺带记下 `Last-Modified`。单次尝试、失败返回空结果（调用方退化为未知大小 /
+/// 无服务器时间），绝不阻塞下载主流程。
+async fn probe_track(p: &DownloadParams, url: &str) -> TrackProbe {
     let mut req = p.client.get(url).header("Range", "bytes=0-0");
     if crate::downloader::is_valid_referrer(&p.referrer) {
         req = req.header(reqwest::header::REFERER, &p.referrer);
     }
     req = crate::downloader::apply_extra_headers(req, &p.extra_headers);
     let resp = tokio::select! {
-        _ = p.cancel_token.cancelled() => return None,
-        r = tokio::time::timeout(SMALL_REQUEST_TIMEOUT, req.send()) => r.ok()?.ok()?,
+        _ = p.cancel_token.cancelled() => return TrackProbe::default(),
+        r = tokio::time::timeout(SMALL_REQUEST_TIMEOUT, req.send()) => match r {
+            Ok(Ok(resp)) => resp,
+            _ => return TrackProbe::default(),
+        },
     };
-    let header = resp
-        .headers()
-        .get(reqwest::header::CONTENT_RANGE)?
-        .to_str()
-        .ok()?;
+    track_probe_from_headers(resp.headers())
+}
+
+fn track_probe_from_headers(headers: &reqwest::header::HeaderMap) -> TrackProbe {
     // 形如 "bytes 0-0/240334643"；"*" 表示服务器未知全长。
-    let total = header.rsplit('/').next()?;
-    total.parse::<i64>().ok().filter(|n| *n > 0)
+    let len = headers
+        .get(reqwest::header::CONTENT_RANGE)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.rsplit('/').next())
+        .and_then(|total| total.parse::<i64>().ok())
+        .filter(|n| *n > 0);
+    let last_modified = headers
+        .get(reqwest::header::LAST_MODIFIED)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    TrackProbe { len, last_modified }
 }
 
 /// 轨对模式的单轨下载调度：优先多段并发，条件不满足或多段被服务器拒绝时
 /// 回退单流（既有 `download_track` 路径），保持既往行为为兜底。
 ///
 /// 多段前提（全部满足）：
-///   • `track_len = Some(n)`——`probe_content_length` 拿到全长即服务器已用
+///   • `track_len = Some(n)`——`probe_track` 拿到全长即服务器已用
 ///     206 + Content-Range 履行过 Range 请求，Range 能力有实证；
 ///   • n 超过 [`MULTI_SEGMENT_TRACK_THRESHOLD`]（小轨拆分无收益）；
 ///   • 原始请求是 GET 族（POST + Range 未定义，禁多段）。
@@ -859,7 +881,7 @@ async fn download_track_best_effort(
             Err(e) => return Err(e),
         }
     } else {
-        // C1 防线：cancel 与「探测失败」在 probe_content_length 里同为 None。
+        // C1 防线：cancel 与「探测失败」在 probe_track 里同为未知全长。
         // 暂停绝不能落进破坏性单流回退（清行 + File::create 截断 temp），
         // 先显式甄别取消。
         if p.cancel_token.is_cancelled() {
@@ -969,7 +991,7 @@ async fn download_track_coordinated(
         &p.progress_tx,
         &p.cancel_token,
         &p.speed_limiter,
-        &p.spec,
+        &std::sync::Arc::new(crate::downloader::DownloadSpec::new(p.spec.clone())),
         p.sink.as_ref(),
         "",
         "",
@@ -1146,8 +1168,9 @@ async fn run_track_pair_inner(p: &DownloadParams, audio_url: &str) -> Result<i64
     // 失败 → None = 未知，UI 退化为只显示已下载字节，不阻塞下载）。
     // 探测成功本身就是服务器履行 Range 请求（206 + Content-Range）的硬证据，
     // 下方据此决定该轨能否走多段并发；失败（配额型端点等）自动保持单流。
-    let video_len = probe_content_length(p, &p.url).await;
-    let audio_len = probe_content_length(p, audio_url).await;
+    let video_probe = probe_track(p, &p.url).await;
+    let audio_probe = probe_track(p, audio_url).await;
+    let (video_len, audio_len) = (video_probe.len, audio_probe.len);
     let total_bytes = match (video_len, audio_len) {
         (Some(v), Some(a)) => v + a,
         _ => 0,
@@ -1295,7 +1318,7 @@ async fn run_track_pair_inner(p: &DownloadParams, audio_url: &str) -> Result<i64
     p.db.update_task_total_bytes(&p.task_id, video_bytes + audio_bytes)
         .await?;
     // 终帧分布快照：把两轨合成为一个 100% 全覆盖段。音频轨走单流时不产生
-    // 分段快照，Dart 端缓存的最后一帧仍是视频轨阶段的（只覆盖 [0, 视频轨长)），
+    // 分段快照，宿主缓存的最后一帧仍是视频轨阶段的（只覆盖 [0, 视频轨长)），
     // 完成后分布图尾部会留灰——此帧以任务级坐标系覆盖全量，消除残留。
     let pair_actual = video_bytes + audio_bytes;
     if pair_actual > 0
@@ -1381,6 +1404,20 @@ async fn run_track_pair_inner(p: &DownloadParams, audio_url: &str) -> Result<i64
         }
     }
 
+    if p.use_server_time {
+        let separate_audio = audio_bytes > 0 && !mux_succeeded;
+        for (path, last_modified) in track_pair_mtime_targets(
+            &dest_path,
+            &audio_path,
+            &video_probe.last_modified,
+            &audio_probe.last_modified,
+            audio_bytes > 0,
+            separate_audio,
+        ) {
+            crate::downloader::apply_server_mtime(&path, last_modified, &p.task_id).await;
+        }
+    }
+
     let total = if mux_succeeded {
         match tokio::fs::metadata(&dest_path).await {
             Ok(meta) => meta.len() as i64,
@@ -1391,6 +1428,32 @@ async fn run_track_pair_inner(p: &DownloadParams, audio_url: &str) -> Result<i64
     };
     p.db.update_task_progress(&p.task_id, total).await?;
     Ok(total)
+}
+
+/// 轨对完成后「使用服务器文件时间」的落点：
+/// - 未产生音频（`has_audio = false`）：只有视频文件，取视频轨时间；
+/// - mux 成功：合并产物在 `dest`，取视频轨时间，视频轨未提供时退用音频轨；
+/// - mux 失败（`separate_audio`）：两个独立文件各取本轨时间。
+fn track_pair_mtime_targets<'a>(
+    dest: &Path,
+    audio_path: &Path,
+    video_last_modified: &'a str,
+    audio_last_modified: &'a str,
+    has_audio: bool,
+    separate_audio: bool,
+) -> Vec<(PathBuf, &'a str)> {
+    if separate_audio {
+        return vec![
+            (dest.to_path_buf(), video_last_modified),
+            (audio_path.to_path_buf(), audio_last_modified),
+        ];
+    }
+    let merged = if video_last_modified.is_empty() && has_audio {
+        audio_last_modified
+    } else {
+        video_last_modified
+    };
+    vec![(dest.to_path_buf(), merged)]
 }
 
 pub(crate) fn build_audio_path(video_path: &Path) -> PathBuf {
@@ -3190,5 +3253,62 @@ mod tests {
         .await;
         assert!(res_v.is_ok(), "audio = None 时纯视频封装应成功");
         assert!(out_video_only.exists(), "out_video_only.mp4 产物应存在");
+    }
+
+    #[test]
+    fn track_probe_reads_length_and_last_modified() {
+        use reqwest::header::{CONTENT_RANGE, HeaderMap, HeaderValue, LAST_MODIFIED};
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            CONTENT_RANGE,
+            HeaderValue::from_static("bytes 0-0/240334643"),
+        );
+        headers.insert(
+            LAST_MODIFIED,
+            HeaderValue::from_static("Wed, 18 Mar 2026 12:28:19 GMT"),
+        );
+        let probe = super::track_probe_from_headers(&headers);
+        assert_eq!(probe.len, Some(240_334_643));
+        assert_eq!(probe.last_modified, "Wed, 18 Mar 2026 12:28:19 GMT");
+
+        // 全长未知（`*`）不影响服务器时间；无 Last-Modified 时为空串。
+        let mut unknown = HeaderMap::new();
+        unknown.insert(CONTENT_RANGE, HeaderValue::from_static("bytes 0-0/*"));
+        let probe = super::track_probe_from_headers(&unknown);
+        assert_eq!(probe.len, None);
+        assert!(probe.last_modified.is_empty());
+    }
+
+    #[test]
+    fn track_pair_mtime_targets_cover_merged_and_separate_outputs() {
+        use std::path::{Path, PathBuf};
+        let dest = Path::new("/d/pair.mp4");
+        let audio = Path::new("/d/pair.audio.m4a");
+        let video_lm = "Mon, 01 Jan 2024 00:00:00 GMT";
+        let audio_lm = "Tue, 02 Jan 2024 00:00:00 GMT";
+
+        // mux 成功：合并产物取视频轨时间。
+        assert_eq!(
+            super::track_pair_mtime_targets(dest, audio, video_lm, audio_lm, true, false),
+            vec![(PathBuf::from("/d/pair.mp4"), video_lm)]
+        );
+        // 视频轨未提供时间：合并产物退用音频轨。
+        assert_eq!(
+            super::track_pair_mtime_targets(dest, audio, "", audio_lm, true, false),
+            vec![(PathBuf::from("/d/pair.mp4"), audio_lm)]
+        );
+        // 没有音频产物：视频文件不得借用音频轨时间。
+        assert_eq!(
+            super::track_pair_mtime_targets(dest, audio, "", audio_lm, false, false),
+            vec![(PathBuf::from("/d/pair.mp4"), "")]
+        );
+        // mux 失败：两个独立文件各取本轨时间。
+        assert_eq!(
+            super::track_pair_mtime_targets(dest, audio, video_lm, audio_lm, true, true),
+            vec![
+                (PathBuf::from("/d/pair.mp4"), video_lm),
+                (PathBuf::from("/d/pair.audio.m4a"), audio_lm),
+            ]
+        );
     }
 }

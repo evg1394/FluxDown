@@ -20,6 +20,8 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.asPaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.IntrinsicSize
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -79,12 +81,12 @@ import com.fluxdown.core.store.Connection
 import com.fluxdown.fluxui.chrome.FluxGlassIconButton
 import com.fluxdown.fluxui.chrome.FluxPageHead
 import com.fluxdown.fluxui.chrome.PageLead
-import com.fluxdown.fluxui.chrome.ScopeTab
-import com.fluxdown.fluxui.chrome.ScopeTabs
 import com.fluxdown.fluxui.controls.ButtonSize
 import com.fluxdown.fluxui.controls.ButtonVariant
+import com.fluxdown.fluxui.controls.FluxActionTile
 import com.fluxdown.fluxui.controls.FluxButton
-import com.fluxdown.fluxui.controls.FluxIconButton
+import com.fluxdown.fluxui.controls.FluxSegmented
+import com.fluxdown.fluxui.controls.SegOption
 import com.fluxdown.fluxui.controls.FluxPresenceDot
 import com.fluxdown.fluxui.controls.Tone
 import com.fluxdown.fluxui.data.FileTile
@@ -199,7 +201,7 @@ private fun DetailBody(taskId: String, modelOf: () -> DetailModel?, listState: L
     }
     var tab by rememberSaveable(taskId) { mutableStateOf(DetailTab.General) }
     if (tab !in tabs) tab = DetailTab.General
-    val labels = tabs.map { ScopeTab(it, tabLabel(it)) }
+    val options = tabs.map { SegOption(it, tabLabel(it)) }
     val gate = rememberFlowInGate()
 
     // 切换分页：列表滚回到标签条（英雄头保持滚出）；新页内容各自重播流入
@@ -249,9 +251,9 @@ private fun DetailBody(taskId: String, modelOf: () -> DetailModel?, listState: L
                     .fillMaxWidth()
                     .background(c.canvas.copy(alpha = 0.89f * tabBg))
                     .padding(horizontal = margin)
-                    .padding(top = 6.dp),
+                    .padding(top = 6.dp, bottom = 4.dp),
             ) {
-                ScopeTabs(tabs = labels, selected = tab, onSelect = { tab = it })
+                FluxSegmented(options = options, selected = tab, onSelect = { tab = it })
             }
         }
         item(key = "tab-$tab") {
@@ -465,12 +467,13 @@ private fun ReadoutRow(model: DetailModel) {
                 }
             }
             BasicText(sizeLine, style = type.mono, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            val (speedText, speedColor) = when {
+            val speed = when {
                 model.visual == TaskVisualState.Downloading && model.speedDown > 0 -> "↓ ${Format.speed(model.speedDown)}" to c.accentHi
                 model.visual == TaskVisualState.Seeding && model.speedUp > 0 -> "↑ ${Format.speed(model.speedUp)}" to c.mintText
-                else -> "—" to c.inkFaint
+                else -> null
             }
-            FluxText(speedText, style = speedStyle, color = speedColor, maxLines = 1)
+            // 无实时速度（已完成 / 暂停 / 排队）时不占一行占位符「—」
+            speed?.let { (text, color) -> FluxText(text, style = speedStyle, color = color, maxLines = 1) }
         }
     }
 }
@@ -528,6 +531,8 @@ private fun ActionRow(
     val shareLabel = str(R.string.mobileShareLink)
     val moreLabel = str(R.string.moreActions)
     val folderLabel = str(R.string.detailActionFolder)
+    val shareShort = str(R.string.detailActionShare)
+    val moreShort = str(R.string.detailActionMore)
     var moreBounds by remember { mutableStateOf(Rect.Zero) }
     val onPrimary: () -> Unit = {
         if (model.visual == TaskVisualState.Missing) {
@@ -539,37 +544,23 @@ private fun ActionRow(
     }
     val onFolder: () -> Unit = { if (!context.openFolder(task.saveDir)) actions.shareLink(task) }
     val onMore: () -> Unit = { overlays.showMenu(moreBounds, actions.menuItems(task, model.boosted)) }
-    val sideBySide = FluxTheme.type.fontScale < 1.5f
 
-    // weight 槽位里按钮必须 fullWidth，否则胶囊按内容收缩、居中，两侧留出大块空白。
-    val primary: @Composable (Modifier) -> Unit = { m ->
-        FluxButton(primaryLabel, onPrimary, m, variant = ButtonVariant.Primary, icon = primaryIcon, fullWidth = true)
-    }
-    val folder: @Composable (Modifier) -> Unit = { m ->
-        if (!remoteHost) FluxButton(folderLabel, onFolder, m, icon = FluxIcons.FolderOpen, fullWidth = true)
-    }
-    val icons: @Composable () -> Unit = {
-        FluxIconButton(FluxIcons.Share2, shareLabel, { actions.shareLink(task) })
-        FluxIconButton(
-            FluxIcons.EllipsisVertical,
-            moreLabel,
+    // 等宽动作块：图标在上、短标签在下（对齐 iOS 地图 / 通讯录卡片）。每块只放一个短词，
+    // 窄屏与大字号下不会再出现“图标 + 折成两行的文字”挤在胶囊里；主动作为强调色实心块。
+    Row(
+        Modifier.fillMaxWidth().height(IntrinsicSize.Min),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        val tile = Modifier.weight(1f).fillMaxHeight()
+        FluxActionTile(primaryLabel, primaryIcon, onPrimary, tile, prominent = true)
+        if (!remoteHost) FluxActionTile(folderLabel, FluxIcons.FolderOpen, onFolder, tile)
+        FluxActionTile(shareShort, FluxIcons.Share2, { actions.shareLink(task) }, tile, contentDescription = shareLabel)
+        FluxActionTile(
+            moreShort,
+            FluxIcons.Ellipsis,
             onMore,
-            modifier = Modifier.onGloballyPositioned { moreBounds = it.boundsInRoot() },
+            tile.onGloballyPositioned { moreBounds = it.boundsInRoot() },
+            contentDescription = moreLabel,
         )
-    }
-    if (sideBySide) {
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-            primary(Modifier.weight(1f))
-            folder(Modifier.weight(1f))
-            icons()
-        }
-    } else {
-        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            primary(Modifier.fillMaxWidth())
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                folder(Modifier.weight(1f))
-                icons()
-            }
-        }
     }
 }

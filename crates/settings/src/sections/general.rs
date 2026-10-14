@@ -86,6 +86,10 @@ fn tray_desc(shell: &ShellStatusDto, key: &'static str) -> &'static str {
 }
 
 fn system_section(ctx: &SectionContext, cx: &mut App) -> SettingsSection {
+    let watching = ctx
+        .store
+        .read(cx)
+        .pref_bool("general.clipboard_watch", false);
     SettingsSection::new()
         .title(ctx.t("settingsGroupSystem"))
         .row(ctx.item(
@@ -93,6 +97,22 @@ fn system_section(ctx: &SectionContext, cx: &mut App) -> SettingsSection {
             Some("clipboardWatchDesc"),
             ctx.pref_switch("general.clipboard_watch", false),
         ))
+        .row(
+            ctx.item(
+                "clipboardWatchProbe",
+                Some("clipboardWatchProbeDesc"),
+                ctx.pref_switch("general.clipboard_watch_probe", true),
+            )
+            .disabled(!watching),
+        )
+        .row(
+            ctx.item(
+                "clipboardWatchExtensions",
+                Some("clipboardWatchExtensionsDesc"),
+                ctx.pref_input("general.clipboard_watch_extensions", ""),
+            )
+            .disabled(!watching),
+        )
         .row(
             ctx.item(
                 "torrentFileAssociation",
@@ -221,7 +241,7 @@ fn integration_supported(ctx: &SectionContext, kind: IntegrationKind, cx: &App) 
     })
 }
 
-/// 用户手动关闭关联时持久化的 opt-out 键（与 Flutter 设置、agent 捕获拦截同一键）。
+/// 用户手动关闭关联时持久化的 opt-out 键（与 agent 捕获拦截同一键）。
 ///
 /// macOS Launch Services 没有「无默认处理程序」：FluxDown 是唯一候选时，关闭后系统仍
 /// 回落到 FluxDown，探测值恒为 true。opt-out 让用户的「关闭」压过探测值，否则开关会被

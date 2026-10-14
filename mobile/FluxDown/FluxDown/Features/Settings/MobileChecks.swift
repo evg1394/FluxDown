@@ -285,7 +285,7 @@ nonisolated enum MobileChecks {
 // MARK: - 探测
 
 nonisolated enum MobileProbes {
-    private static let log = Logger(subsystem: "com.fluxdown.FluxDown", category: "diagnostics")
+    private static let log = Logger(subsystem: "com.fluxdown.app", category: "diagnostics")
 
     /// 真实写入探测：在目录里建一个临时文件再删除。
     @concurrent
@@ -324,7 +324,7 @@ nonisolated enum MobileProbes {
         let stream = AsyncStream<MobileNetworkSnapshot> { continuation in
             monitor.pathUpdateHandler = { path in continuation.yield(Self.snapshot(of: path)) }
             continuation.onTermination = { _ in monitor.cancel() }
-            monitor.start(queue: DispatchQueue(label: "com.fluxdown.FluxDown.diagnostics.path"))
+            monitor.start(queue: DispatchQueue(label: "com.fluxdown.app.diagnostics.path"))
         }
         return await withTaskGroup(of: MobileNetworkSnapshot?.self) { group in
             group.addTask {

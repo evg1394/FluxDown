@@ -31,6 +31,8 @@ public enum HostSection {
     public static let agentShell = "agent.shell"
     /// `PowerStatusDto`。
     public static let agentPower = "agent.power"
+    /// `CloudNotifyStateDto`：云端推送概览（渠道 / 用量 / 本机上报偏好）；移动端暂不展示。
+    public static let agentCloudNotify = "agent.cloudNotify"
     /// `[String: UInt64]`：sourceId → RSS 条目流修订号（变化即应重新 `daemon.rss.getItems`）。
     public static let daemonRssItemRevisions = "daemon.rssItemRevisions"
     /// `[PluginDto]`。
@@ -44,7 +46,7 @@ public enum HostSection {
     public static let all: [String] = [
         agentSession, agentSync, agentCloudConnection, agentPreferences, agentGateway,
         agentRemoteTasks, agentPendingCaptures, agentLinkPairingRequests, agentLinkDiscovered,
-        agentShell, agentPower, daemonRssItemRevisions, daemonPlugins, daemonComponents,
+        agentShell, agentPower, agentCloudNotify, daemonRssItemRevisions, daemonPlugins, daemonComponents,
         daemonWebhookDeliveries,
     ]
 }

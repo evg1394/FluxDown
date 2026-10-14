@@ -42,7 +42,9 @@ enum SettingsIndex {
         list.append(category(.network, "settingsCatProxy", "settingsCatProxyDesc", "globe", ["searchKeywordsProxy"]))
         list += NetworkPage.searchEntries(ctx)
         list.append(category(.extensions, "settingsCatExtensions", "settingsCatExtensionsDesc", "puzzlepiece.extension.fill"))
-        list.append(category(.webhook, "webhookNavTitle", nil, "bolt.horizontal.fill", ["searchKeywordsWebhook"]))
+        if FeatureFlags.webhooks {
+            list.append(category(.webhook, "webhookNavTitle", nil, "bolt.horizontal.fill", ["searchKeywordsWebhook"]))
+        }
         if !isLocalHost, state.has(HostCapability.agentGateway) {
             list.append(category(.api, "settingsCatApiService", "settingsCatApiServiceDesc", "curlybraces", ["searchKeywordsApiService"]))
         }

@@ -4,6 +4,22 @@
 import { call } from '../client';
 import { METHOD } from '../protocol';
 import type {
+  CloudNotifyChannelCreateParams,
+  CloudNotifyChannelDto,
+  CloudNotifyChannelIdParams,
+  CloudNotifyChannelUpdateParams,
+  CloudNotifyDeliveriesPage,
+  CloudNotifyEmailCodeParams,
+  CloudNotifyEmailCodeResult,
+  CloudNotifyEmailVerifyParams,
+  CloudNotifyDeliveriesParams,
+  CloudNotifyPrivacyParams,
+  CloudNotifyReportingParams,
+  CloudNotifyStateDto,
+  CloudNotifyTelegramBindDto,
+  CloudNotifyTelegramBindStatusDto,
+  CloudNotifyTelegramBindStatusParams,
+  CloudNotifyTestResult,
   AgentLoginResult,
   AgentSessionDto,
   CaptureCreateGroupParams,
@@ -263,6 +279,34 @@ const power = {
   disarm: () => call<OkResult>(METHOD.AGENT_POWER_DISARM),
 };
 
+const cloudNotify = {
+  /** 读本机缓存；过期时 agent 后台刷新并经 `cloudNotifyChanged` 推送。 */
+  get: () => call<CloudNotifyStateDto>(METHOD.AGENT_CLOUD_NOTIFY_GET),
+  refresh: () => call<CloudNotifyStateDto>(METHOD.AGENT_CLOUD_NOTIFY_REFRESH),
+  setReporting: (params: CloudNotifyReportingParams) =>
+    call<CloudNotifyStateDto>(METHOD.AGENT_CLOUD_NOTIFY_SET_REPORTING, params),
+  setPrivacy: (params: CloudNotifyPrivacyParams) =>
+    call<CloudNotifyStateDto>(METHOD.AGENT_CLOUD_NOTIFY_SET_PRIVACY, params),
+  createChannel: (params: CloudNotifyChannelCreateParams) =>
+    call<CloudNotifyChannelDto>(METHOD.AGENT_CLOUD_NOTIFY_CREATE_CHANNEL, params),
+  updateChannel: (params: CloudNotifyChannelUpdateParams) =>
+    call<CloudNotifyChannelDto>(METHOD.AGENT_CLOUD_NOTIFY_UPDATE_CHANNEL, params),
+  deleteChannel: (params: CloudNotifyChannelIdParams) =>
+    call<OkResult>(METHOD.AGENT_CLOUD_NOTIFY_DELETE_CHANNEL, params),
+  /** 同步发送一条测试消息（不计额度）。 */
+  testChannel: (params: CloudNotifyChannelIdParams) =>
+    call<CloudNotifyTestResult>(METHOD.AGENT_CLOUD_NOTIFY_TEST_CHANNEL, params),
+  telegramBindStart: () => call<CloudNotifyTelegramBindDto>(METHOD.AGENT_CLOUD_NOTIFY_TELEGRAM_BIND_START),
+  telegramBindStatus: (params: CloudNotifyTelegramBindStatusParams) =>
+    call<CloudNotifyTelegramBindStatusDto>(METHOD.AGENT_CLOUD_NOTIFY_TELEGRAM_BIND_STATUS, params),
+  deliveries: (params?: CloudNotifyDeliveriesParams) =>
+    call<CloudNotifyDeliveriesPage>(METHOD.AGENT_CLOUD_NOTIFY_DELIVERIES, params),
+  sendEmailCode: (params: CloudNotifyEmailCodeParams) =>
+    call<CloudNotifyEmailCodeResult>(METHOD.AGENT_CLOUD_NOTIFY_SEND_EMAIL_CODE, params),
+  verifyEmail: (params: CloudNotifyEmailVerifyParams) =>
+    call<OkResult>(METHOD.AGENT_CLOUD_NOTIFY_VERIFY_EMAIL, params),
+};
+
 // 桌面集成：在 agent 所在主机上打开 / 定位任务产物。仅当本连接的 hello 带
 // `agent.openTaskFiles` 能力时可用（见 downloads/model/actions.ts）；否则 agent 返回 Unsupported。
 const platform = {
@@ -288,5 +332,6 @@ export const agent = {
   diagnostics,
   update,
   power,
+  cloudNotify,
   platform,
 };

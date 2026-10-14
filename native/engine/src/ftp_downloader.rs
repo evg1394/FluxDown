@@ -492,9 +492,12 @@ fn open_data_with_epsv_fallback<R>(
 const PROBE_MAX_RETRIES: u32 = 2;
 const PROBE_RETRY_BASE_DELAY: Duration = Duration::from_secs(1);
 
+/// 探测 FTP 文件信息（SIZE；`query_mtime` 为真时另发 `MDTM` 取服务器修改时间，
+/// 结果以 IMF-fixdate 写入 `FileInfo::last_modified`，供「使用服务器文件时间」）。
 pub async fn resolve_ftp_file_info(
     url: &str,
     proxy: &ProxyConfig,
+    query_mtime: bool,
 ) -> Result<FileInfo, DownloadError> {
     let ftp_url = parse_ftp_url(url)?;
 
@@ -502,9 +505,10 @@ pub async fn resolve_ftp_file_info(
     for attempt in 0..PROBE_MAX_RETRIES {
         let fu = ftp_url.clone();
         let px = proxy.clone();
-        let result = tokio::task::spawn_blocking(move || resolve_ftp_info_sync(&fu, &px))
-            .await
-            .map_err(|e| DownloadError::Other(format!("spawn_blocking join error: {}", e)))?;
+        let result =
+            tokio::task::spawn_blocking(move || resolve_ftp_info_sync(&fu, &px, query_mtime))
+                .await
+                .map_err(|e| DownloadError::Other(format!("spawn_blocking join error: {}", e)))?;
 
         match result {
             Ok(info) => return Ok(info),
@@ -526,7 +530,11 @@ pub async fn resolve_ftp_file_info(
     Err(last_err.unwrap_or_else(|| DownloadError::Other("FTP probe failed".to_string())))
 }
 
-fn resolve_ftp_info_sync(ftp_url: &FtpUrl, proxy: &ProxyConfig) -> Result<FileInfo, DownloadError> {
+fn resolve_ftp_info_sync(
+    ftp_url: &FtpUrl,
+    proxy: &ProxyConfig,
+    query_mtime: bool,
+) -> Result<FileInfo, DownloadError> {
     let proxy_opt = if proxy.is_active() { Some(proxy) } else { None };
     let mut ftp = ftp_connect_sync_with_proxy(ftp_url, proxy_opt)?;
 
@@ -536,6 +544,23 @@ fn resolve_ftp_info_sync(ftp_url: &FtpUrl, proxy: &ProxyConfig) -> Result<FileIn
             log_info!("[ftp-resolve] SIZE failed: {}, assuming unknown", e);
             0
         }
+    };
+
+    // MDTM（RFC 3659）返回 UTC 时间。服务器不支持 / 拒绝时只记日志、留空，
+    // 由完成期按「无服务器时间」处理，绝不影响下载本身。
+    let last_modified = if query_mtime {
+        match ftp.mdtm(&ftp_url.path) {
+            Ok(time) => crate::downloader::format_http_date(time),
+            Err(e) => {
+                log_info!(
+                    "[ftp-resolve] MDTM failed: {}, server file time unavailable",
+                    e
+                );
+                String::new()
+            }
+        }
+    } else {
+        String::new()
     };
 
     let file_name = ftp_url
@@ -554,11 +579,12 @@ fn resolve_ftp_info_sync(ftp_url: &FtpUrl, proxy: &ProxyConfig) -> Result<FileIn
     }
 
     log_info!(
-        "[ftp-resolve] path={}, name={}, size={}, range={}",
+        "[ftp-resolve] path={}, name={}, size={}, range={}, mtime={}",
         ftp_url.path,
         file_name,
         total_bytes,
-        supports_range
+        supports_range,
+        last_modified
     );
 
     Ok(FileInfo {
@@ -568,7 +594,7 @@ fn resolve_ftp_info_sync(ftp_url: &FtpUrl, proxy: &ProxyConfig) -> Result<FileIn
         supports_range,
         content_type: String::new(),
         etag: String::new(),
-        last_modified: String::new(),
+        last_modified,
         // FTP has no Content-Encoding concept.
         content_encoding_compressed: false,
     })
@@ -1020,7 +1046,7 @@ async fn run_ftp_download_inner(p: &DownloadParams) -> Result<i64, DownloadError
     // 探测期间的暂停/删除要立即生效，不能等阻塞线程里的握手超时。
     let info = tokio::select! {
         _ = p.cancel_token.cancelled() => return Err(DownloadError::Cancelled),
-        r = resolve_ftp_file_info(&p.url, &p.proxy_config) => r?,
+        r = resolve_ftp_file_info(&p.url, &p.proxy_config, p.use_server_time) => r?,
     };
     log_info!(
         "[ftp-download] task {} resolved: name={}, size={}, range={}",
@@ -1321,6 +1347,10 @@ async fn run_ftp_download_inner(p: &DownloadParams) -> Result<i64, DownloadError
                 e
             ))
         })?;
+
+    if p.use_server_time {
+        crate::downloader::apply_server_mtime(&dest_path, &info.last_modified, &p.task_id).await;
+    }
 
     Ok(actual_total)
 }
@@ -2304,6 +2334,8 @@ async fn ftp_do_segment(
 mod tests {
     use super::{hex_nibble, parse_ftp_url, url_decode};
     use std::io::Read;
+    use std::path::{Path, PathBuf};
+    use std::time::Duration;
 
     use std::sync::Arc;
     use std::sync::atomic::Ordering;
@@ -2587,6 +2619,21 @@ mod tests {
         Arc<std::sync::atomic::AtomicUsize>,
         Arc<std::sync::Mutex<Vec<String>>>,
     )> {
+        spawn_fake_ftp_with_mdtm(refuse_pasv, reject_retr, payload, None)
+    }
+
+    /// 同 [`spawn_fake_ftp`]；`mdtm = Some("YYYYMMDDhhmmss")` 时 MDTM 回 213，否则 502。
+    #[allow(clippy::type_complexity)]
+    fn spawn_fake_ftp_with_mdtm(
+        refuse_pasv: bool,
+        reject_retr: bool,
+        payload: &'static [u8],
+        mdtm: Option<&'static str>,
+    ) -> std::io::Result<(
+        u16,
+        Arc<std::sync::atomic::AtomicUsize>,
+        Arc<std::sync::Mutex<Vec<String>>>,
+    )> {
         use std::io::{BufRead, BufReader, Write};
         use std::net::TcpListener;
         let listener = TcpListener::bind(("127.0.0.1", 0))?;
@@ -2632,6 +2679,10 @@ mod tests {
                             "TYPE" => "200 binary\r\n".to_string(),
                             "SIZE" => format!("213 {}\r\n", payload.len()),
                             "REST" => "350 restarting\r\n".to_string(),
+                            "MDTM" => match mdtm {
+                                Some(time) => format!("213 {time}\r\n"),
+                                None => "502 MDTM not implemented\r\n".to_string(),
+                            },
                             "PASV" if refuse_pasv => "502 PASV not implemented\r\n".to_string(),
                             "PASV" | "EPSV" => {
                                 let Ok(data) = TcpListener::bind(("127.0.0.1", 0)) else {
@@ -2772,6 +2823,112 @@ mod tests {
         {
             tracing::warn!(%error, "test directory cleanup failed");
         }
+        Ok(())
+    }
+
+    /// 经完整引擎跑一个 FTP 任务，返回 `(临时目录, 下载文件, 服务器收到的命令)`。
+    async fn run_ftp_task_with_server_time(
+        use_server_time: bool,
+        mdtm: Option<&'static str>,
+        payload: &'static [u8],
+    ) -> Result<(PathBuf, PathBuf, Vec<String>), Box<dyn std::error::Error>> {
+        let dir =
+            std::env::temp_dir().join(format!("fluxdown_ftp_server_time_{}", uuid::Uuid::new_v4()));
+        tokio::fs::create_dir_all(&dir).await?;
+        let db_url = format!("sqlite://{}?mode=rwc", dir.join("server_time.db").display());
+        let (port, _, commands) = spawn_fake_ftp_with_mdtm(false, false, payload, mdtm)?;
+        let mut engine = crate::Engine::new(
+            crate::EngineConfig {
+                max_concurrent: 1,
+                speed_limit_bps: 0,
+                upload_limit_bps: 0,
+                default_save_dir: dir.to_string_lossy().into_owned(),
+                app_data_dir: dir.to_string_lossy().into_owned(),
+                bt_config: crate::bt_downloader::BtConfig::default(),
+                proxy_config: crate::proxy_config::ProxyConfig::default(),
+                user_agent: String::new(),
+                data_dir_override: Some(dir.clone()),
+                database_url: Some(db_url),
+            },
+            Arc::new(crate::NoopSink),
+            Arc::new(crate::NoopSelection),
+        )
+        .await?;
+        engine.manager.set_use_server_time(use_server_time);
+        let mut done_rx = engine.manager.take_done_rx().expect("done receiver");
+        let id = engine
+            .manager
+            .create_task(crate::download_manager::NewTaskSpec {
+                url: format!("ftp://u:p@127.0.0.1:{port}/file.bin"),
+                save_dir: dir.to_string_lossy().into_owned(),
+                file_name: "file.bin".to_owned(),
+                segments: 1,
+                ..Default::default()
+            })
+            .await
+            .expect("create FTP task");
+        let done = tokio::time::timeout(std::time::Duration::from_secs(10), done_rx.recv())
+            .await?
+            .expect("worker reports completion");
+        engine.manager.on_task_done(&done).await;
+        let task = engine.db.load_task_by_id(&id).await?.expect("task remains");
+        assert_eq!(
+            task.status, 3,
+            "download must succeed: {}",
+            task.error_message
+        );
+        engine.manager.shutdown().await;
+        drop(engine);
+        let seen = commands.lock().map(|c| c.clone()).unwrap_or_default();
+        let file = dir.join("file.bin");
+        assert_eq!(tokio::fs::read(&file).await?, payload);
+        Ok((dir, file, seen))
+    }
+
+    async fn remove_test_dir(dir: &Path) {
+        if let Err(error) = tokio::fs::remove_dir_all(dir).await
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            tracing::warn!(%error, "test directory cleanup failed");
+        }
+    }
+
+    #[tokio::test]
+    async fn server_time_applies_mdtm_to_completed_file() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let (dir, file, seen) =
+            run_ftp_task_with_server_time(true, Some("20260318122819"), b"mdtm-payload").await?;
+        let mtime = std::fs::metadata(&file)?.modified()?;
+        assert_eq!(
+            mtime,
+            std::time::UNIX_EPOCH + Duration::from_secs(1_773_836_899),
+            "file mtime must equal the server MDTM time (UTC)"
+        );
+        assert!(seen.iter().any(|c| c == "MDTM /file.bin"), "{seen:?}");
+        remove_test_dir(&dir).await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn server_time_without_mdtm_support_keeps_local_time()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let before = std::time::SystemTime::now() - Duration::from_secs(5);
+        let (dir, file, seen) = run_ftp_task_with_server_time(true, None, b"no-mdtm").await?;
+        assert!(std::fs::metadata(&file)?.modified()? >= before);
+        assert!(seen.iter().any(|c| c.starts_with("MDTM")), "{seen:?}");
+        remove_test_dir(&dir).await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn server_time_disabled_skips_mdtm_and_keeps_local_time()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let before = std::time::SystemTime::now() - Duration::from_secs(5);
+        let (dir, file, seen) =
+            run_ftp_task_with_server_time(false, Some("20260318122819"), b"disabled").await?;
+        assert!(std::fs::metadata(&file)?.modified()? >= before);
+        assert!(!seen.iter().any(|c| c.starts_with("MDTM")), "{seen:?}");
+        remove_test_dir(&dir).await;
         Ok(())
     }
 

@@ -21,6 +21,10 @@ use crate::port::{PortFuture, SettingsPort};
 
 mod mutation;
 
+mod cloud_notify;
+
+pub(crate) use cloud_notify::CloudDeliveryLog;
+
 /// 本地编辑到写回 RPC 的合并窗口。
 const FLUSH_DEBOUNCE: Duration = Duration::from_millis(250);
 /// daemon 修订冲突时的自动重试上限。
@@ -99,8 +103,15 @@ pub struct SettingsStore {
     components: Vec<ComponentStatusDto>,
     webhook_deliveries: Vec<WebhookDeliveryDto>,
     session: Option<fluxdown_protocol::AgentSessionDto>,
-    /// 云账号下除本机外的设备数 / 已配对局域网设备数：侧栏设备区「未设置时自动显示」的依据。
-    other_cloud_devices: usize,
+    /// 云账号下的全部设备（含本机）：侧栏设备区「未设置时自动显示」的依据。
+    cloud_devices: Vec<fluxdown_protocol::CloudDevice>,
+    /// 云端推送的本机状态投影（`AgentSnapshot.cloud_notify`）。
+    cloud_notify: fluxdown_protocol::CloudNotifyStateDto,
+    /// 云端投递记录的「加载更多」状态（第一页来自 `cloud_notify.recent_deliveries`）。
+    cloud_log: CloudDeliveryLog,
+    /// 最近一次云端推送上报开关 / 隐私设置失败的原因。
+    cloud_action_error: Option<RpcErrorData>,
+    /// 已配对局域网设备数：侧栏设备区「未设置时自动显示」的依据。
     linked_devices: usize,
     daemon_connected: bool,
     stale: bool,
@@ -158,7 +169,10 @@ impl SettingsStore {
             components: Vec::new(),
             webhook_deliveries: Vec::new(),
             session: None,
-            other_cloud_devices: 0,
+            cloud_devices: Vec::new(),
+            cloud_notify: fluxdown_protocol::CloudNotifyStateDto::default(),
+            cloud_log: CloudDeliveryLog::default(),
+            cloud_action_error: None,
             linked_devices: 0,
             daemon_connected: false,
             stale: true,
@@ -204,7 +218,8 @@ impl SettingsStore {
         self.webhook_deliveries
             .clone_from(&snapshot.daemon.webhook_deliveries);
         self.session.clone_from(&snapshot.session);
-        self.other_cloud_devices = other_device_count(&snapshot.cloud_devices);
+        self.cloud_devices.clone_from(&snapshot.cloud_devices);
+        self.cloud_notify.clone_from(&snapshot.cloud_notify);
         self.linked_devices = snapshot.linked_devices.len();
         self.daemon_connected = snapshot.daemon_connected;
         self.overlay_local_edits();
@@ -268,13 +283,12 @@ impl SettingsStore {
             AgentEvent::SessionChanged(session) => {
                 self.session.clone_from(session.as_ref());
                 if session.is_none() {
-                    // 账号维度的设备随会话结束失效。
-                    self.other_cloud_devices = 0;
+                    // 账号维度的设备与云端推送概览 / 投递记录随会话结束失效。
+                    self.clear_cloud_account();
                 }
             }
-            AgentEvent::CloudDevicesChanged(devices) => {
-                self.other_cloud_devices = other_device_count(devices);
-            }
+            AgentEvent::CloudDevicesChanged(devices) => self.cloud_devices.clone_from(devices),
+            AgentEvent::CloudNotifyChanged(state) => self.cloud_notify.clone_from(state),
             AgentEvent::LinkedDevicesChanged(devices) => self.linked_devices = devices.len(),
             AgentEvent::DaemonSnapshotReplaced(snapshot) => {
                 self.daemon.clone_from(&snapshot.config);
@@ -459,7 +473,7 @@ impl SettingsStore {
     /// 是否存在「其他设备」（云账号的其他设备或已配对的局域网设备）。
     #[must_use]
     pub fn has_other_devices(&self) -> bool {
-        self.other_cloud_devices > 0 || self.linked_devices > 0
+        self.cloud_devices.iter().any(|device| !device.is_current) || self.linked_devices > 0
     }
     #[must_use]
     pub fn session(&self) -> Option<&fluxdown_protocol::AgentSessionDto> {
@@ -816,7 +830,23 @@ impl SettingsStore {
         self.last_error = None;
         self.last_notice = None;
         cx.notify();
-        let future = self.port.call(method, params);
+        let directory = match method {
+            method::AGENT_PLATFORM_OPEN_PATH
+                if params.get("reveal") == Some(&Value::Bool(false)) =>
+            {
+                params.get("path").and_then(Value::as_str)
+            }
+            method::AGENT_DIAGNOSTICS_REPAIR
+                if params.get("action").and_then(Value::as_str) == Some("open_log_dir") =>
+            {
+                params.get("target").and_then(Value::as_str)
+            }
+            _ => None,
+        };
+        let future = directory
+            .filter(|path| !path.trim().is_empty())
+            .and_then(|path| self.port.foreground_open_directory(path))
+            .unwrap_or_else(|| self.port.call(method, params));
         cx.spawn(async move |this, cx| {
             let result = future.await;
 
@@ -1240,10 +1270,6 @@ impl SettingsStore {
 /// 窗口边界、侧栏设备区显隐等设备本地键一律 `sync:false`。
 fn preference_is_synced(key: &str) -> bool {
     setting_spec(key).is_some_and(|spec| spec.owner != SettingOwner::Excluded)
-}
-
-fn other_device_count(devices: &[fluxdown_protocol::CloudDevice]) -> usize {
-    devices.iter().filter(|device| !device.is_current).count()
 }
 
 /// daemon wire 字符串 → 云同步目录键的 JSON 值。

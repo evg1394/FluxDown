@@ -7,7 +7,7 @@
 //!
 //! 刷新触发：
 //! - 启动时缓存超过 [`REFRESH_INTERVAL_SECS`]。
-//! - 手动，经 `UpdateEd2kServerSubscription` Dart 信号。
+//! - 手动，经 `daemon.ed2k.serverSubscription.refresh` daemon RPC。
 //! - 设置里订阅 URL 列表变化时。
 //!
 //! `server.met` 格式（amule wiki，全小端）：
@@ -22,10 +22,10 @@ use crate::logger::{log_error, log_info};
 
 /// 默认社区订阅源（`server.met`）。
 ///
-/// - `upd.emule-security.org` —— eMule Security Team 官方列表，社区最常用；仅 http。
+/// - `upd.emule-security.org` —— eMule Security Team 官方列表，社区最常用。
 /// - `shortypower.org` —— 长期维护的备用列表，https。
 const DEFAULT_SERVER_MET_URLS: &[&str] = &[
-    "http://upd.emule-security.org/server.met",
+    "https://upd.emule-security.org/server.met",
     "https://www.shortypower.org/server.met",
 ];
 

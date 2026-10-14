@@ -13,6 +13,7 @@ import { useT } from '../../../i18n'
 import { LATER_QUEUE_ID, MAIN_QUEUE_ID, METHOD, call, rpc, rpcStore, useAgent, useConfigValues, useConnection, useDaemon } from '../../../lib/rpc'
 import { cloudPresenceKnown } from '../../../lib/cloud-presence'
 import { describeUploadError } from '../../../lib/rpcErrorText'
+import { ThreadsRiskCallout } from '../../../lib/ThreadsRiskCallout'
 import type { AgentSnapshot, CloudDevice, LinkDeviceInfo, PendingCaptureDto, QueueDto, ResolvePreviewResponse } from '../../../lib/rpc'
 import { Button, Dialog, DialogFooter, FieldError, FieldHint, FieldLabel, Form, FormField, FormRow, Icon, Input, InputWithAction, OptionGroup, OptionRow, Select, Spinner, Switch, Textarea, toast } from '../../../ui'
 import type { MenuEntry } from '../../../ui'
@@ -46,7 +47,7 @@ interface FormContext {
   segments: number
 }
 
-/** 与 Dart 一致：开启「记住上次目录」且有记录时沿用；队列优先入参、其次配置 `default_queue_id`、最后主队列。 */
+/** 开启「记住上次目录」且有记录时沿用；队列优先入参、其次配置 `default_queue_id`、最后主队列。 */
 function buildContext(snapshot: AgentSnapshot | null, wantedQueue: string | undefined): FormContext {
   const config = snapshot?.daemon.config.values ?? {}
   const prefs = (snapshot?.preferences.values ?? {}) as Record<string, unknown>
@@ -178,7 +179,7 @@ export function NewDownloadDialog({ session }: { session: NewDownloadSession }) 
     }
   }, [session.injections, saveDir, context.queueId])
 
-  // ── 站点凭据自动回填（规则同 Dart `_maybeAutofillSiteAuth`）──
+  // ── 站点凭据自动回填 ──
   const authDirty = useRef(false)
   const authFilled = useRef(false)
   const usesBrowserAuth =
@@ -640,32 +641,35 @@ export function NewDownloadDialog({ session }: { session: NewDownloadSession }) 
 
           {/* 文件名 | 线程数：批量隐藏文件名，全磁力隐藏线程数 */}
           {!batch || !allMagnet ? (
-            <FormRow>
-              {!batch ? (
-                <FormField label={t('renameOptional')} htmlFor="new-download-rename">
-                  <Input id="new-download-rename" value={rename} placeholder={t('autoDetectFilename')} spellCheck={false} onChange={(event) => setRename(event.target.value)} />
-                </FormField>
-              ) : null}
-              {!allMagnet ? (
-                <FormField label={t('threads')}>
-                  <div className="flex items-center gap-2">
-                    <div className="min-w-0 flex-1">
-                      <Select value={threads} options={threadOptions} aria-label={t('threads')} onValueChange={changeThreads} />
+            <div className="flex flex-col">
+              <FormRow>
+                {!batch ? (
+                  <FormField label={t('renameOptional')} htmlFor="new-download-rename">
+                    <Input id="new-download-rename" value={rename} placeholder={t('autoDetectFilename')} spellCheck={false} onChange={(event) => setRename(event.target.value)} />
+                  </FormField>
+                ) : null}
+                {!allMagnet ? (
+                  <FormField label={t('threads')}>
+                    <div className="flex items-center gap-2">
+                      <div className={threads === 'custom' ? 'w-26 shrink-0' : 'min-w-0 flex-1'}>
+                        <Select value={threads} options={threadOptions} aria-label={t('threads')} onValueChange={changeThreads} />
+                      </div>
+                      {threads === 'custom' ? (
+                        <Input
+                          className="min-w-0 flex-1"
+                          inputMode="numeric"
+                          value={customThreads}
+                          placeholder={t('customRangeHint', { min: 1, max: MAX_THREADS })}
+                          aria-label={t('customThreads')}
+                          onChange={(event) => setCustomThreads(event.target.value.replace(/[^0-9]/g, ''))}
+                        />
+                      ) : null}
                     </div>
-                    {threads === 'custom' ? (
-                      <Input
-                        className="w-24 shrink-0"
-                        inputMode="numeric"
-                        value={customThreads}
-                        placeholder={t('customThreadsHint')}
-                        aria-label={t('customThreads')}
-                        onChange={(event) => setCustomThreads(event.target.value.replace(/[^0-9]/g, ''))}
-                      />
-                    ) : null}
-                  </div>
-                </FormField>
-              ) : null}
-            </FormRow>
+                  </FormField>
+                ) : null}
+              </FormRow>
+              {!allMagnet ? <ThreadsRiskCallout segments={segments} /> : null}
+            </div>
           ) : null}
 
           {/* 高级 */}

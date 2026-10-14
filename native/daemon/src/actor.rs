@@ -28,6 +28,8 @@ pub enum ActorOperation {
         request: Box<CreateTaskRequest>,
         torrent_file_bytes: Vec<u8>,
         hint_file_size: i64,
+        /// 参照文件名（浏览器捕获的原始名），见 `DaemonCreateTaskParams::name_hint`。
+        name_hint: String,
         unattended: bool,
     },
     PauseTask {
@@ -200,6 +202,10 @@ pub enum ActorOperation {
         user_agent: String,
         proxy_url: String,
     },
+    /// 剪贴板识别用的只读 HEAD 探测（off-actor）。
+    LinkProbe {
+        url: String,
+    },
     WebhookDeliveries,
     WebhookClear,
     WebhookSimulate,
@@ -226,6 +232,7 @@ pub enum ActorResult {
     #[cfg(feature = "plugins")]
     ResolvePreview(ResolvePreviewOutcome),
     RssValidation(Box<RssValidateOutcome>),
+    LinkProbe(fluxdown_protocol::LinkProbeResult),
     RssSources(Vec<RssSourceInfo>),
     WebhookDeliveries(Vec<fluxdown_engine::webhook::WebhookDelivery>),
     WebhookSimulation(usize),
@@ -635,6 +642,15 @@ async fn dispatch_operation(
                 }
             });
         }
+        ActorOperation::LinkProbe { url } => {
+            let future = engine.manager.link_probe_future(url);
+            tokio::spawn(async move {
+                let result = link_probe_to_dto(future.await);
+                if ack.send(Ok(ActorResult::LinkProbe(result))).is_err() {
+                    tracing::debug!("link probe caller disconnected before result");
+                }
+            });
+        }
         ActorOperation::TestProxy {
             proxy_type,
             host,
@@ -710,6 +726,7 @@ async fn execute_operation(
             request,
             mut torrent_file_bytes,
             hint_file_size,
+            name_hint,
             unattended,
         } => {
             let request = *request;
@@ -747,6 +764,7 @@ async fn execute_operation(
                     cookies: request.cookies,
                     referrer: request.referrer,
                     hint_file_size,
+                    name_hint,
                     torrent_file_bytes,
                     proxy_url: request.proxy_url,
                     user_agent: request.user_agent,
@@ -1052,6 +1070,7 @@ async fn execute_operation(
         | ActorOperation::RefreshEd2kServerSubscription
         | ActorOperation::RefreshEd2kNodes
         | ActorOperation::RssValidate { .. }
+        | ActorOperation::LinkProbe { .. }
         | ActorOperation::WebhookTest { .. }
         | ActorOperation::TestProxy { .. } => unreachable!("handled off actor"),
         ActorOperation::WebhookDeliveries => {
@@ -1315,6 +1334,25 @@ async fn commit_ed2k_refresh(
     })
 }
 
+/// 引擎探测结果 → wire DTO（引擎不依赖 protocol，转换放在 daemon 边界）。
+fn link_probe_to_dto(
+    probe: fluxdown_engine::meta_prober::LinkProbe,
+) -> fluxdown_protocol::LinkProbeResult {
+    use fluxdown_engine::meta_prober::LinkVerdict;
+    use fluxdown_protocol::LinkProbeVerdict;
+    fluxdown_protocol::LinkProbeResult {
+        verdict: match probe.verdict {
+            LinkVerdict::Resource => LinkProbeVerdict::Resource,
+            LinkVerdict::NotResource => LinkProbeVerdict::NotResource,
+            LinkVerdict::Unknown => LinkProbeVerdict::Unknown,
+        },
+        final_url: probe.final_url,
+        file_name: probe.file_name,
+        mime: probe.mime,
+        total_bytes: probe.total_bytes,
+    }
+}
+
 fn now_unix_secs() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1448,7 +1486,7 @@ async fn patch_config(
             other => ActorError::Operation(format!("{other:#}")),
         })?;
     // DB 与 revision 已提交：即便在线应用失败，也必须广播已提交快照，
-    // 否则 hub 快照与 DB revision 分叉，后续 patch 会一直冲突。
+    // 否则事件快照与 DB revision 分叉，后续 patch 会一直冲突。
     let applied = apply_live_config(engine, &merged, values.keys()).await;
     let snapshot = fluxdown_protocol::DaemonConfigSnapshot {
         revision,
@@ -1461,8 +1499,7 @@ async fn patch_config(
     Ok(snapshot)
 }
 
-/// 清空引擎学习的域名连接策略（内存 + 持久化，与 hub 收到空
-/// `domain_conn_caps` 时的处理同态），并以刷新后的公开配置广播
+/// 清空引擎学习的域名连接策略（内存 + 持久化），并以刷新后的公开配置广播
 /// `ConfigChanged`（该只读键随快照可见）。用户配置 revision 不变。
 async fn clear_conn_policy(
     engine: &mut Engine,
@@ -1577,8 +1614,7 @@ async fn upsert_site_auth(
     Ok(fluxdown_protocol::SiteAuthEntryDto { site, user })
 }
 
-/// 请求未指定队列时套用设置项 `default_queue_id`（与 Flutter 新建对话框
-/// 预选默认队列同义）；默认队列为空或已被删除时保持空串，由引擎归入
+/// 请求未指定队列时套用设置项 `default_queue_id`；默认队列为空或已被删除时保持空串，由引擎归入
 /// 内置主队列。
 async fn resolve_queue_id(
     db: &fluxdown_engine::db::Db,
@@ -1737,6 +1773,7 @@ async fn apply_live_config<'a>(
                 "bt_enabled"
                     | "bt_enable_dht"
                     | "bt_enable_upnp"
+                    | "bt_enable_utp"
                     | "bt_port_start"
                     | "bt_port_end"
                     | "bt_custom_trackers"
@@ -2113,6 +2150,7 @@ mod tests {
             ),
             torrent_file_bytes: torrent,
             hint_file_size: 0,
+            name_hint: String::new(),
             unattended: false,
         };
         let reason = |result: Result<super::ActorResult, ActorError>| match result {

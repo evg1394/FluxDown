@@ -183,6 +183,11 @@ pub struct DaemonCreateTaskParams {
     /// 浏览器扩展对一次性 URL 已拿到 Content-Length 时透传，引擎据此创建任务。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hint_file_size: Option<i64>,
+    /// 参照文件名：调用方已知的原始文件名（浏览器捕获时浏览器定下的名字）。仅当
+    /// `request.fileName` 是缺扩展名的显式名（用户改名）时，引擎借它的扩展名补全，
+    /// 主名不变；缺省 / 空串 = 无参照。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name_hint: Option<String>,
 }
 
 /// 批量任务操作参数（`daemon.task.pauseMany` / `daemon.task.resumeMany`）。
@@ -1216,6 +1221,43 @@ pub struct LinkProbeRequest {
     pub port: u16,
 }
 
+/// `daemon.link.probe` 参数：待探测的下载链接。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct LinkProbeParams {
+    pub url: String,
+}
+
+/// 链接探测判定：`"resource"` / `"notResource"` / `"unknown"`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub enum LinkProbeVerdict {
+    /// 确认是可下载资源。
+    Resource,
+    /// 确认是网页/文本/图片预览等非下载资源。
+    NotResource,
+    /// 网络错误、超时、非 2xx 或无 Content-Type，无法判定。
+    Unknown,
+}
+
+/// `daemon.link.probe` 结果。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct LinkProbeResult {
+    pub verdict: LinkProbeVerdict,
+    /// 跟随重定向后的地址；未拿到响应时等于原 url。
+    pub final_url: String,
+    /// 可推断时的文件名，否则空。
+    pub file_name: String,
+    /// 小写 MIME essence（去参数），无则空。
+    pub mime: String,
+    /// 0 = 未知。
+    pub total_bytes: i64,
+}
+
 /// 发起配对请求体（`POST /api/v1/link/pair/begin`）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
@@ -1739,7 +1781,7 @@ pub enum WsServerMsg {
     },
     /// 入站配对请求待本机用户核验（本机作为响应方收到远端 hello+配对码后，
     /// 等待管理员核对 SAS 并调用管理面 `POST /api/v1/link/pair/approve`）。
-    /// 字段名与桌面端 rinf `LinkEvent{kind:"incomingPairing"}` 信号保持一致。
+    /// 字段名保持历史 `incomingPairing` 事件兼容。
     LinkIncomingPairing {
         session_id: String,
         sas: String,

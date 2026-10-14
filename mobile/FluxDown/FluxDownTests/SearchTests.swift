@@ -243,9 +243,10 @@ struct SearchSettingsTests {
         let entries = SettingsIndex.entries(state: loadedState(capabilities: [HostCapability.agentAuth]), isLocalHost: true)
         let categories = Set(entries.filter { $0.id.hasPrefix("category.") }.map(\.route))
         let expected: Set<SettingsRoute> = [
-            .account, .general, .appearance, .notify, .download, .bt, .ed2k, .network, .extensions, .webhook, .diagnostics, .about,
+            .account, .general, .appearance, .notify, .download, .bt, .ed2k, .network, .extensions, .diagnostics, .about,
         ]
-        #expect(categories == expected) // 本机：没有 API 服务页
+        #expect(categories == expected) // 本机：没有 API 服务页；Webhook 受 `FeatureFlags.webhooks` 隐藏
+        #expect(!entries.contains { $0.route == .webhook || $0.id.contains("webhook") })
         let withRows = Set(entries.filter { !$0.id.hasPrefix("category.") }.map(\.route))
         for route in [SettingsRoute.general, .appearance, .notify, .download, .bt, .ed2k, .network, .diagnostics, .about] {
             #expect(withRows.contains(route), "\(route) contributes no rows to the index")

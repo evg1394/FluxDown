@@ -1001,7 +1001,8 @@ impl Db {
         self.add_column_if_missing("tasks", "range_verified", "INTEGER NOT NULL DEFAULT 1")
             .await?;
         // 文件名来源：1 = 引擎自行推断（探测所得但非 Content-Disposition、URL 兜底），
-        // HTTP 完成期可按实际响应证据精修；0 = 显式名 / CD 名 / 用户改名，永不改写。
+        // HTTP 完成期可按实际响应证据精修；0 = 显式名 / CD 名 / 用户改名，主名永不改写，
+        // 仅缺类型扩展名时按响应证据补扩展名。
         self.add_column_if_missing("tasks", "name_inferred", "INTEGER NOT NULL DEFAULT 0")
             .await?;
         // 实际 GET 响应观察到的命名证据（CD 解出的名字 / Content-Type），先写者胜。
@@ -2744,11 +2745,12 @@ impl Db {
             ("close_to_tray", "true"),
             ("auto_startup", "false"),
             ("auto_check_update", "true"),
-            // 匿名使用统计（每日活跃事件）；首装事件由 Dart 侧一次性上报，不受此开关控制。
+            // 匿名使用统计（每日活跃事件）；首装事件由 agent `analytics.rs` 一次性上报，不受此开关控制。
             ("analytics_enabled", "true"),
             ("bt_enabled", "true"),
             ("bt_enable_dht", "true"),
             ("bt_enable_upnp", "true"),
+            ("bt_enable_utp", "true"),
             ("bt_port_start", "6881"),
             ("bt_port_end", "6891"),
             // MSE 三态逃生开关（disabled/enabled/forced），无 UI，经 config API/CLI 可设。
@@ -2816,7 +2818,8 @@ impl Db {
             .execute(&self.pool)
             .await?;
         }
-        self.migrate_idle_file_scan_default_off().await
+        self.migrate_idle_file_scan_default_off().await?;
+        self.migrate_ed2k_server_sub_https().await
     }
 
     /// 一次性迁移：`idle_file_scan` 曾以 "1" 播种却从未被 daemon 读取/暴露，
@@ -2835,6 +2838,33 @@ impl Db {
             sqlx::query(
                 "UPDATE config SET value = '0'
                  WHERE key = 'idle_file_scan' AND value IN ('1', 'true')",
+            )
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// 一次性迁移：`ed2k_server_sub_urls` 曾以明文
+    /// `http://upd.emule-security.org/server.met` 播种，该列表无校验和，
+    /// 明文传输可被中间人替换；同一端点 https 内容一致，改为 https。
+    /// 仅在迁移标记首次写入成功时改写，此后用户自行填写的 http 地址不再被覆盖。
+    async fn migrate_ed2k_server_sub_https(&self) -> Result<(), DbError> {
+        let mut tx = self.pool.begin().await?;
+        let marked = sqlx::query(
+            "INSERT INTO config (key, value) VALUES ('migration_ed2k_server_sub_https', '1')
+             ON CONFLICT (key) DO NOTHING",
+        )
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+        if marked > 0 {
+            sqlx::query(
+                "UPDATE config
+                 SET value = REPLACE(value, 'http://upd.emule-security.org/server.met',
+                                     'https://upd.emule-security.org/server.met')
+                 WHERE key = 'ed2k_server_sub_urls'",
             )
             .execute(&mut *tx)
             .await?;
@@ -7585,6 +7615,50 @@ mod tests {
         assert_eq!(
             db.get_config("idle_file_scan").await.expect("read"),
             Some("true".to_owned())
+        );
+        close_test_db(&db, dir).await;
+    }
+
+    #[tokio::test]
+    async fn ed2k_server_sub_legacy_http_migrates_once() {
+        let (db, dir) = open_test_db().await;
+        db.init_default_config("/tmp").await.expect("init");
+        let fresh = db
+            .get_config("ed2k_server_sub_urls")
+            .await
+            .expect("read")
+            .unwrap_or_default();
+        assert!(
+            !fresh.contains("http://"),
+            "default must be https only: {fresh}"
+        );
+        // 模拟旧库：明文默认值 + 用户追加的其他地址，尚无迁移标记。
+        db.delete_config("migration_ed2k_server_sub_https")
+            .await
+            .expect("drop marker");
+        db.set_config(
+            "ed2k_server_sub_urls",
+            "http://upd.emule-security.org/server.met\nhttp://example.com/server.met",
+        )
+        .await
+        .expect("legacy");
+        db.init_default_config("/tmp").await.expect("migrate");
+        assert_eq!(
+            db.get_config("ed2k_server_sub_urls").await.expect("read"),
+            Some(
+                "https://upd.emule-security.org/server.met\nhttp://example.com/server.met"
+                    .to_owned()
+            )
+        );
+        // 迁移后用户自行改回 http，再次启动不得被改写。
+        let user = "http://upd.emule-security.org/server.met";
+        db.set_config("ed2k_server_sub_urls", user)
+            .await
+            .expect("user");
+        db.init_default_config("/tmp").await.expect("restart");
+        assert_eq!(
+            db.get_config("ed2k_server_sub_urls").await.expect("read"),
+            Some(user.to_owned())
         );
         close_test_db(&db, dir).await;
     }

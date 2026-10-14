@@ -35,6 +35,7 @@ import com.fluxdown.fluxui.material.FluxBlur
 import com.fluxdown.fluxui.material.FluxGlass
 import com.fluxdown.fluxui.material.fluxGlass
 import com.fluxdown.fluxui.material.fluxGlow
+import com.fluxdown.fluxui.material.softShadow
 import com.fluxdown.fluxui.theme.FluxColors
 import com.fluxdown.fluxui.theme.FluxText
 import com.fluxdown.fluxui.theme.FluxTheme
@@ -111,7 +112,6 @@ internal fun ToastLayer(state: FluxOverlayState) {
     val colors = FluxTheme.colors
     val type = FluxTheme.type
     val tone = toneOf(shown.kind, colors)
-    val blurs = rememberEnterBlurs(8.dp)
     val shape = FluxTheme.shapes.full
     val hasAction = shown.action != null
 
@@ -132,7 +132,6 @@ internal fun ToastLayer(state: FluxOverlayState) {
                     scaleY = s
                     translationY = -20.dp.toPx() * (1f - v)
                     transformOrigin = TransformOrigin(0.5f, 0f)
-                    renderEffect = blurs?.at(v)
                 }
                 .fluxPressable(onClick = { state.dismissToastIf(shown.id) }, scale = 0.98f, role = null)
                 .fluxGlow(colors.softShadow(0.45f), 16.dp, shape, spread = (-8).dp, dy = 12.dp)

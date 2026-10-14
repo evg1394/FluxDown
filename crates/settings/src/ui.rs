@@ -196,7 +196,7 @@ pub(crate) fn empty_state(
         .child(meta_text(cx).text_center().child(description))
 }
 
-/// 触发双列排布的最小内容宽度（与 Flutter `_AdaptiveSections` 一致）。
+/// 触发双列排布的最小内容宽度。
 pub(crate) const TWO_COLUMN_MIN_WIDTH: f32 = 920.;
 
 pub(crate) type Getter<T> = Rc<dyn Fn(&App) -> T>;
@@ -387,6 +387,8 @@ pub(crate) struct SettingsRow {
     /// `None` 表示整行自渲染（[`Self::custom`]）。
     control: Option<Control>,
     full: Option<Renderer>,
+    /// 行下方的附加区（随值动态出现的提示等）；每帧调用，可返回空元素。
+    footer: Option<Renderer>,
     /// 显式高度权重；双列切分用。
     weight: Option<f32>,
 }
@@ -403,6 +405,7 @@ impl SettingsRow {
             vertical: false,
             control: Some(control),
             full: None,
+            footer: None,
             weight: None,
         }
     }
@@ -425,6 +428,7 @@ impl SettingsRow {
             full: Some(Rc::new(move |disabled, key, window, cx| {
                 render(disabled, key, window, cx).into_any_element()
             })),
+            footer: None,
             weight: None,
         }
     }
@@ -472,6 +476,19 @@ impl SettingsRow {
         self
     }
 
+    /// 行下方附加区：在标题 / 控件之下渲染（与本行同属一格，不额外加分隔线）。
+    #[must_use]
+    pub(crate) fn footer<F, E>(mut self, render: F) -> Self
+    where
+        E: IntoElement,
+        F: Fn(bool, &SharedString, &mut Window, &mut App) -> E + 'static,
+    {
+        self.footer = Some(Rc::new(move |disabled, key, window, cx| {
+            render(disabled, key, window, cx).into_any_element()
+        }));
+        self
+    }
+
     fn matches(&self, query: &str) -> bool {
         if query.is_empty() {
             return true;
@@ -493,7 +510,7 @@ impl SettingsRow {
             .chain(self.keywords.iter())
     }
 
-    /// Flutter `_AdaptiveSections._weightOf` 的行权重。
+    /// 自适应分组排布的行权重。
     fn layout_weight(&self) -> f32 {
         self.weight.unwrap_or(if self.full.is_some() {
             3.0
@@ -600,25 +617,33 @@ impl SettingsRow {
                 this.child(meta_text(cx).child(description))
             });
 
+        let footer = self
+            .footer
+            .clone()
+            .map(|footer| footer(disabled, &key, window, cx));
         if self.vertical {
             row = row.child(
                 v_flex()
                     .w_full()
                     .gap(tokens.spacing.sm)
                     .child(label)
-                    .children(control.map(|control| div().w_full().child(control))),
+                    .children(control.map(|control| div().w_full().child(control)))
+                    .children(footer),
             );
         } else {
-            row = row.flex().items_center().min_h(row_min_height).child(
-                div()
-                    .w_full()
-                    .flex()
-                    .items_center()
-                    .gap(tokens.spacing.lg)
-                    // 标题列保底 160px；控件列可收缩，避免宽控件把描述挤成一列。
-                    .child(div().flex_1().min_w(title_min_width).child(label))
-                    .children(control.map(|control| div().min_w_0().child(control))),
-            );
+            let line = div()
+                .w_full()
+                .flex()
+                .items_center()
+                .gap(tokens.spacing.lg)
+                // 标题列保底 160px；控件列可收缩，避免宽控件把描述挤成一列。
+                .child(div().flex_1().min_w(title_min_width).child(label))
+                .children(control.map(|control| div().min_w_0().child(control)));
+            row = row
+                .flex()
+                .items_center()
+                .min_h(row_min_height)
+                .child(v_flex().w_full().child(line).children(footer));
         }
         row
     }

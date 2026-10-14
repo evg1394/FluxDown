@@ -9,6 +9,7 @@ import android.webkit.MimeTypeMap
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.graphics.toArgb
 import androidx.core.app.NotificationChannelCompat
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
@@ -33,11 +34,16 @@ import com.fluxdown.core.store.NotificationBatch
 import com.fluxdown.core.store.NotificationEvent
 import com.fluxdown.core.store.NotificationItem
 import com.fluxdown.core.store.NotificationTracker
+import com.fluxdown.fluxui.theme.FluxColors
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
@@ -47,6 +53,9 @@ import java.io.File
 /** 系统通知授权状态（Android 无「临时授权」）。 */
 enum class NotifyAuthorization { Authorized, NotDetermined, Denied }
 
+/** 所有系统通知的强调色（小图标底、进度条、动作文字）：品牌蓝，与启动图标一致。 */
+internal val NotificationTint: Int = FluxColors.Brand.flux.toArgb()
+
 /**
  * 点按通知回到应用的意图（[HomeActivity] 经 [handle] 消费）：切到通知所属主机 → 下载页 → 任务详情。
  */
@@ -54,6 +63,16 @@ object NotificationIntents {
     const val ACTION_OPEN = "com.fluxdown.app.action.OPEN_FROM_NOTIFICATION"
     const val EXTRA_TASK = "fluxdown.task"
     const val EXTRA_HOST = "fluxdown.host"
+
+    /** 打开 [hostId] 的下载页；[taskId] 非空时再推入该任务详情。[code] 区分同时存在的多条通知。 */
+    fun pending(context: Context, hostId: String, taskId: String, code: Int): PendingIntent {
+        val intent = Intent(context, HomeActivity::class.java)
+            .setAction(ACTION_OPEN)
+            .putExtra(EXTRA_HOST, hostId)
+            .putExtra(EXTRA_TASK, taskId)
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+        return PendingIntent.getActivity(context, code, intent, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
+    }
 
     /** @return true = 这是通知意图（已处理）。 */
     fun handle(container: AppContainer, nav: AppNavigator, intent: Intent?): Boolean {
@@ -87,16 +106,22 @@ object NotificationIntents {
 }
 
 /**
- * 本机通知服务：观察当前主机的任务状态，在任务完成 / 失败 / 引擎请求选择时发系统通知
- * （对应 iOS `NotificationService`）。
+ * 应用在前台时的完成提示（代替系统通知，由壳层以 toast 呈现）。
+ * [count] == 1 时 [taskId] / [fileName] 为该任务；合批多条时二者为空。
+ */
+data class InAppCompletion(val hostId: String, val taskId: String, val fileName: String, val count: Int)
+
+/**
+ * 本机通知服务：观察任务状态，在任务完成 / 失败 / 引擎请求选择时发系统通知（对应 iOS `NotificationService`）。
  *
  * 规则（逻辑在 `:core` 的 [NotificationTracker] / [NotificationBatch]，有单测）：
- * - 只观察**当前主机**——正在查看远端主机时，本机引擎的任务完成不会在这里通知；
- * - 每台主机的首个已连上快照只播种；窗口内同类事件合批，≥ 3 条合并为一条汇总；
- * - 偏好实时读取：`download.notify_on_complete`（agent 偏好，默认开）、[DeviceSettings.notifyOnFailure] /
+ * - 观察**当前主机**与**本机**：正在查看远端主机时，本机引擎的下载仍在跑（前台服务的进度通知也在显示它们），
+ *   它们的完成 / 失败 / 选择请求同样通知；两路各自一个跟踪器，互不干扰；
+ * - 每个来源的首个已连上快照只播种；窗口内同类事件合批，≥ 3 条合并为一条汇总；
+ * - 偏好实时读取：`download.notify_on_complete`（所属主机的 agent 偏好，默认开）、[DeviceSettings.notifyOnFailure] /
  *   [DeviceSettings.notifyActions]（设备本地）；系统通知被关闭 / 未授权时一律不发；
- * - 前台时完成通知不发（列表已体现，同 iOS）；失败 / 选择请求照常发；
- * - 选择请求通知只在应用不在前台时发（前台由壳层自动弹出请求 Sheet）。
+ * - 前台时完成不发系统通知，改经 [completions] 交给壳层弹应用内提示；失败照常发；
+ * - 选择请求：前台时壳层只为当前主机自动弹出请求 Sheet，因此只有「当前主机且在前台」不发通知。
  *
  * 授权**懒申请**：这里从不弹系统授权框，由通知设置页 / 首次打开通知开关时申请。
  * 观察在应用作用域内运行，由 [DownloadService]（本机下载期间，Activity 已被划掉也不中断）与
@@ -116,10 +141,19 @@ object DownloadNotifier {
     @Volatile
     var foreground: Boolean = false
 
+    private val _completions = MutableSharedFlow<InAppCompletion>(
+        extraBufferCapacity = 8,
+        onBufferOverflow = BufferOverflow.DROP_OLDEST,
+    )
+
+    /** 前台时的完成提示；无订阅者时丢弃（提示不是状态，错过即无意义）。 */
+    val completions: SharedFlow<InAppCompletion> = _completions.asSharedFlow()
+
+    /** 单线程：两路观察、合批与发送都串行在这里。 */
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default.limitedParallelism(1))
     private val tracker = NotificationTracker()
-    private val batch = ArrayList<NotificationEvent>()
-    private var batchHost: String? = null
+    private val localTracker = NotificationTracker()
+    private val batches = LinkedHashMap<String, ArrayList<NotificationEvent>>()
     private var flushJob: Job? = null
     private var attached = false
 
@@ -133,7 +167,18 @@ object DownloadNotifier {
         attached = true
         scope.launch {
             combine(container.store.state, container.host) { state, host -> state to host.id }
-                .collect { (state, hostId) -> process(container, app, state, hostId) }
+                .collect { (state, hostId) -> process(container, app, tracker, state, hostId) }
+        }
+        scope.launch {
+            // 当前就是本机时由上一路覆盖；切到远端时这一路接管本机任务
+            combine(container.localState, container.host) { state, host -> if (host is HostRef.Local) null else state }
+                .collect { state ->
+                    if (state == null) {
+                        localTracker.reset()
+                    } else {
+                        process(container, app, localTracker, state, HostRef.Local.ID)
+                    }
+                }
         }
     }
 
@@ -156,9 +201,10 @@ object DownloadNotifier {
         if (authorization != NotifyAuthorization.Authorized) return false
         val notification = NotificationCompat.Builder(app, CHANNEL_COMPLETED)
             .setSmallIcon(R.drawable.ic_stat_download)
+            .setColor(NotificationTint)
             .setContentTitle(app.str(R.string.doctorTestNotificationTitle))
             .setContentText(app.str(R.string.doctorTestNotificationBody))
-            .setContentIntent(openApp(app, hostId = "", taskId = "", code = "test".hashCode()))
+            .setContentIntent(NotificationIntents.pending(app, hostId = "", taskId = "", code = "test".hashCode()))
             .setAutoCancel(true)
             .build()
         notify(app, "fluxdown.test.${System.currentTimeMillis()}", notification)
@@ -167,7 +213,7 @@ object DownloadNotifier {
 
     // ── 观察 ────────────────────────────────────────────────────────────────
 
-    private fun process(container: AppContainer, context: Context, state: HostState, hostId: String) {
+    private fun process(container: AppContainer, context: Context, tracker: NotificationTracker, state: HostState, hostId: String) {
         val delta = tracker.ingest(
             hostId = hostId,
             isLive = state.connection == Connection.Live,
@@ -185,7 +231,8 @@ object DownloadNotifier {
             enqueue(container, context, delta.events.filter { if (it.kind == NotificationEvent.Kind.Completed) wantsComplete else wantsFailure }, hostId)
         }
 
-        if (delta.newSelections.isNotEmpty() && !foreground) {
+        val sheetInApp = foreground && hostId == container.host.value.id
+        if (delta.newSelections.isNotEmpty() && !sheetInApp) {
             for (request in state.selections) {
                 if (request.requestId in delta.newSelections) postSelection(context, request, state.task(request.taskId), hostId)
             }
@@ -196,9 +243,7 @@ object DownloadNotifier {
 
     private fun enqueue(container: AppContainer, context: Context, events: List<NotificationEvent>, hostId: String) {
         if (events.isEmpty()) return
-        if (batchHost != null && batchHost != hostId) batch.clear()
-        batchHost = hostId
-        batch += events
+        batches.getOrPut(hostId) { ArrayList() } += events
         if (flushJob != null) return
         flushJob = scope.launch {
             delay(NotificationBatch.WINDOW_MS)
@@ -208,35 +253,51 @@ object DownloadNotifier {
 
     private fun flush(container: AppContainer, context: Context) {
         flushJob = null
-        val events = batch.toList()
-        val hostId = batchHost
-        batch.clear()
-        batchHost = null
-        if (hostId == null || events.isEmpty() || container.host.value.id != hostId) return
+        val pending = batches.entries.map { it.key to it.value.toList() }
+        batches.clear()
+        val current = container.host.value.id
         val withActions = DeviceSettings.of(context).notifyActions
-        for (item in NotificationBatch.plan(events)) {
-            when (item) {
-                is NotificationItem.Single -> postSingle(container, context, item.event, hostId, withActions)
-                is NotificationItem.Summary -> postSummary(context, item, hostId)
+        for ((hostId, events) in pending) {
+            // 窗口内切走了主机：只保留仍在观察的来源（当前主机 + 本机）
+            if (hostId != current && hostId != HostRef.Local.ID) continue
+            val state = if (hostId == current) container.store.state.value else container.localState.value
+            if (foreground) announceInApp(hostId, events)
+            for (item in NotificationBatch.plan(events)) {
+                when (item) {
+                    is NotificationItem.Single -> postSingle(context, item.event, hostId, state, withActions)
+                    is NotificationItem.Summary -> postSummary(context, item, hostId)
+                }
             }
         }
     }
 
-    private fun postSingle(container: AppContainer, context: Context, event: NotificationEvent, hostId: String, withActions: Boolean) {
+    /** 前台：完成改为应用内提示（一条批次一次，多条合并为计数）。 */
+    private fun announceInApp(hostId: String, events: List<NotificationEvent>) {
+        val done = events.filter { it.kind == NotificationEvent.Kind.Completed }
+        val notice = when (done.size) {
+            0 -> return
+            1 -> InAppCompletion(hostId, done[0].taskId, done[0].fileName, 1)
+            else -> InAppCompletion(hostId, taskId = "", fileName = "", count = done.size)
+        }
+        _completions.tryEmit(notice)
+    }
+
+    private fun postSingle(context: Context, event: NotificationEvent, hostId: String, state: HostState, withActions: Boolean) {
         val code = "${event.kind}.$hostId.${event.taskId}".hashCode()
-        val contentIntent = openApp(context, hostId, event.taskId, code)
+        val contentIntent = NotificationIntents.pending(context, hostId, event.taskId, code)
         val notification = when (event.kind) {
             NotificationEvent.Kind.Completed -> {
-                // 前台时完成已体现在列表里，不重复打扰（同 iOS 前台展示策略）
+                // 前台时已由应用内提示告知（announceInApp），不重复打扰
                 if (foreground) return
                 val builder = NotificationCompat.Builder(context, CHANNEL_COMPLETED)
                     .setSmallIcon(R.drawable.ic_stat_download)
+                    .setColor(NotificationTint)
                     .setContentTitle(context.str(R.string.downloadCompleted))
                     .setContentText(event.fileName)
                     .setContentIntent(contentIntent)
                     .setAutoCancel(true)
                     .setCategory(NotificationCompat.CATEGORY_STATUS)
-                if (withActions) addFileActions(builder, container, context, event.taskId, code)
+                if (withActions) addFileActions(builder, context, hostId, state, event.taskId, code)
                 builder.build()
             }
             NotificationEvent.Kind.Failed -> {
@@ -244,6 +305,7 @@ object DownloadNotifier {
                 val body = if (reason.isEmpty()) event.fileName else "${event.fileName}\n$reason"
                 NotificationCompat.Builder(context, CHANNEL_FAILED)
                     .setSmallIcon(R.drawable.ic_stat_download)
+                    .setColor(NotificationTint)
                     .setContentTitle(context.str(R.string.subtitleError))
                     .setContentText(event.fileName)
                     .setStyle(NotificationCompat.BigTextStyle().bigText(body))
@@ -267,9 +329,10 @@ object DownloadNotifier {
         val stamp = System.currentTimeMillis()
         val builder = NotificationCompat.Builder(context, if (completed) CHANNEL_COMPLETED else CHANNEL_FAILED)
             .setSmallIcon(R.drawable.ic_stat_download)
+            .setColor(NotificationTint)
             .setContentTitle(title)
             .setContentText(body)
-            .setContentIntent(openApp(context, hostId, taskId = "", code = "summary.${item.kind}.$hostId".hashCode()))
+            .setContentIntent(NotificationIntents.pending(context, hostId, taskId = "", code = "summary.${item.kind}.$hostId".hashCode()))
             .setAutoCancel(true)
         if (!completed) builder.setPriority(NotificationCompat.PRIORITY_HIGH)
         notify(context, "${if (completed) "done" else "fail"}.$hostId.summary.$stamp", builder.build())
@@ -285,9 +348,10 @@ object DownloadNotifier {
         }
         val notification = NotificationCompat.Builder(context, CHANNEL_SELECTION)
             .setSmallIcon(R.drawable.ic_stat_download)
+            .setColor(NotificationTint)
             .setContentTitle(title)
             .setContentText(body)
-            .setContentIntent(openApp(context, hostId, taskId = "", code = selectionTag(hostId, request.requestId).hashCode()))
+            .setContentIntent(NotificationIntents.pending(context, hostId, taskId = "", code = selectionTag(hostId, request.requestId).hashCode()))
             .setAutoCancel(true)
             .setPriority(NotificationCompat.PRIORITY_HIGH)
             .setCategory(NotificationCompat.CATEGORY_REMINDER)
@@ -298,12 +362,12 @@ object DownloadNotifier {
     private fun selectionTag(hostId: String, requestId: String) = "sel.$hostId.$requestId"
 
     /**
-     * 完成通知的「打开」「分享」：任务文件在本机且是普通文件时才提供（目录 / 远端文件无法打开或分享）；
+     * 完成通知的「打开」「分享」：任务属于本机主机且是普通文件时才提供（目录 / 远端文件无法打开或分享）；
      * 文件不在 FileProvider 声明的根目录内（如外置存储卡）时同样不提供。
      */
-    private fun addFileActions(builder: NotificationCompat.Builder, container: AppContainer, context: Context, taskId: String, code: Int) {
-        if (container.host.value !is HostRef.Local) return
-        val task = container.store.state.value.task(taskId) ?: return
+    private fun addFileActions(builder: NotificationCompat.Builder, context: Context, hostId: String, state: HostState, taskId: String, code: Int) {
+        if (hostId != HostRef.Local.ID) return
+        val task = state.task(taskId) ?: return
         if (task.status != TaskStatus.Completed || task.fileName.isEmpty()) return
         val file = File(task.saveDir, task.fileName)
         if (!file.isFile) return
@@ -324,15 +388,6 @@ object DownloadNotifier {
     }
 
     // ── 底层 ────────────────────────────────────────────────────────────────
-
-    private fun openApp(context: Context, hostId: String, taskId: String, code: Int): PendingIntent {
-        val intent = Intent(context, HomeActivity::class.java)
-            .setAction(NotificationIntents.ACTION_OPEN)
-            .putExtra(NotificationIntents.EXTRA_HOST, hostId)
-            .putExtra(NotificationIntents.EXTRA_TASK, taskId)
-            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
-        return PendingIntent.getActivity(context, code, intent, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
-    }
 
     /** 系统通知被关闭 / 未授权时不发（[NotificationManagerCompat.areNotificationsEnabled] 已含 Android 13+ 运行时权限）。 */
     @SuppressLint("MissingPermission")

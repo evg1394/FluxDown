@@ -326,33 +326,34 @@ private fun showPluginActions(
     readOnly: Boolean,
     onSheet: (PluginSheet) -> Unit,
 ) {
-    val buttons = ArrayList<FluxDialogButton>()
+    // 自上而下的视觉顺序；FluxDialogSpec 的声明约定是「取消在前、主操作在后」，纵排时逆序显示
+    val actions = ArrayList<FluxDialogButton>()
     model.updateFor(plugin)?.let { update ->
         if (!readOnly) {
-            buttons += FluxDialogButton(env.text(R.string.marketUpdateButton)) { model.requestInstall(env, update, plugin) }
+            actions += FluxDialogButton(env.text(R.string.marketUpdateButton)) { model.requestInstall(env, update, plugin) }
         }
     }
     if (!plugin.loadFailed && plugin.settings.isNotEmpty()) {
-        buttons += FluxDialogButton(env.text(R.string.pluginSettingsTooltip)) { onSheet(PluginSheet.Settings(plugin.identity)) }
+        actions += FluxDialogButton(env.text(R.string.pluginSettingsTooltip)) { onSheet(PluginSheet.Settings(plugin.identity)) }
     }
     if (!plugin.loadFailed && plugin.authSupported && !readOnly) {
-        buttons += FluxDialogButton(env.text(R.string.pluginAuthButton)) { onSheet(PluginSheet.Auth(plugin.identity)) }
+        actions += FluxDialogButton(env.text(R.string.pluginAuthButton)) { onSheet(PluginSheet.Auth(plugin.identity)) }
     }
     if (plugin.devMode && !readOnly) {
-        buttons += FluxDialogButton(env.text(R.string.pluginReloadTooltip)) { model.reload(env, plugin) }
+        actions += FluxDialogButton(env.text(R.string.pluginReloadTooltip)) { model.reload(env, plugin) }
     }
     if (plugin.loadFailed && plugin.loadError.isNotEmpty()) {
-        buttons += FluxDialogButton(env.text(R.string.pluginLoadErrorCopy)) {
+        actions += FluxDialogButton(env.text(R.string.pluginLoadErrorCopy)) {
             env.context.copyPlainText(plugin.loadError)
             env.toast(env.text(R.string.pluginLoadErrorCopied), FluxToastKind.Success)
         }
     }
     if (!readOnly) {
-        buttons += FluxDialogButton(env.text(R.string.pluginUninstallTooltip), FluxDialogButtonStyle.Destructive) {
+        actions += FluxDialogButton(env.text(R.string.pluginUninstallTooltip), FluxDialogButtonStyle.Destructive) {
             confirmUninstall(overlays, env, model, plugin)
         }
     }
-    buttons += FluxDialogButton(env.text(R.string.cancel))
+    val buttons = listOf(FluxDialogButton(env.text(R.string.cancel))) + actions.asReversed()
     overlays.showDialog(FluxDialogSpec(title = plugin.name, buttons = buttons, stacked = true))
 }
 

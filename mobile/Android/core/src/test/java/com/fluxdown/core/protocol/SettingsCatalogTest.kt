@@ -12,8 +12,8 @@ class SettingsCatalogTest {
 
     @Test
     fun syncCatalogMatchesRustSpecCount() {
-        // SYNC_SETTING_SPECS（native/protocol/src/settings.rs）：29 个 daemon 键 + 29 个偏好键 + 1 个集合范围键 = 59
-        assertEquals(29, SettingsCatalog.daemonSyncNames.size)
+        // SYNC_SETTING_SPECS（native/protocol/src/settings.rs）：30 个 daemon 键 + 29 个偏好键 + 1 个集合范围键 = 60
+        assertEquals(30, SettingsCatalog.daemonSyncNames.size)
         assertEquals(29, SettingsCatalog.syncedPreferenceKeys.size)
         assertEquals(SettingsCatalog.daemonSyncNames.size, SettingsCatalog.syncNameToDaemonKey.size)
     }
@@ -22,8 +22,8 @@ class SettingsCatalogTest {
     fun normalizesLikeDaemon() {
         assertEquals("true", ok("bt_enable_dht", " 1 "))
         assertTrue(rejected("bt_enable_dht", "yes"))
-        assertEquals("64", ok("default_segments", "+64"))
-        assertTrue(rejected("default_segments", "65"))
+        assertEquals("512", ok("default_segments", "+512"))
+        assertTrue(rejected("default_segments", "513"))
         assertTrue(rejected("default_segments", "1.0"))
         assertTrue(rejected("default_segments", " "))
         assertEquals("-1", ok("max_auto_retries", "-1"))

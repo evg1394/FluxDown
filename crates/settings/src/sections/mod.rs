@@ -9,6 +9,9 @@ pub(crate) mod appearance;
 pub(crate) mod bt;
 pub(crate) mod categories;
 pub(crate) mod category_dialog;
+pub(crate) mod cloud_channel_dialog;
+pub(crate) mod cloud_dialogs;
+pub(crate) mod cloud_push;
 pub(crate) mod doctor;
 pub(crate) mod download;
 pub(crate) mod ed2k;
@@ -39,7 +42,7 @@ pub(crate) struct SectionContext<'a> {
 }
 
 impl SectionContext<'_> {
-    /// 翻译文案；键缺失时回退为键名（与 Flutter 基线一致）。
+    /// 翻译文案；键缺失时回退为键名。
     pub(crate) fn t(&self, key: &str) -> SharedString {
         SharedString::from(self.translator.text(key).to_owned())
     }

@@ -27,6 +27,39 @@ pub struct ProbedMeta {
     pub total_bytes: i64,
 }
 
+impl ProbedMeta {
+    /// 由下载器完整探测（HEAD ∥ Range GET，见 `downloader::resolve_file_info_with_ua_fallback`）
+    /// 的结果派生启动序幕的名称 / 大小，规则与 [`probe_http_meta`] 一致：
+    /// - text/html / xhtml（登录页、错误页、中转页）的响应头不描述目标文件，不产出名字
+    ///   （大小也不采信）；下载器自己的 HTML 安全网随后照常拦截。
+    /// - 名字只有 Content-Disposition（含 URL 查询里的 CD）才算权威，其余（URL 段 /
+    ///   Content-Type 推断 / `download` 兜底）标记 `name_inferred`，完成期可精修。
+    pub(crate) fn from_file_info(info: &crate::downloader::FileInfo) -> Self {
+        if is_html_content_type(&info.content_type) {
+            return Self::default();
+        }
+        Self {
+            file_name: info.file_name.clone(),
+            name_inferred: !matches!(
+                info.name_source,
+                NameSource::Disposition | NameSource::QueryDisposition
+            ),
+            total_bytes: info.total_bytes.max(0),
+        }
+    }
+}
+
+/// `Content-Type` 是否为 HTML 页面（text/html / application/xhtml+xml）。
+fn is_html_content_type(content_type: &str) -> bool {
+    let mime = content_type
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    mime == "text/html" || mime == "application/xhtml+xml"
+}
+
 /// 探测队列任务的文件名和大小。
 ///
 /// `spec` 携带任务的鉴权上下文（cookies / referrer / extra_headers），HTTP HEAD
@@ -169,7 +202,8 @@ async fn probe_ftp_meta(
 ) -> ProbedMeta {
     let result = tokio::time::timeout(
         Duration::from_secs(PROBE_TIMEOUT_SECS),
-        crate::ftp_downloader::resolve_ftp_file_info(url, proxy_config),
+        // 元信息探测只要名称 / 大小；服务器时间由下载器完成期按需取。
+        crate::ftp_downloader::resolve_ftp_file_info(url, proxy_config, false),
     )
     .await;
     match result {
@@ -270,6 +304,227 @@ fn head_content_length(headers: &reqwest::header::HeaderMap) -> i64 {
         .unwrap_or(0)
 }
 
+/// 链接探测（剪贴板识别）总超时，含重定向链：独立于元数据探测的 [`PROBE_TIMEOUT_SECS`]。
+/// 下载站常见 2～3 跳重定向（SourceForge `latest/download` 实测 2 跳约 2.5s），1.5s 会把它们全判成 Unknown。
+const LINK_PROBE_TIMEOUT: Duration = Duration::from_secs(4);
+
+/// 链接探测判定。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LinkVerdict {
+    /// 确认是可下载资源。
+    Resource,
+    /// 确认是网页 / 文本 / 图片预览等非下载资源。
+    NotResource,
+    /// 网络错误、超时、非 2xx 或无 Content-Type，无法判定。
+    Unknown,
+}
+
+/// 链接探测结果。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LinkProbe {
+    pub verdict: LinkVerdict,
+    /// 跟随重定向后的地址；未拿到响应时等于原 url。
+    pub final_url: String,
+    /// 判定为 `Resource` 时推断出的文件名，否则空。
+    pub file_name: String,
+    /// 小写 MIME essence（去参数），无则空。
+    pub mime: String,
+    /// 0 = 未知。
+    pub total_bytes: i64,
+}
+
+impl LinkProbe {
+    fn unknown(url: &str) -> Self {
+        Self {
+            verdict: LinkVerdict::Unknown,
+            final_url: url.to_string(),
+            file_name: String::new(),
+            mime: String::new(),
+            total_bytes: 0,
+        }
+    }
+}
+
+/// 只发一次 HEAD（绝不 GET / Range GET：一次性令牌链接会被消耗）判定链接是否为下载资源。
+/// 总超时 [`LINK_PROBE_TIMEOUT`]；任何网络错误按 `Unknown`。
+pub async fn probe_link_kind(
+    url: &str,
+    client: &reqwest::Client,
+    spec: &crate::downloader::RequestSpec,
+) -> LinkProbe {
+    let request = crate::downloader::build_request(client, url, reqwest::Method::HEAD, spec);
+    let Ok(Ok(response)) = tokio::time::timeout(LINK_PROBE_TIMEOUT, request.send()).await else {
+        return LinkProbe::unknown(url);
+    };
+    classify_probe_response(
+        response.status(),
+        response.headers(),
+        url,
+        response.url().as_str(),
+    )
+}
+
+/// 由 HEAD 响应（状态码、头、最终地址）判定链接类型；纯函数，便于表驱动测试。
+fn classify_probe_response(
+    status: reqwest::StatusCode,
+    headers: &reqwest::header::HeaderMap,
+    url: &str,
+    final_url: &str,
+) -> LinkProbe {
+    let mut probe = LinkProbe::unknown(final_url);
+    if !status.is_success() {
+        return probe;
+    }
+    probe.mime = headers
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.split(';').next())
+        .map(|v| v.trim().to_ascii_lowercase())
+        .unwrap_or_default();
+    let attachment = headers
+        .get(reqwest::header::CONTENT_DISPOSITION)
+        .and_then(|v| v.to_str().ok())
+        .map(|v| {
+            let v = v.trim().to_ascii_lowercase();
+            v.starts_with("attachment") || v.contains("filename")
+        })
+        .unwrap_or(false);
+    probe.verdict = if attachment {
+        LinkVerdict::Resource
+    } else if probe.mime.is_empty() {
+        LinkVerdict::Unknown
+    } else if is_page_like_mime(&probe.mime) {
+        LinkVerdict::NotResource
+    } else {
+        LinkVerdict::Resource
+    };
+    if probe.verdict == LinkVerdict::Resource {
+        probe.file_name = extract_filename(headers, url, final_url).name;
+        probe.total_bytes = head_content_length(headers);
+    }
+    probe
+}
+
+/// 网页 / 文本 / 结构化数据 / 图片类 MIME（无 attachment 时不当下载）。
+fn is_page_like_mime(mime: &str) -> bool {
+    mime.starts_with("text/")
+        || mime.starts_with("image/")
+        || matches!(
+            mime,
+            "application/json"
+                | "application/xml"
+                | "application/javascript"
+                | "application/xhtml+xml"
+        )
+        || mime.ends_with("+json")
+        || mime.ends_with("+xml")
+}
+
+#[cfg(test)]
+mod link_probe_tests {
+    use super::{LinkVerdict, classify_probe_response};
+    use reqwest::StatusCode;
+    use reqwest::header::{CONTENT_DISPOSITION, CONTENT_LENGTH, CONTENT_TYPE, HeaderMap};
+
+    fn headers(pairs: &[(reqwest::header::HeaderName, &str)]) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        for (k, v) in pairs {
+            h.insert(k.clone(), v.parse().expect("valid header value"));
+        }
+        h
+    }
+
+    #[test]
+    fn classify_probe_response_table() {
+        let ok = StatusCode::OK;
+        let cases: Vec<(&str, StatusCode, HeaderMap, LinkVerdict)> = vec![
+            (
+                "attachment",
+                ok,
+                headers(&[
+                    (CONTENT_TYPE, "text/html"),
+                    (CONTENT_DISPOSITION, "attachment; filename=\"a.zip\""),
+                ]),
+                LinkVerdict::Resource,
+            ),
+            (
+                "octet-stream",
+                ok,
+                headers(&[(CONTENT_TYPE, "application/octet-stream")]),
+                LinkVerdict::Resource,
+            ),
+            (
+                "html",
+                ok,
+                headers(&[(CONTENT_TYPE, "text/html; charset=utf-8")]),
+                LinkVerdict::NotResource,
+            ),
+            (
+                "json",
+                ok,
+                headers(&[(CONTENT_TYPE, "application/json")]),
+                LinkVerdict::NotResource,
+            ),
+            (
+                "image without attachment",
+                ok,
+                headers(&[(CONTENT_TYPE, "image/png")]),
+                LinkVerdict::NotResource,
+            ),
+            (
+                "image with attachment",
+                ok,
+                headers(&[
+                    (CONTENT_TYPE, "image/png"),
+                    (CONTENT_DISPOSITION, "attachment"),
+                ]),
+                LinkVerdict::Resource,
+            ),
+            (
+                "+xml suffix",
+                ok,
+                headers(&[(CONTENT_TYPE, "application/atom+xml")]),
+                LinkVerdict::NotResource,
+            ),
+            (
+                "non-2xx",
+                StatusCode::FORBIDDEN,
+                headers(&[(CONTENT_TYPE, "application/zip")]),
+                LinkVerdict::Unknown,
+            ),
+            (
+                "no content-type",
+                ok,
+                HeaderMap::new(),
+                LinkVerdict::Unknown,
+            ),
+        ];
+        for (name, status, h, want) in cases {
+            let got = classify_probe_response(status, &h, "https://x.test/d", "https://x.test/d");
+            assert_eq!(got.verdict, want, "case: {name}");
+        }
+    }
+
+    #[test]
+    fn resource_carries_mime_name_size_and_final_url() {
+        let h = headers(&[
+            (CONTENT_TYPE, "Application/Zip; foo=bar"),
+            (CONTENT_LENGTH, "42"),
+        ]);
+        let p = classify_probe_response(
+            StatusCode::OK,
+            &h,
+            "https://x.test/d",
+            "https://cdn.test/files/pkg.zip",
+        );
+        assert_eq!(p.verdict, LinkVerdict::Resource);
+        assert_eq!(p.mime, "application/zip");
+        assert_eq!(p.total_bytes, 42);
+        assert_eq!(p.final_url, "https://cdn.test/files/pkg.zip");
+        assert!(!p.file_name.is_empty());
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::head_content_length;
@@ -320,5 +575,72 @@ mod tests {
         // 整条 magnet 链路：GBK 编码的 dn= 应解出可读中文文件名。
         let name = extract_dn_from_magnet("magnet:?xt=urn:btih:abc&dn=%CE%C4%BC%FE.txt&tr=x");
         assert_eq!(name, "文件.txt");
+    }
+
+    fn file_info(
+        name: &str,
+        source: crate::naming::NameSource,
+        content_type: &str,
+        total: i64,
+    ) -> crate::downloader::FileInfo {
+        crate::downloader::FileInfo {
+            file_name: name.to_string(),
+            name_source: source,
+            total_bytes: total,
+            supports_range: true,
+            content_type: content_type.to_string(),
+            etag: String::new(),
+            last_modified: String::new(),
+            content_encoding_compressed: false,
+        }
+    }
+
+    #[test]
+    fn from_file_info_marks_only_disposition_names_authoritative() {
+        use crate::naming::NameSource;
+        let cd = super::ProbedMeta::from_file_info(&file_info(
+            "a.bin",
+            NameSource::Disposition,
+            "application/octet-stream",
+            42,
+        ));
+        assert_eq!(
+            (cd.file_name.as_str(), cd.name_inferred, cd.total_bytes),
+            ("a.bin", false, 42)
+        );
+        let query_cd = super::ProbedMeta::from_file_info(&file_info(
+            "b.bin",
+            NameSource::QueryDisposition,
+            "",
+            0,
+        ));
+        assert!(!query_cd.name_inferred);
+        let fallback = super::ProbedMeta::from_file_info(&file_info(
+            "download",
+            NameSource::Fallback,
+            "application/octet-stream",
+            -1,
+        ));
+        assert!(fallback.name_inferred);
+        assert_eq!(fallback.total_bytes, 0);
+    }
+
+    #[test]
+    fn from_file_info_html_page_yields_no_name_or_size() {
+        use crate::naming::NameSource;
+        for ct in [
+            "text/html",
+            "Text/HTML; charset=utf-8",
+            "application/xhtml+xml",
+        ] {
+            let meta = super::ProbedMeta::from_file_info(&file_info(
+                "login.php",
+                NameSource::Disposition,
+                ct,
+                512,
+            ));
+            assert!(meta.file_name.is_empty(), "{ct}");
+            assert_eq!(meta.total_bytes, 0, "{ct}");
+        }
     }
 }

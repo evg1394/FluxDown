@@ -4,6 +4,7 @@ import android.content.Context
 import androidx.annotation.StringRes
 import androidx.compose.runtime.Immutable
 import androidx.compose.ui.graphics.vector.ImageVector
+import com.fluxdown.app.FeatureFlags
 import com.fluxdown.app.R
 import com.fluxdown.app.feature.settings.account.accountSearchEntries
 import com.fluxdown.app.feature.settings.bt.btSearchEntries
@@ -85,8 +86,8 @@ internal fun visibleSettingsPages(state: HostState, isLocalHost: Boolean): List<
     add(SettingsPage.Ed2k)
     add(SettingsPage.Network)
     add(SettingsPage.Extensions)
-    // `ui.show_activity_webhooks` = false：首页不显示 Webhook 行（搜索仍可进入）。
-    if (state.preferences.bool("ui.show_activity_webhooks", true)) add(SettingsPage.Webhook)
+    // 功能开关关闭时无入口；开启后 `ui.show_activity_webhooks` = false 仍可隐藏首页行（搜索仍可进入）。
+    if (FeatureFlags.WEBHOOKS && state.preferences.bool("ui.show_activity_webhooks", true)) add(SettingsPage.Webhook)
     if (!isLocalHost && state.has(HostCapability.agentGateway)) add(SettingsPage.Api)
     add(SettingsPage.Diagnostics)
     add(SettingsPage.About)
@@ -117,9 +118,9 @@ internal object SettingsIndex {
     /** 全部条目，顺序同首页分类顺序（分类入口在前，其下是该页的行）。 */
     fun entries(ctx: SettingsSearchContext): List<SettingsEntry> {
         val list = ArrayList<SettingsEntry>()
-        // 搜索可进入 Webhook 页（即使首页隐藏），因此单独补上。
+        // 搜索可进入 Webhook 页（即使首页隐藏），因此单独补上；功能开关关闭时不补。
         val pages = visibleSettingsPages(ctx.state, ctx.isLocalHost).let {
-            if (SettingsPage.Webhook in it) it else it + SettingsPage.Webhook
+            if (!FeatureFlags.WEBHOOKS || SettingsPage.Webhook in it) it else it + SettingsPage.Webhook
         }
         for (page in pages.sortedBy { it.ordinal }) {
             list += category(ctx, page)

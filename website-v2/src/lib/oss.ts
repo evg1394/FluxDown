@@ -18,7 +18,7 @@ import {
   OSS_RELEASE_PREFIX,
 } from "astro:env/server";
 
-/** 未配置 AK/SK 时整条 OSS 路径关闭（下载路由回退 GitHub）。 */
+/** 未配置 AK/SK 时关闭直连 OSS；独立配置的 CDN 仍可使用 Worker 凭据回源。 */
 export const ossConfigured = !!(OSS_ACCESS_KEY_ID && OSS_ACCESS_KEY_SECRET);
 
 /**
@@ -33,6 +33,19 @@ export function releaseObjectKey(tag: string, filename: string): string {
   const component = m?.[1] ?? "app";
   const version = m?.[2] ?? tag;
   return `${OSS_RELEASE_PREFIX}/${version}/${component}/${filename}`;
+}
+
+/**
+ * 自动下载链的 CDN 入口。tag 显式携带，避免 app-v… 与 v… 共用 app 目录时
+ * 猜错 GitHub release；Worker 校验 tag 与对象键映射，不接受任意回退 URL。
+ */
+export function cdnDownloadUrl(key: string, tag: string): string | null {
+  const base = (OSS_CDN_BASE ?? "").replace(/\/+$/, "");
+  if (!base) return null;
+  const url = new URL(`${base}/${key.split("/").map(encodeURIComponent).join("/")}`);
+  url.searchParams.set("fallback", "github");
+  url.searchParams.set("tag", tag);
+  return url.toString();
 }
 
 /**

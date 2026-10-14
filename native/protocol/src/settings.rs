@@ -1,4 +1,4 @@
-//! Flutter 云同步目录的唯一 wire 键、所有权与 daemon 映射。
+//! 云同步设置的稳定 wire 键、所有权与 daemon 映射。
 
 use serde_json::Value;
 
@@ -53,9 +53,9 @@ pub const MAX_CUSTOM_THEME_ID_LEN: usize = 64;
 /// 超限条目会让整批推送被拒，因此在写入时就拦下。
 pub const MAX_SYNC_VALUE_BYTES: usize = 64 * 1024;
 
-/// 与 `lib/src/services/cloud/sync_catalog.dart` 对应的键，外加 GPUI 专属的 `ui.show_activity_*`、
+/// 保留旧客户端云同步键，另含 GPUI 专属的 `ui.show_activity_*`、
 /// `custom_categories`（自定义分类，推送时剥离各设备不同的 `saveDir`）、[`CUSTOM_THEMES_KEY`]
-/// （自定义主题集合；Flutter 拉到未知键会忽略）与 [`FILE_ICON_PACK_KEY`]（GPUI / Web 文件图标包），共 59 个。
+/// （自定义主题集合）与 [`FILE_ICON_PACK_KEY`]（GPUI / Web 文件图标包），共 59 个。
 pub const SYNC_SETTING_SPECS: &[SettingSpec] = &[
     spec!("appearance.theme_mode", Preferences),
     spec!("appearance.dark_theme", Preferences),
@@ -116,6 +116,7 @@ pub const SYNC_SETTING_SPECS: &[SettingSpec] = &[
     spec!("bt.enabled", Daemon, "bt_enabled"),
     spec!("bt.enable_dht", Daemon, "bt_enable_dht"),
     spec!("bt.enable_upnp", Daemon, "bt_enable_upnp"),
+    spec!("bt.enable_utp", Daemon, "bt_enable_utp"),
     spec!("bt.custom_trackers", Daemon, "bt_custom_trackers"),
     spec!("bt.tracker_sub_enabled", Daemon, "bt_tracker_sub_enabled"),
     spec!("bt.tracker_sub_urls", Daemon, "bt_tracker_sub_urls"),
@@ -381,6 +382,7 @@ fn boolean_key(key: &str) -> bool {
             | "bt.enabled"
             | "bt.enable_dht"
             | "bt.enable_upnp"
+            | "bt.enable_utp"
             | "bt.tracker_sub_enabled"
             | "ed2k.enable_kad"
             | "ed2k.enable_upnp"
@@ -414,7 +416,7 @@ fn integer_range(key: &str) -> (i64, i64) {
         // Flutter `Color.toARGB32()`：无符号 32 位 ARGB。
         "appearance.custom_color" => (0, i64::from(u32::MAX)),
         "download.max_concurrent_tasks" => (1, 1024),
-        "download.default_segments" => (0, 64),
+        "download.default_segments" => (0, crate::daemon_config::MAX_TASK_SEGMENTS as i64),
         "download.auto_max_connections" => (0, 128),
         "download.cdn_max_nodes" => (0, 8),
         "download.max_auto_retries" => (-1, 20),
@@ -437,14 +439,14 @@ mod tests {
 
     #[test]
     fn catalog_has_exact_unique_flutter_count_and_namespaced_daemon_mapping() {
-        assert_eq!(SYNC_SETTING_SPECS.len(), 59);
+        assert_eq!(SYNC_SETTING_SPECS.len(), 60);
         assert_eq!(
             SYNC_SETTING_SPECS
                 .iter()
                 .map(|spec| spec.key)
                 .collect::<HashSet<_>>()
                 .len(),
-            59
+            60
         );
         let spec = setting_spec("download.max_concurrent_tasks").expect("download spec");
         assert_eq!(spec.owner, SettingOwner::Daemon);

@@ -15,7 +15,7 @@ function useDefaultTitle(): string {
   const t = useT()
   const { pathname } = useLocation()
   if (pathname.startsWith('/rss')) return t('sidebarRss')
-  if (pathname.startsWith('/webhooks')) return t('webhookNavTitle')
+  if (pathname.startsWith('/webhooks')) return t('pushNavTitle')
   if (pathname.startsWith('/settings')) return t('settings')
   return t('mobileNavDownloads')
 }

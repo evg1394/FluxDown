@@ -99,6 +99,11 @@ nonisolated enum GeneralRow: String, CaseIterable, Identifiable {
         case .categories: "folder.fill"
         }
     }
+
+    /// 「入口」分组实际展示的行（Webhook 活动开关受 `FeatureFlags.webhooks` 门控）。
+    static var entriesRows: [GeneralRow] {
+        FeatureFlags.webhooks ? [.activityRss, .activityWebhooks, .activityTheme] : [.activityRss, .activityTheme]
+    }
 }
 
 // MARK: - 链接与文件打开方式

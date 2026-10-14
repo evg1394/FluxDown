@@ -23,6 +23,7 @@ import type { GroupDto, QueueDto, QueuePositionDto } from './queue';
 import type { RssSourceDto } from './rss';
 import type { SelectionRequestDto } from './selection';
 import type { TaskActivityDto, TaskDto, TaskRuntimeDto } from './task';
+import type { CloudNotifyStateDto, TaskNoticeDto } from './cloudNotify';
 import type { WebhookDeliveryDto } from './webhook';
 import type { WsServerMsg } from './ws';
 
@@ -66,6 +67,8 @@ export interface AgentSnapshot {
   linkDiscovered?: LinkDiscoveredPeer[];
   shell: ShellStatusDto;
   power: PowerStatusDto;
+  /** 旧快照缺失时视为默认（上报关、无概览）。 */
+  cloudNotify?: CloudNotifyStateDto;
 }
 
 /** `system.snapshot` 主体（`role` 相邻标记，`snapshot` 为内容）。 */
@@ -100,7 +103,9 @@ export type DaemonEvent =
   | { type: 'webhooksCleared' }
   | { type: 'runtimeStatsChanged'; data: DaemonRuntimeStatsDto }
   | { type: 'selectionPending'; data: SelectionRequestDto }
-  | { type: 'selectionResolved'; data: { requestId: string } };
+  | { type: 'selectionResolved'; data: { requestId: string } }
+  /** 任务生命周期语义事件：只供 agent 消费，不转发给 UI，不改变快照。 */
+  | { type: 'taskNotice'; data: TaskNoticeDto };
 
 /** agent 自有或转发的状态变化事件（`type` + `data` 相邻标记）。 */
 export type AgentEvent =
@@ -125,7 +130,9 @@ export type AgentEvent =
   | { type: 'shellChanged'; data: ShellStatusDto }
   | { type: 'powerChanged'; data: PowerStatusDto }
   /** 外部捕获未经确认直接建成的任务 ID（一次性通知，不进快照）。 */
-  | { type: 'captureTasksStarted'; data: string[] };
+  | { type: 'captureTasksStarted'; data: string[] }
+  /** 云端推送状态整体替换。 */
+  | { type: 'cloudNotifyChanged'; data: CloudNotifyStateDto };
 
 /** `service.event` 事件主体（`service` + `event` 相邻标记）。 */
 export type ServiceEvent =

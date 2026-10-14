@@ -11,3 +11,4 @@ fluxdown_ui_theme = { path = "../theme" }
 gpui.workspace = true
 gpui-base.workspace = true
 gpui-component.workspace = true
+qrcodegen = "1.8.0"

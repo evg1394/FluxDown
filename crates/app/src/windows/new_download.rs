@@ -8,7 +8,8 @@
 use std::{collections::HashSet, rc::Rc, sync::Arc};
 
 use fluxdown_protocol::{
-    AgentEvent, CaptureResolveParams, CloudDevice, LinkDeviceInfo, PendingCaptureDto, ServiceEvent,
+    AgentEvent, AgentSnapshot, CaptureResolveParams, CloudDevice, LinkDeviceInfo,
+    PendingCaptureDto, ServiceEvent,
 };
 use fluxdown_ui_downloads::{
     DownloadsCommand, DownloadsPort, NewDownloadContext, NewDownloadSubmission, NewDownloadView,
@@ -31,11 +32,13 @@ const NEW_DOWNLOAD_WINDOW_SIZE: gpui::Size<gpui::Pixels> = size(px(640.), px(530
 const NEW_DOWNLOAD_WINDOW_MIN_SIZE: gpui::Size<gpui::Pixels> = size(px(560.), px(440.));
 
 /// 外部捕获派发状态：当前表单 + 已交给表单的事务（agent 移除前不重复追加，
-/// 关窗忽略后也不会因列表尚未刷新而重开）；另缓存设备名册，随事件推给已打开的表单
-///（事件处理时会话实体正在更新，不能回读它）。
+/// 关窗忽略后也不会因列表尚未刷新而重开）；另缓存设备名册，随事件推给已打开的表单。
 #[derive(Default)]
 struct CaptureDispatch {
     form: Option<WeakEntity<NewDownloadView>>,
+    /// 当前表单按 daemon 未连上时的空环境打开（冷启动：agent 首个快照先于 daemon 就绪，
+    /// 不带配置 / 队列 / 运行时目录），daemon 连上后需补投影一次。
+    provisional: bool,
     handed: HashSet<String>,
     cloud_devices: Vec<CloudDevice>,
     cloud_user: Option<String>,
@@ -120,10 +123,18 @@ pub fn install_captures(cx: &mut App) {
                         .map(|session| session.user.id.as_str()),
                 );
                 sync_targets(cx);
+                refresh_provisional_context(cx, body);
                 sync_captures(cx, &body.pending_captures);
             }
         }
         SessionSignal::Event(frame) => match &frame.event {
+            // agent 先替换 daemon 快照再发布已连接，此时会话快照已带 daemon 数据。
+            ServiceEvent::Agent(AgentEvent::DaemonConnectionChanged(true)) => {
+                let latest = Desktop::global(cx).session.read(cx).latest().cloned();
+                if let Some(body) = latest.as_deref().and_then(agent_body) {
+                    refresh_provisional_context(cx, body);
+                }
+            }
             ServiceEvent::Agent(AgentEvent::CloudConnectionChanged(connection)) => {
                 cx.global_mut::<CaptureDispatch>().set_cloud_connected(
                     connection.state == fluxdown_protocol::CloudConnectionState::Connected,
@@ -210,6 +221,32 @@ fn sync_targets(cx: &mut App) {
     }
 }
 
+/// 表单按空环境打开后 daemon 已连上：以最新快照补投影保存目录 / 队列 / 线程数 / 代理等
+/// 默认值（只覆盖用户未改动的初值），之后不再跟随。
+fn refresh_provisional_context(cx: &mut App, snapshot: &AgentSnapshot) {
+    if !snapshot.daemon_connected {
+        return;
+    }
+    let form = {
+        let dispatch = cx.global::<CaptureDispatch>();
+        if !dispatch.provisional {
+            return;
+        }
+        dispatch.form.as_ref().and_then(WeakEntity::upgrade)
+    };
+    let (Some(form), Some(handle)) = (form, WindowRegistry::handle(cx, &WindowKey::NewDownload))
+    else {
+        return;
+    };
+    let context = new_download_context_from_snapshot(snapshot);
+    match handle.update(cx, |_, window, cx| {
+        form.update(cx, |form, cx| form.refresh_context(context, window, cx));
+    }) {
+        Ok(()) => cx.global_mut::<CaptureDispatch>().provisional = false,
+        Err(error) => log::debug!("view or window released before lifecycle update: {error:#}"),
+    }
+}
+
 /// 对齐 agent 的待确认列表：已消失的事务从表单移除（链接行保留为普通链接），新事务追加
 /// 进现有表单并置前；没有表单时以快照投影的环境开一个。
 fn sync_captures(cx: &mut App, pending: &[PendingCaptureDto]) {
@@ -265,6 +302,11 @@ fn open_with(cx: &mut App, context: NewDownloadContext, captures: Vec<PendingCap
     let desktop = Desktop::global(cx);
     let translator = desktop.translator.clone();
     let client = desktop.client.clone();
+    let provisional = !desktop
+        .session
+        .read(cx)
+        .agent_snapshot()
+        .is_some_and(|snapshot| snapshot.daemon_connected);
     let title = translator.read(cx).text(keys::NEW_DOWNLOAD).to_owned();
     let mut options = auxiliary_window_options(title);
     options.display_id = WindowRegistry::main_display_id(cx);
@@ -304,7 +346,9 @@ fn open_with(cx: &mut App, context: NewDownloadContext, captures: Vec<PendingCap
                 ignore_captures(form.take_captures(), &port, cx);
             })
             .detach();
-            cx.default_global::<CaptureDispatch>().form = Some(form.downgrade());
+            let dispatch = cx.default_global::<CaptureDispatch>();
+            dispatch.form = Some(form.downgrade());
+            dispatch.provisional = provisional;
             let window_view = cx.new(|cx| {
                 AuxiliaryWindowView::new(translator, keys::NEW_DOWNLOAD, form.into(), cx)
             });

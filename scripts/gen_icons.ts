@@ -23,14 +23,11 @@
  *   assets/logo/macos/
  *     app_icon_{16,32,64,128,256,512,1024}.png（app_icon_512 同时是 GPUI 裸二进制的 Dock 图标）
  *
- *   ios/Runner/Assets.xcassets/AppIcon.appiconset/
- *     Icon-App-20x20@{1x,2x,3x}.png  Icon-App-29x29@{1x,2x,3x}.png
- *     Icon-App-40x40@{1x,2x,3x}.png  Icon-App-60x60@{2x,3x}.png
- *     Icon-App-76x76@{1x,2x}.png     Icon-App-83.5x83.5@2x.png
- *     Icon-App-1024x1024@1x.png
- *
- *   android/app/src/main/res/
+ *   mobile/Android/app/src/main/res/
  *     mipmap-{mdpi,hdpi,xhdpi,xxhdpi,xxxhdpi}/ic_launcher.png
+ *
+ *   mobile/FluxDown/FluxDown/Assets.xcassets/LaunchMark.imageset/
+ *     LaunchMark@{2x,3x}.png（原生 iOS 启动画面：logo 白色箭头，112pt）
  *
  *   fluxDown/public/icon/
  *     {16,32,48,128}.png  {16,32,48,128}-disabled.png
@@ -415,42 +412,45 @@ async function main() {
   }
 
   // ──────────────────────────────────────────
-  // 4. iOS AppIcon — 15 个文件
+  // 4. 原生 iOS 启动画面标记
   // ──────────────────────────────────────────
-  console.log("\n📁 ios/Runner/Assets.xcassets/AppIcon.appiconset/");
+  // 原生 iOS 启动画面标记（Info.plist UILaunchScreen.UIImageName = LaunchMark，112pt）：
+  // 只有 logo 的箭头，改用方块底的品牌蓝着色（底色由 LaunchBackground 随系统明暗），保留 400 单位画框以便揭幕按同一几何接续。
+  // 改尺寸须同步 FluxDownApp 的 `.launchReveal(markSide:)`。
+  console.log("\n📁 mobile/FluxDown/FluxDown/Assets.xcassets/LaunchMark.imageset/");
   {
-    // { 文件名: 实际像素尺寸 }
-    const iosIcons: Record<string, number> = {
-      "Icon-App-20x20@1x.png": 20,
-      "Icon-App-20x20@2x.png": 40,
-      "Icon-App-20x20@3x.png": 60,
-      "Icon-App-29x29@1x.png": 29,
-      "Icon-App-29x29@2x.png": 58,
-      "Icon-App-29x29@3x.png": 87,
-      "Icon-App-40x40@1x.png": 40,
-      "Icon-App-40x40@2x.png": 80,
-      "Icon-App-40x40@3x.png": 120,
-      "Icon-App-60x60@2x.png": 120,
-      "Icon-App-60x60@3x.png": 180,
-      "Icon-App-76x76@1x.png": 76,
-      "Icon-App-76x76@2x.png": 152,
-      "Icon-App-83.5x83.5@2x.png": 167,
-      "Icon-App-1024x1024@1x.png": 1024,
+    const logo = readFileSync(SVG_SRC, "utf8");
+    const brand = /<rect\b[^>]*\bfill="([^"]+)"/.exec(logo)?.[1] ?? "#3B82F6";
+    const arrowOnly = Buffer.from(
+      logo
+        .replace(/<rect\b[^>]*\/>/, "")
+        .replace(/(<path\b[^>]*\bfill=")[^"]+"/, `$1${brand}"`),
+    );
+    const launchMark: Record<string, number> = {
+      "LaunchMark@2x.png": 224,
+      "LaunchMark@3x.png": 336,
     };
-    for (const [filename, pixelSize] of Object.entries(iosIcons)) {
-      const buf = await getCachedPng(pixelSize);
+    for (const [filename, pixelSize] of Object.entries(launchMark)) {
+      const buf = await sharp(arrowOnly, { density: 300 })
+        .resize(pixelSize, pixelSize, {
+          kernel: sharp.kernel.lanczos3,
+          fit: "contain",
+          background: { r: 0, g: 0, b: 0, alpha: 0 },
+        })
+        .png({ compressionLevel: 9 })
+        .toBuffer();
       await saveFile(
-        `ios/Runner/Assets.xcassets/AppIcon.appiconset/${filename}`,
+        `mobile/FluxDown/FluxDown/Assets.xcassets/LaunchMark.imageset/${filename}`,
         buf,
       );
     }
-    totalCount += Object.keys(iosIcons).length;
+    totalCount += Object.keys(launchMark).length;
   }
 
   // ──────────────────────────────────────────
   // 5. Android mipmap — 5 个 DPI 变体
   // ──────────────────────────────────────────
-  console.log("\n📁 android/app/src/main/res/ + mobile/Android/app/src/main/res/");
+  console.log("\n📁 mobile/Android/app/src/main/res/");
   {
     const androidIcons: Record<string, number> = {
       "mipmap-mdpi": 48,
@@ -461,11 +461,9 @@ async function main() {
     };
     for (const [folder, size] of Object.entries(androidIcons)) {
       const buf = await getCachedPng(size);
-      await saveFile(`android/app/src/main/res/${folder}/ic_launcher.png`, buf);
-      // 原生 Android（Compose）工程与 Flutter 移动端共用同一套启动图标
       await saveFile(`mobile/Android/app/src/main/res/${folder}/ic_launcher.png`, buf);
     }
-    totalCount += Object.keys(androidIcons).length * 2;
+    totalCount += Object.keys(androidIcons).length;
   }
 
   // ──────────────────────────────────────────

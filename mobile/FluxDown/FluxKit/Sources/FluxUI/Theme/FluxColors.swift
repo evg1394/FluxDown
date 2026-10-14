@@ -65,6 +65,10 @@ extension Color {
     public nonisolated static let fdKindArchive = fdDynamic(light: 0xA2845E, dark: 0xAC8E68)
     public nonisolated static let fdKindEbook = fdDynamic(light: 0x30B0C7, dark: 0x40C8E0)
     public nonisolated static let fdKindOther = fdDynamic(light: 0x8E8E93, dark: 0x8E8E93)
+
+    // MARK: 品牌（启动画面 / 启动揭幕：与 App 图标、`assets/logo/fluxdown_logo.svg` 同色，不随外观与强调色）
+
+    nonisolated static let fdBrand = Color(uiColor: UIColor(rgb: 0x3B82F6))
 }
 
 extension UIColor {

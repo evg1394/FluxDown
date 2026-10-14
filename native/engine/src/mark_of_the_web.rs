@@ -6,6 +6,11 @@
 //! - macOS：`com.apple.quarantine` 扩展属性；
 //! - 其它平台没有对应机制，空操作。
 //!
+//! Windows 遵循附件管理器策略「不保留附件中的区域信息」
+//! （`Policies\Attachments\SaveZoneInformation=1`，HKLM 优先于 HKCU）：命中时
+//! 不写 `Zone.Identifier`，与浏览器 / 资源管理器行为一致。策略在每次标记时读取，
+//! 改组策略后无需重启。
+//!
 //! 标记不改变文件内容，对 BT 做种 / 续传无影响。所有失败（FAT/exFAT 不支持
 //! ADS、只读介质、`xattr` 缺失）只记日志，绝不影响任务完成状态。
 
@@ -26,7 +31,14 @@ pub fn spawn_mark_downloaded(path: PathBuf, host_url: String, referrer: String) 
         return;
     }
     tokio::spawn(async move {
-        let files = match tokio::task::spawn_blocking(move || collect_files(&path)).await {
+        let collected = tokio::task::spawn_blocking(move || {
+            if !platform::policy_allows_marking() {
+                return Vec::new();
+            }
+            collect_files(&path)
+        })
+        .await;
+        let files = match collected {
             Ok(files) => files,
             Err(e) => {
                 log_info!("[motw] collect files failed: {e}");
@@ -107,6 +119,17 @@ fn sanitize_zone_url(url: &str) -> String {
     format!("{scheme}{host}{tail}")
 }
 
+/// `SaveZoneInformation` 取值：1 = 不保留区域信息（组策略「已启用」）。
+#[cfg(any(windows, test))]
+const SAVE_ZONE_INFORMATION_DISABLED: u32 = 1;
+
+/// 附件管理器策略判定：机器级（HKLM）存在即生效，否则看用户级（HKCU）；
+/// 只有显式 1 才关闭标记，未配置 / 2 / 其它值保持 Windows 默认（写入）。
+#[cfg(any(windows, test))]
+fn zone_information_allowed(machine: Option<u32>, user: Option<u32>) -> bool {
+    machine.or(user) != Some(SAVE_ZONE_INFORMATION_DISABLED)
+}
+
 /// `Zone.Identifier` 流内容：`ZoneId=3`（Internet），可带 ReferrerUrl / HostUrl。
 #[cfg(any(windows, test))]
 fn zone_identifier_content(host_url: &str, referrer: &str) -> String {
@@ -134,7 +157,43 @@ fn quarantine_value(now_secs: u64) -> String {
 
 #[cfg(windows)]
 mod platform {
-    use super::{Path, PathBuf, log_info, zone_identifier_content};
+    use super::{Path, PathBuf, log_info, zone_identifier_content, zone_information_allowed};
+    use winreg::RegKey;
+    use winreg::enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE};
+
+    const ATTACHMENTS_POLICY_KEY: &str =
+        r"Software\Microsoft\Windows\CurrentVersion\Policies\Attachments";
+
+    /// 附件管理器策略是否允许写 `Zone.Identifier`（阻塞调用，读注册表）。
+    pub(super) fn policy_allows_marking() -> bool {
+        let machine = read_save_zone_information(HKEY_LOCAL_MACHINE, "HKLM");
+        let user = read_save_zone_information(HKEY_CURRENT_USER, "HKCU");
+        let allowed = zone_information_allowed(machine, user);
+        if !allowed {
+            log_info!("[motw] SaveZoneInformation policy disables Zone.Identifier, skipped");
+        }
+        allowed
+    }
+
+    /// 读取 `SaveZoneInformation`；键 / 值不存在为未配置，其它读取错误记日志后按未配置处理。
+    fn read_save_zone_information(root: winreg::HKEY, label: &str) -> Option<u32> {
+        let key = match RegKey::predef(root).open_subkey(ATTACHMENTS_POLICY_KEY) {
+            Ok(key) => key,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+            Err(e) => {
+                log_info!("[motw] open {label} attachments policy failed: {e}");
+                return None;
+            }
+        };
+        match key.get_value::<u32, _>("SaveZoneInformation") {
+            Ok(value) => Some(value),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => {
+                log_info!("[motw] read {label} SaveZoneInformation failed: {e}");
+                None
+            }
+        }
+    }
 
     pub(super) async fn apply(files: Vec<PathBuf>, host_url: String, referrer: String) {
         let result = tokio::task::spawn_blocking(move || {
@@ -161,6 +220,11 @@ mod platform {
 #[cfg(target_os = "macos")]
 mod platform {
     use super::{PathBuf, log_info, quarantine_value};
+
+    /// macOS 没有关闭隔离标记的系统策略。
+    pub(super) fn policy_allows_marking() -> bool {
+        true
+    }
 
     /// 单次 `xattr` 调用处理的文件数（避免超长命令行，又不为每个文件起一个进程）。
     const BATCH: usize = 200;
@@ -195,6 +259,10 @@ mod platform {
 mod platform {
     use super::PathBuf;
 
+    pub(super) fn policy_allows_marking() -> bool {
+        false
+    }
+
     pub(super) async fn apply(_files: Vec<PathBuf>, _host_url: String, _referrer: String) {}
 }
 
@@ -224,6 +292,18 @@ mod tests {
         assert_eq!(sanitize_zone_url("magnet:?xt=urn:btih:abc"), "");
         assert_eq!(sanitize_zone_url("torrent-file://local"), "");
         assert_eq!(sanitize_zone_url(""), "");
+    }
+
+    #[test]
+    fn save_zone_information_policy_precedence() {
+        // 未配置 / 显式保留：写入（Windows 默认行为）。
+        assert!(zone_information_allowed(None, None));
+        assert!(zone_information_allowed(None, Some(2)));
+        // 用户级「不保留」生效。
+        assert!(!zone_information_allowed(None, Some(1)));
+        // 机器级优先于用户级，双向覆盖。
+        assert!(!zone_information_allowed(Some(1), Some(2)));
+        assert!(zone_information_allowed(Some(2), Some(1)));
     }
 
     #[test]

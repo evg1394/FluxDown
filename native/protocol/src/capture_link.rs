@@ -5,9 +5,10 @@
 use std::path::PathBuf;
 
 /// 可直接建下载任务的链接前缀（大小写不敏感）。
-const CAPTURE_SCHEMES: [&str; 7] = [
+const CAPTURE_SCHEMES: [&str; 8] = [
     "magnet:",
     "ed2k://",
+    "thunder://",
     "fluxdown:",
     "http://",
     "https://",
@@ -208,6 +209,12 @@ mod tests {
         assert_eq!(deep_link_file_name(link).as_deref(), Some("中 1.bin"));
         assert_eq!(deep_link_file_name("fluxdown:https://a.b/c"), None);
         assert_eq!(deep_link_file_name("https://a.b/c?filename=x"), None);
+    }
+
+    #[test]
+    fn thunder_links_are_capture_urls() {
+        assert!(is_capture_url("thunder://QUFodHRwOi8vYS5iL2MuemlwWlo="));
+        assert!(is_capture_url("THUNDER://x"));
     }
 
     #[test]

@@ -3,7 +3,9 @@
 //! 设置通过共享的翻译 Entity 和主题全局状态更新 UI，不依赖其他业务能力；
 //! 全部读写经 [`SettingsPort`] 注入的单一 agent 会话；导入主题也存为（随云同步的）agent 偏好。
 
+mod model;
 mod port;
+mod push_view;
 mod search;
 mod sections;
 mod store;
@@ -11,14 +13,13 @@ mod theme_library;
 mod ui;
 pub mod update_view;
 mod view;
-mod webhook_view;
 
 pub use port::{PortFuture, SettingsPort};
+pub use push_view::{PushHost, PushView, WindowAction};
 pub use search::{SettingsSearchEntry, SettingsTarget, search_index};
 pub use store::{SettingsError, SettingsErrorKind, SettingsStore};
 pub use theme_library::sync_theme_library;
 pub use view::{ActivityBarToggle, SettingsContentSlots, SettingsView};
-pub use webhook_view::WebhookView;
 
 /// 打开分类编辑对话框（`id = None` 新建；未知 id 视为新建）。供 app 把下载侧栏的
 /// 「编辑分类」接到设置能力，而不让下载 crate 依赖设置 crate。

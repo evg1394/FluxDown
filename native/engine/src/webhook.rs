@@ -217,6 +217,37 @@ impl WebhookEvent {
     }
 }
 
+/// 云端推送用的语义事件载荷（[`crate::events::EngineEvent::TaskNotice`]）。
+///
+/// 与 [`WebhookEvent`] 同源同语义，额外带一次性 `delivery_id`（云端幂等键）与毫秒时间戳。
+#[derive(Debug, Clone)]
+pub struct TaskNotice {
+    /// UUID v4，云端按 `(user, deliveryId)` 去重。
+    pub delivery_id: String,
+    /// 事件 wire 名（同 [`WebhookEventKind::wire`]）。
+    pub event: String,
+    /// Unix 毫秒。
+    pub timestamp_ms: i64,
+    pub queue_id: String,
+    pub queue_name: String,
+    /// `queue.drained` 无任务，其余事件必有。
+    pub task: Option<WebhookTask>,
+}
+
+impl TaskNotice {
+    /// 由 webhook 事件派生；生成新的投递 ID 与当前时间戳。
+    pub fn from_event(event: &WebhookEvent) -> Self {
+        Self {
+            delivery_id: uuid::Uuid::new_v4().to_string(),
+            event: event.kind.wire().to_string(),
+            timestamp_ms: chrono::Utc::now().timestamp_millis(),
+            queue_id: event.queue_id.clone(),
+            queue_name: event.queue_name.clone(),
+            task: event.task.clone(),
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // 端点
 // ---------------------------------------------------------------------------
@@ -380,6 +411,9 @@ pub enum Preset {
     Gotify,
     Bark,
     ServerChan,
+    Wecom,
+    Feishu,
+    Dingtalk,
     Telegram,
     Discord,
     Slack,
@@ -402,11 +436,14 @@ pub struct PresetInfo {
 
 impl Preset {
     /// 全部预设，顺序即 UI 网格顺序。
-    pub const ALL: [Preset; 8] = [
+    pub const ALL: [Preset; 11] = [
         Preset::Ntfy,
         Preset::Gotify,
         Preset::Bark,
         Preset::ServerChan,
+        Preset::Wecom,
+        Preset::Feishu,
+        Preset::Dingtalk,
         Preset::Telegram,
         Preset::Discord,
         Preset::Slack,
@@ -419,6 +456,9 @@ impl Preset {
             Preset::Gotify => "gotify",
             Preset::Bark => "bark",
             Preset::ServerChan => "serverchan",
+            Preset::Wecom => "wecom",
+            Preset::Feishu => "feishu",
+            Preset::Dingtalk => "dingtalk",
             Preset::Telegram => "telegram",
             Preset::Discord => "discord",
             Preset::Slack => "slack",
@@ -440,6 +480,9 @@ impl Preset {
             Preset::Gotify => "Gotify",
             Preset::Bark => "Bark",
             Preset::ServerChan => "Server酱",
+            Preset::Wecom => "企业微信",
+            Preset::Feishu => "飞书",
+            Preset::Dingtalk => "钉钉",
             Preset::Telegram => "Telegram",
             Preset::Discord => "Discord",
             Preset::Slack => "Slack",
@@ -469,6 +512,17 @@ impl Preset {
                 r#"{"title":"{event.title}","body":"{event.summary}","group":"FluxDown"}"#
             }
             Preset::ServerChan => r#"{"title":"{event.title}","desp":"{event.summary}"}"#,
+            Preset::Wecom => {
+                r#"{"msgtype":"markdown","markdown":{"content":"**{event.title}**\n{event.summary}"}}"#
+            }
+            Preset::Feishu => {
+                r#"{"msg_type":"text","content":{"text":"{event.title}\n{event.summary}"}}"#
+            }
+            // 标题含「FluxDown」以通过钉钉机器人的「自定义关键词」安全设置。
+            Preset::Dingtalk => concat!(
+                r#"{"msgtype":"markdown","markdown":{"title":"FluxDown · {event.title}","#,
+                r#""text":"**FluxDown · {event.title}**\n\n{event.summary}"}}"#
+            ),
             // chat_id 走 URL query（?chat_id=…），body 只带文本。
             Preset::Telegram => r#"{"text":"{event.title}\n{event.summary}"}"#,
             Preset::Discord => r#"{"content":"**{event.title}**\n{event.summary}"}"#,
@@ -483,11 +537,38 @@ impl Preset {
             Preset::Gotify => "https://gotify.example.com/message?token=<token>",
             Preset::Bark => "https://api.day.app/<key>",
             Preset::ServerChan => "https://sctapi.ftqq.com/<SendKey>.send",
+            Preset::Wecom => "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=<key>",
+            Preset::Feishu => "https://open.feishu.cn/open-apis/bot/v2/hook/<id>",
+            Preset::Dingtalk => "https://oapi.dingtalk.com/robot/send?access_token=<token>",
             Preset::Telegram => "https://api.telegram.org/bot<token>/sendMessage?chat_id=<id>",
             Preset::Discord => "https://discord.com/api/webhooks/...",
             Preset::Slack => "https://hooks.slack.com/services/...",
             Preset::Custom => "https://example.com/hook",
         }
+    }
+
+    /// 企业微信 / 飞书 / 钉钉的失败也回 HTTP 200，错误在响应体里：wecom / dingtalk 看
+    /// `errcode`，飞书看 `code`（旧版为 `StatusCode`）。非零即业务失败，返回带错误码与
+    /// 平台 `errmsg` / `msg` 的文本。响应体不是 JSON 或没有这些字段一律按成功处理
+    /// （不猜测未知形态）；其余预设恒返回 `None`。
+    fn business_error(self, body: &str) -> Option<String> {
+        let (code_keys, msg_keys): (&[&str], &[&str]) = match self {
+            Preset::Wecom | Preset::Dingtalk => (&["errcode"], &["errmsg"]),
+            Preset::Feishu => (&["code", "StatusCode"], &["msg", "StatusMessage"]),
+            _ => return None,
+        };
+        let value: serde_json::Value = serde_json::from_str(body.trim()).ok()?;
+        let code = code_keys
+            .iter()
+            .find_map(|key| value.get(*key).and_then(serde_json::Value::as_i64))?;
+        if code == 0 {
+            return None;
+        }
+        let message = msg_keys
+            .iter()
+            .find_map(|key| value.get(*key).and_then(serde_json::Value::as_str))
+            .unwrap_or_default();
+        Some(format!("{} error {code}: {message}", self.label()))
     }
 
     fn info(self) -> PresetInfo {
@@ -1544,8 +1625,14 @@ impl Inner {
                     let text = resp.text().await.unwrap_or_default();
                     record.response_body = truncate(&text, MAX_LOG_BODY);
                     if status.is_success() {
-                        record.success = true;
-                        record.error = String::new();
+                        // HTTP 200 但平台业务码失败（wecom / feishu / dingtalk）：配置或关键词
+                        // 错误，重试无益——记为失败、错误文本进投递日志、不重试。
+                        if let Some(error) = preset.business_error(&text) {
+                            record.error = error;
+                        } else {
+                            record.success = true;
+                            record.error = String::new();
+                        }
                         true
                     } else if status.is_redirection() {
                         record.error = match location {
@@ -2029,6 +2116,10 @@ mod tests {
     }
 
     fn spawn_mock(status_line: &'static str) -> MockServer {
+        spawn_mock_body(status_line, "ok")
+    }
+
+    fn spawn_mock_body(status_line: &'static str, body: &'static str) -> MockServer {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         let hits = Arc::new(AtomicUsize::new(0));
@@ -2054,7 +2145,8 @@ mod tests {
                 stream
                     .write_all(
                         format!(
-                            "{status_line}\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok"
+                            "{status_line}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                            body.len()
                         )
                         .as_bytes(),
                     )
@@ -2206,6 +2298,195 @@ mod tests {
         assert_eq!(record.status_code, 404);
         assert_eq!(record.attempts, 1, "4xx must not be retried");
         assert_eq!(server.hits.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn chat_presets_render_valid_json_with_their_default_templates() {
+        let event = sample_event();
+        let vars = vars_for(&event, "");
+        for preset in [Preset::Wecom, Preset::Feishu, Preset::Dingtalk] {
+            let out = render_template(preset.default_template(), &vars);
+            let parsed: serde_json::Value = serde_json::from_str(&out).unwrap_or_else(|error| {
+                panic!("{} renders invalid JSON: {error}: {out}", preset.wire())
+            });
+            match preset {
+                Preset::Wecom => {
+                    assert_eq!(parsed["msgtype"], "markdown");
+                    let content = parsed["markdown"]["content"].as_str().unwrap();
+                    assert!(content.starts_with("**Download completed**\n"), "{content}");
+                }
+                Preset::Feishu => {
+                    assert_eq!(parsed["msg_type"], "text");
+                    let text = parsed["content"]["text"].as_str().unwrap();
+                    assert!(text.starts_with("Download completed\n"), "{text}");
+                }
+                _ => {
+                    assert_eq!(parsed["msgtype"], "markdown");
+                    // 标题含关键词 FluxDown，满足钉钉「自定义关键词」安全设置。
+                    assert_eq!(parsed["markdown"]["title"], "FluxDown · Download completed");
+                    let text = parsed["markdown"]["text"].as_str().unwrap();
+                    assert!(
+                        text.starts_with("**FluxDown · Download completed**\n\n"),
+                        "{text}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn chat_presets_are_cataloged_between_serverchan_and_telegram() {
+        let ids: Vec<&str> = preset_catalog().iter().map(|p| p.id).collect();
+        let at = |id: &str| ids.iter().position(|candidate| *candidate == id).unwrap();
+        assert_eq!(at("wecom"), at("serverchan") + 1);
+        assert_eq!(at("feishu"), at("wecom") + 1);
+        assert_eq!(at("dingtalk"), at("feishu") + 1);
+        assert_eq!(at("telegram"), at("dingtalk") + 1);
+        let catalog = preset_catalog();
+        let label = |id: &str| catalog.iter().find(|p| p.id == id).unwrap().label;
+        assert_eq!(label("wecom"), "企业微信");
+        assert_eq!(label("feishu"), "飞书");
+        assert_eq!(label("dingtalk"), "钉钉");
+        let placeholder = |id: &str| catalog.iter().find(|p| p.id == id).unwrap().url_placeholder;
+        assert_eq!(
+            placeholder("wecom"),
+            "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=<key>"
+        );
+        assert_eq!(
+            placeholder("feishu"),
+            "https://open.feishu.cn/open-apis/bot/v2/hook/<id>"
+        );
+        assert_eq!(
+            placeholder("dingtalk"),
+            "https://oapi.dingtalk.com/robot/send?access_token=<token>"
+        );
+    }
+
+    #[test]
+    fn business_error_follows_each_platforms_body_shape() {
+        // 企业微信 / 钉钉：errcode != 0。
+        assert_eq!(
+            Preset::Wecom.business_error(r#"{"errcode":0,"errmsg":"ok"}"#),
+            None
+        );
+        assert_eq!(
+            Preset::Wecom
+                .business_error(r#"{"errcode":93000,"errmsg":"invalid webhook url"}"#)
+                .as_deref(),
+            Some("企业微信 error 93000: invalid webhook url")
+        );
+        assert_eq!(
+            Preset::Dingtalk
+                .business_error(r#"{"errcode":310000,"errmsg":"keywords not in content"}"#)
+                .as_deref(),
+            Some("钉钉 error 310000: keywords not in content")
+        );
+        // 飞书：code（或旧版 StatusCode）!= 0，文本取 msg。
+        assert_eq!(
+            Preset::Feishu.business_error(
+                r#"{"StatusCode":0,"StatusMessage":"success","code":0,"msg":"success"}"#
+            ),
+            None
+        );
+        assert_eq!(
+            Preset::Feishu
+                .business_error(r#"{"code":19024,"msg":"Key Words Not Found"}"#)
+                .as_deref(),
+            Some("飞书 error 19024: Key Words Not Found")
+        );
+        assert_eq!(
+            Preset::Feishu
+                .business_error(r#"{"StatusCode":9499,"StatusMessage":"Bad Request"}"#)
+                .as_deref(),
+            Some("飞书 error 9499: Bad Request")
+        );
+        // 非 JSON / 缺字段按成功处理；其余预设永不解析响应体。
+        assert_eq!(Preset::Wecom.business_error("ok"), None);
+        assert_eq!(Preset::Feishu.business_error(r#"{"data":{}}"#), None);
+        assert_eq!(Preset::Dingtalk.business_error(""), None);
+        for preset in [Preset::Ntfy, Preset::Bark, Preset::Telegram, Preset::Custom] {
+            assert_eq!(preset.business_error(r#"{"errcode":1,"code":1}"#), None);
+        }
+    }
+
+    fn chat_spec(preset: &str, addr: std::net::SocketAddr) -> EndpointSpec {
+        EndpointSpec {
+            id: format!("e-{preset}"),
+            preset: preset.to_string(),
+            url: format!("http://{addr}/hook"),
+            allow_http: true,
+            ..Default::default()
+        }
+    }
+
+    /// HTTP 200 + 业务错误码：记为失败、错误文本进投递日志、只尝试一次（不重试）。
+    #[tokio::test]
+    async fn chat_preset_business_failure_is_recorded_and_not_retried() {
+        for (preset, body, expected) in [
+            (
+                "wecom",
+                r#"{"errcode":93000,"errmsg":"invalid webhook url"}"#,
+                "93000",
+            ),
+            (
+                "dingtalk",
+                r#"{"errcode":310000,"errmsg":"keywords not in content"}"#,
+                "310000",
+            ),
+            (
+                "feishu",
+                r#"{"code":19024,"msg":"Key Words Not Found"}"#,
+                "19024",
+            ),
+        ] {
+            let server = spawn_mock_body("HTTP/1.1 200 OK", body);
+            let d = dispatcher();
+            let record = d
+                .inner
+                .deliver(
+                    &chat_spec(preset, server.addr),
+                    &WebhookEvent::sample(),
+                    MAX_ATTEMPTS,
+                )
+                .await;
+            assert!(!record.success, "{preset} must fail");
+            assert_eq!(record.status_code, 200);
+            assert_eq!(
+                record.attempts, 1,
+                "{preset} business errors are not retried"
+            );
+            assert!(record.error.contains(expected), "{}", record.error);
+            assert_eq!(server.hits.load(Ordering::SeqCst), 1);
+            assert!(record.response_body.contains(expected));
+        }
+    }
+
+    #[tokio::test]
+    async fn chat_preset_business_success_and_other_presets_ignore_the_body() {
+        let ok = spawn_mock_body("HTTP/1.1 200 OK", r#"{"errcode":0,"errmsg":"ok"}"#);
+        let d = dispatcher();
+        let record = d
+            .inner
+            .deliver(
+                &chat_spec("wecom", ok.addr),
+                &WebhookEvent::sample(),
+                MAX_ATTEMPTS,
+            )
+            .await;
+        assert!(record.success, "{}", record.error);
+        assert_eq!(record.attempts, 1);
+
+        // 其余预设行为不变：HTTP 2xx 即成功，即便响应体里恰好有 errcode。
+        let other = spawn_mock_body("HTTP/1.1 200 OK", r#"{"errcode":5,"errmsg":"x"}"#);
+        let record = d
+            .inner
+            .deliver(
+                &chat_spec("bark", other.addr),
+                &WebhookEvent::sample(),
+                MAX_ATTEMPTS,
+            )
+            .await;
+        assert!(record.success, "{}", record.error);
     }
 
     /// 5xx 会重试（与 4xx 相反）。跑 2 次尝试（一次 2s 退避）而不是完整的

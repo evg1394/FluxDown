@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 系统启动画面图标（windowSplashScreenAnimatedIcon）：assets/logo/fluxdown_logo.svg 的箭头，品牌蓝，
+     底色 = canvas（随系统明暗；App 内强制明暗时 HomeActivity 经 setSplashScreenTheme 切换）。
+     主题强调色无法写进静态资源：FluxLaunchReveal 在吸气段从品牌蓝过渡到强调色。
+     logo 画框（400 单位）占画布 40%（300..700），落在系统 2/3 直径圆形遮罩内；比例必须与
+     HomeActivity.SPLASH_MARK_FRACTION 一致，FluxLaunchReveal 据此从系统画面像素级接续。 -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="288dp"
+    android:height="288dp"
+    android:viewportWidth="1000"
+    android:viewportHeight="1000">
+    <group
+        android:translateX="244"
+        android:translateY="244">
+        <path
+            android:fillColor="#3B82F6"
+            android:pathData="M226,131 Q226,119 238,119 L274,119 Q286,119 286,131 L286,296 L331,251 Q340,242 349,251 L363,265 Q372,274 363,283 L265,381 Q256,390 247,381 L149,283 Q140,274 149,265 L163,251 Q172,242 181,251 L226,296 Z" />
+    </group>
+</vector>

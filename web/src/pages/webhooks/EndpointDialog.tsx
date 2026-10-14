@@ -16,7 +16,7 @@ import type { OptionsState } from './EndpointOptions'
 import { HeadersEditor } from './HeadersEditor'
 import type { HeaderRow } from './HeadersEditor'
 import { RequestPreview } from './RequestPreview'
-import { DEFAULT_EVENTS, PRESET_CUSTOM, previewRequest, urlErrorKey } from './template'
+import { DEFAULT_EVENTS, PRESET_CUSTOM, previewRequest, urlErrorKey, urlHintKey } from './template'
 import type { RunWrite } from './write'
 
 /** Radix Select 不接受空 value，「全部队列」（queueId=""）用哨兵映射。 */
@@ -91,7 +91,7 @@ export function EndpointDialog({
   const canSave = name.trim() !== '' && url.trim() !== '' && urlError === null
   const canTest = !testing && url.trim() !== ''
 
-  /** 草稿 → 模型（与 Dart `_draft` 同序同规则）。 */
+  /** 草稿 → 模型。 */
   const buildDraft = (): EndpointSpec => {
     const headerMap: Record<string, string> = {}
     for (const row of headers) {
@@ -266,7 +266,7 @@ export function EndpointDialog({
               label={t('webhookFieldUrl')}
               htmlFor="webhook-url"
               error={urlTouched && urlError ? t(urlError) : undefined}
-              hint={t(preset === 'ntfy' ? 'webhookUrlHintNtfy' : 'webhookUrlHint')}
+              hint={t(urlHintKey(preset))}
             >
               <Input
                 id="webhook-url"

@@ -23,10 +23,10 @@ use gpui_component::{
     v_flex,
 };
 
-use super::code_step;
 use super::email::is_valid_email;
 use super::login::{self, parse_send_code};
 use super::password::{PasswordIssue, check_new_password};
+use super::{code_step, password_field};
 use crate::errors::{ErrorContext, error_text};
 use crate::verification::{CodeChallenge, spawn_ticker};
 use crate::{AccountCommand, AccountPort, t};
@@ -73,6 +73,8 @@ pub(crate) fn open(
         let code = cx.new(|cx| InputState::new(window, cx));
         let new_password = cx.new(|cx| InputState::new(window, cx).masked(true));
         let confirm = cx.new(|cx| InputState::new(window, cx).masked(true));
+        password_field::restrict_to_ascii(&new_password, window, cx);
+        password_field::restrict_to_ascii(&confirm, window, cx);
         for input in [&email_input, &code, &new_password, &confirm] {
             cx.subscribe_in(
                 input,
@@ -119,6 +121,8 @@ pub(crate) fn open(
                 .keyboard(!submitting)
                 // 点遮罩不关闭：误触会丢掉已输入的内容与验证码。
                 .overlay_closable(false)
+                // 回车由输入框 `PressEnter` 提交；默认 Confirm 会抢先关窗。
+                .on_ok(|_, _, _| false)
                 .on_close(move |_, _, cx| on_close.update(cx, |this, _| this.closed = true))
                 .content(move |body, _, _| body.child(content.clone()))
         }

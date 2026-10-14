@@ -139,6 +139,12 @@ pub enum ErrorReason {
     GatewayPortInUse,
     /// API 服务切换：新服务未通过启动验证或配置无法保存，已保留原服务。
     GatewayRestartFailed,
+    /// 云端推送：渠道数已达套餐上限。
+    NotifyChannelLimit,
+    /// 云端推送：当前套餐（含用户级覆盖）未开通云端推送。
+    NotifyDisabled,
+    /// 云端推送：渠道配置无效（Device Key / 主题 / 机器人地址不合法，或该种类暂不可用）。
+    NotifyTargetInvalid,
     /// 对端发送了本端不认识的原因。
     #[serde(other)]
     Unknown,

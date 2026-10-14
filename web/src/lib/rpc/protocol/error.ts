@@ -78,6 +78,9 @@ export type ErrorReason =
   | 'repairNotApplicable'
   | 'gatewayPortInUse'
   | 'gatewayRestartFailed'
+  | 'notifyChannelLimit'
+  | 'notifyDisabled'
+  | 'notifyTargetInvalid'
   | 'unknown';
 
 /** `error.data`：应用错误的机器可读详情。 */

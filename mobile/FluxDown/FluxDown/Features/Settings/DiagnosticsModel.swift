@@ -26,7 +26,7 @@ final class DiagnosticsModel {
     /// 点过「运行诊断」（汇总卡据此区分「尚未运行」）。
     private(set) var hasRun = false
 
-    @ObservationIgnored private let log = Logger(subsystem: "com.fluxdown.FluxDown", category: "diagnostics")
+    @ObservationIgnored private let log = Logger(subsystem: "com.fluxdown.app", category: "diagnostics")
 
     var isBusy: Bool { isRunning || repairingTag != nil }
 
