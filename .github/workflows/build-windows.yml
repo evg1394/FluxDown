@@ -3,7 +3,7 @@ name: Build Windows Release
 on:
   push:
     branches:
-      - "v0.5.6"
+      - "v0.6.0"
     tags:
       - "v*"
 
