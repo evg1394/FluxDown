@@ -23,7 +23,7 @@ use crate::http_client::HttpClientError;
 /// 官方站点，按优先级：主域名在前，旧域名在后；两者长期并存，任一失效时自动换用另一个。
 const DEFAULT_API_BASES: [&str; 2] = ["https://fluxdown.com", "https://fluxdown.zerx.dev"];
 /// 未检查前（初始状态）展示的发布页。检查后改用胜出站点的 `/changelog`。
-pub(super) const RELEASE_PAGE_URL: &str = "https://fluxdown.com/changelog";
+pub(super) const RELEASE_PAGE_URL: &str = "https://github.com/evg1394/FluxDown/releases";
 /// 首选站点在此时长内无结果，才并行请求下一个站点（避免每次都双发请求）。
 pub(super) const FALLBACK_STAGGER: Duration = Duration::from_secs(3);
 const CHANGELOG_PER_PAGE: u32 = 50;
@@ -62,6 +62,11 @@ pub(super) struct Endpoint {
 
 impl Endpoint {
     pub(super) fn resolve() -> Self {
+        // Fork builds must never query the upstream release API. Until the fork exposes
+        // a compatible update API, disable network update checks rather than leak to upstream.
+        if option_env!("FLUXDOWN_FORK_BUILD").is_some() {
+            return Self::with_bases(&[], false, FALLBACK_STAGGER);
+        }
         #[cfg(debug_assertions)]
         if let Ok(base) = std::env::var("FLUXDOWN_UPDATE_BASE_URL") {
             let base = base.trim().trim_end_matches('/');
