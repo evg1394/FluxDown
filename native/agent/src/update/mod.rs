@@ -386,6 +386,24 @@ impl UpdateService {
         silent: bool,
     ) -> Result<UpdateStatusDto, UpdateError> {
         let channel = normalize_channel(channel)?;
+
+        // Fork builds must never query the official FluxDown release service.
+        // Until a fork-specific updater is configured, direct users to this fork's releases.
+        if option_env!("FLUXDOWN_FORK_BUILD").is_some() {
+            return Ok(self.mutate(|core| {
+                if !matches!(core.status.phase, UpdatePhase::Downloading | UpdatePhase::Installing) {
+                    core.status.phase = UpdatePhase::UpToDate;
+                    core.status.current_version = self.current_version.clone();
+                    core.status.latest_version = self.current_version.clone();
+                    core.status.release_page_url =
+                        "https://github.com/evg1394/FluxDown/releases".to_owned();
+                    core.status.failure = None;
+                    core.status.error_detail.clear();
+                    core.status.notes.clear();
+                }
+                core.status.clone()
+            }));
+        }
         let _gate = match self.check_gate.try_lock() {
             Ok(gate) => gate,
             Err(_) => {
