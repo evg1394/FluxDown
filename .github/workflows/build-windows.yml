@@ -4,6 +4,15 @@ on:
   push:
     branches:
       - "sync-upstream-2026-10-23"
+    paths:
+      - "assets/i18n/**"
+      - "installer/windows/**"
+      - "native/**"
+      - "crates/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "build.rs"
+      - ".github/workflows/build-windows.yml"
     tags:
       - "v*"
 
@@ -16,6 +25,11 @@ on:
 
 permissions:
   contents: write
+
+# Do not let parallel commits race while moving/updating the same v0.6.1 release tag.
+concurrency:
+  group: windows-ru-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   build:
