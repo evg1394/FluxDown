@@ -74,16 +74,22 @@ Name: "chinesesimplified"; MessagesFile: "compiler:Languages\ChineseSimplified.i
 
 [CustomMessages]
 english.OtherTasks=Other:
+russian.OtherTasks=Дополнительно:
 chinesesimplified.OtherTasks=其他：
 english.FileAssociations=File associations:
+russian.FileAssociations=Ассоциации файлов:
 chinesesimplified.FileAssociations=文件关联：
 english.LaunchOnStartup=Launch at system startup
+russian.LaunchOnStartup=Запускать при старте системы
 chinesesimplified.LaunchOnStartup=开机时自动启动
 english.TorrentAssoc=Associate .torrent files with FluxDown
+russian.TorrentAssoc=Связать файлы .torrent с FluxDown
 chinesesimplified.TorrentAssoc=将 .torrent 文件关联到 FluxDown
 english.LegacyAllUsersFound=An older FluxDown installed for all users was found in:%n%1%n%nFluxDown now installs for the current user only, so future installs and updates no longer need administrator rights. Setup will remove the old copy once; Windows will ask for administrator permission this one time. The old copy is removed for every account on this PC (other accounts can install their own copy). Your downloads and settings are kept.
+russian.LegacyAllUsersFound=Обнаружена старая версия FluxDown, установленная для всех пользователей:%n%1%n%nТеперь FluxDown устанавливается только для текущего пользователя, поэтому дальнейшая установка и обновления не потребуют прав администратора. Установщик один раз удалит старую копию; Windows запросит права администратора только на этот раз. Старая копия будет удалена для всех учётных записей этого компьютера (другие пользователи смогут установить её заново). Загрузки и настройки сохранятся.
 chinesesimplified.LegacyAllUsersFound=检测到为所有用户安装的旧版 FluxDown：%n%1%n%nFluxDown 现改为仅为当前用户安装，此后安装和更新都不再需要管理员权限。安装程序需要先卸载旧版本一次，Windows 会为此请求一次管理员权限。旧副本会对本机所有帐户移除（其他帐户可各自重新安装）。下载任务与设置会保留。
 english.LegacyAllUsersRemoveFailed=The older FluxDown installed for all users in %1 could not be removed. Uninstall it from Windows Settings > Apps (administrator rights required), then run this setup again.
+russian.LegacyAllUsersRemoveFailed=Не удалось удалить старую версию FluxDown, установленную для всех пользователей в каталоге %1. Удалите её в разделе «Параметры Windows → Приложения» (потребуются права администратора), затем запустите установщик ещё раз.
 chinesesimplified.LegacyAllUsersRemoveFailed=未能移除 %1 中为所有用户安装的旧版 FluxDown。请在 Windows 设置 > 应用中卸载它（需要管理员权限），然后重新运行本安装程序。
 
 [Tasks]
