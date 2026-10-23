@@ -81,6 +81,7 @@ jobs:
         shell: bash
         env:
           FLUXDOWN_APP_VERSION: ${{ steps.version.outputs.VERSION }}
+          FLUXDOWN_FORK_BUILD: "1"
         run: |
           cargo build --locked --release \
             --target x86_64-pc-windows-msvc \
