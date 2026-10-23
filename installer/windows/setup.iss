@@ -69,6 +69,7 @@ UninstallDisplayName={#MyAppName}
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
+Name: "russian"; MessagesFile: "compiler:Languages\Russian.isl"
 Name: "chinesesimplified"; MessagesFile: "compiler:Languages\ChineseSimplified.isl"
 
 [CustomMessages]
