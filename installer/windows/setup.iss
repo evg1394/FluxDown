@@ -69,6 +69,7 @@ UninstallDisplayName={#MyAppName}
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
+Name: "russian"; MessagesFile: "compiler:Languages\Russian.isl"
 Name: "chinesesimplified"; MessagesFile: "compiler:Languages\ChineseSimplified.isl"
 
 [CustomMessages]
@@ -85,6 +86,12 @@ chinesesimplified.LegacyAllUsersFound=检测到为所有用户安装的旧版 Fl
 english.LegacyAllUsersRemoveFailed=The older FluxDown installed for all users in %1 could not be removed. Uninstall it from Windows Settings > Apps (administrator rights required), then run this setup again.
 chinesesimplified.LegacyAllUsersRemoveFailed=未能移除 %1 中为所有用户安装的旧版 FluxDown。请在 Windows 设置 > 应用中卸载它（需要管理员权限），然后重新运行本安装程序。
 
+russian.OtherTasks=Прочие:
+russian.FileAssociations=Ассоциации файлов:
+russian.LaunchOnStartup=Запускать при входе в систему
+russian.TorrentAssoc=Связать файлы .torrent с FluxDown
+russian.LegacyAllUsersFound=Обнаружена старая версия FluxDown, установленная для всех пользователей:%n%1%n%nТеперь FluxDown устанавливается только для текущего пользователя, поэтому дальнейшие установки и обновления не потребуют прав администратора. Установщик один раз удалит старую копию; Windows запросит права администратора. Старая копия будет удалена для всех учётных записей этого компьютера (другие пользователи смогут установить свою копию). Загрузки и настройки сохранятся.
+russian.LegacyAllUsersRemoveFailed=Не удалось удалить старую версию FluxDown для всех пользователей из %1. Удалите её в разделе «Параметры Windows» → «Приложения» (потребуются права администратора), затем снова запустите установщик.
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
 Name: "launchonstartup"; Description: "{cm:LaunchOnStartup}"; GroupDescription: "{cm:OtherTasks}"; Flags: unchecked
