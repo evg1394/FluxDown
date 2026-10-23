@@ -400,6 +400,12 @@ impl UpdateService {
                     core.status.failure = None;
                     core.status.error_detail.clear();
                     core.status.notes.clear();
+                    core.status.has_update = false;
+                    core.status.asset_name.clear();
+                    core.status.asset_size = 0;
+                    core.status.downloaded_bytes = 0;
+                    core.status.download_url.clear();
+                    core.status.checked_at_ms = now_ms();
                 }
                 core.status.clone()
             }));
